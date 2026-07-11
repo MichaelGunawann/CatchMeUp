@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #f7f7f7;
+  --surface: #ffffff;
+  --foreground: #1f2937;
+  --muted: #6b7280;
+  --border: #e5e7eb;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  min-height: 100vh;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: "DIN Next Rounded", "Nunito Sans", "SF Pro Rounded", ui-rounded,
+    system-ui, sans-serif;
+  font-feature-settings: "ss01" on, "cv01" on;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+::selection {
+  background: #cfe3ff;
+  color: #1f2937;
+}
+
+.page-shell {
+  min-height: 100vh;
+}
+
+.subtle-grid {
+  background-image:
+    linear-gradient(rgba(229, 231, 235, 0.55) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(229, 231, 235, 0.55) 1px, transparent 1px);
+  background-size: 32px 32px;
+  background-position: -1px -1px;
+}
