@@ -37,14 +37,16 @@ const roleNotifications = {
   admin: adminNotifications
 };
 
-// ── Catch Up Logo SVG ────────────────────────────────────────────────────────
-function CatchUpLogo({ size = 28 }: { size?: number }) {
+// ── Catch Up Logo ────────────────────────────────────────────────────────────
+function CatchUpLogo({ className }: { className?: string }) {
   return (
-    <svg width={size} height={size} viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
-      <rect width="32" height="32" rx="8" fill="#2563EB" />
-      <path d="M22 10.5H16C12.962 10.5 10.5 12.962 10.5 16C10.5 19.038 12.962 21.5 16 21.5H22" stroke="white" strokeWidth="2" strokeLinecap="round" fill="none" />
-      <path d="M16.5 13L13.5 16.5H17.5L14.5 20" stroke="#93C5FD" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-    </svg>
+    // eslint-disable-next-line @next/next/no-img-element
+    <img
+      src="/logo.png"
+      alt="Catch Up"
+      className={className}
+      draggable={false}
+    />
   );
 }
 
@@ -65,14 +67,11 @@ export function AppShell({
       {/* ── Sidebar ── */}
       <aside className="sticky top-0 hidden h-screen w-[256px] shrink-0 flex-col border-r border-border bg-surface lg:flex">
         {/* Brand */}
-        <div className="flex h-[58px] shrink-0 items-center gap-3 border-b border-border px-4">
-          <Link href={`/${role}/dashboard`} className="flex items-center gap-2.5 min-w-0">
-            <CatchUpLogo size={32} />
-            <div className="min-w-0">
-              <div className="text-[14px] font-bold leading-none text-ink tracking-tight">Catch Up</div>
-              <div className="text-[10px] text-ink-tertiary mt-[3px] truncate">{meta.label}</div>
-            </div>
+        <div className="flex shrink-0 flex-col items-center border-b border-border px-4 py-4 gap-1">
+          <Link href={`/${role}/dashboard`} className="flex flex-col items-center">
+            <CatchUpLogo className="w-[10vw] max-w-[140px] min-w-[80px] object-contain drop-shadow-sm" />
           </Link>
+          <div className="text-[10px] font-semibold text-ink-tertiary tracking-wide">{meta.label}</div>
         </div>
 
         {/* Nav */}
