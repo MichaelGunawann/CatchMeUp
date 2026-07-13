@@ -503,32 +503,10 @@ export function TopicBar({
         <span className={cn("text-[12px] font-bold tabular-nums shrink-0", textColor)}>{value}%</span>
       </div>
       <div className="h-1.5 rounded-full bg-border overflow-hidden">
-        <div className={cn("h-full rounded-full transition-all", barColor)} style={{ width: `${value}%` }} />
-      </div>
-    </div>
-  );
-}
-
-// ─── Concept Bar ──────────────────────────────────────────────────────────────
-
-export function ConceptBar({
-  label,
-  value,
-  outOf,
-}: {
-  label: string;
-  value: number;
-  outOf: number;
-}) {
-  const pct = Math.round((value / outOf) * 100);
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between">
-        <span className="text-[12px] text-ink-secondary truncate pr-2">{label}</span>
-        <span className="text-[12px] font-semibold text-ink tabular-nums">{value}/{outOf}</span>
-      </div>
-      <div className="h-1 rounded-full bg-border overflow-hidden">
-        <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
+        <div
+          role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={value} aria-label={label}
+          className={cn("h-full rounded-full transition-all", barColor)} style={{ width: `${value}%` }}
+        />
       </div>
     </div>
   );
@@ -564,7 +542,7 @@ export function SimpleChart({
           const pct = (v / max) * 100;
           return (
             <div key={i} className="flex-1 flex flex-col items-center gap-1">
-              <div className="w-full rounded-t-sm bg-primary/20 relative overflow-hidden" style={{ height: 60 }}>
+              <div className="w-full rounded-t-sm bg-primary/20 relative overflow-hidden h-[3.75rem]">
                 <div
                   className="absolute bottom-0 w-full bg-primary rounded-t-sm transition-all"
                   style={{ height: `${pct}%` }}
@@ -630,7 +608,7 @@ export function ScoreCircle({ score, size = 80 }: { score: number; size?: number
   const color = score >= 80 ? "#059669" : score >= 65 ? "#2563EB" : score >= 50 ? "#D97706" : "#EF4444";
 
   return (
-    <div className="relative flex items-center justify-center" style={{ width: size, height: size }}>
+    <div role="img" aria-label={`Nilai ${score} dari 100`} className="relative flex items-center justify-center" style={{ width: size, height: size }}>
       <svg width={size} height={size} viewBox="0 0 70 70">
         <circle cx="35" cy="35" r={radius} fill="none" stroke="#E2E8F0" strokeWidth="5" />
         <circle
@@ -851,7 +829,7 @@ export function ChatBubble({
 
 export function TypingIndicator() {
   return (
-    <div className="flex items-center gap-2.5">
+    <div role="status" aria-label="AI sedang mengetik" className="flex items-center gap-2.5">
       <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary text-white">
         <Sparkles className="h-3.5 w-3.5" />
       </div>
@@ -911,7 +889,9 @@ export function MaterialCard({
   status,
   aiProcessed,
   questionsGenerated,
+  isProcessing,
   onClick,
+  onProcessAI,
 }: {
   title: string;
   type: string;
@@ -921,7 +901,9 @@ export function MaterialCard({
   status: string;
   aiProcessed: boolean;
   questionsGenerated: number;
+  isProcessing?: boolean;
   onClick?: () => void;
+  onProcessAI?: () => void;
 }) {
   const statusStyle = {
     Aktif: { bg: "bg-success-light", text: "text-success", dot: "bg-success" },
@@ -956,8 +938,23 @@ export function MaterialCard({
               {questionsGenerated} soal
             </span>
           )}
-          {!aiProcessed && (
-            <span className="text-[11px] text-ink-tertiary">Belum diproses AI</span>
+          {!aiProcessed && isProcessing && (
+            <span className="flex items-center gap-1 text-[11px] text-primary font-medium">
+              <span className="h-2.5 w-2.5 rounded-full border-[1.5px] border-primary border-t-transparent animate-spin inline-block" />
+              Memproses AI...
+            </span>
+          )}
+          {!aiProcessed && !isProcessing && (
+            onProcessAI ? (
+              <button
+                onClick={e => { e.stopPropagation(); onProcessAI(); }}
+                className="flex items-center gap-1 text-[11px] font-semibold text-primary hover:underline"
+              >
+                <Sparkles className="h-3 w-3" />Proses dengan AI
+              </button>
+            ) : (
+              <span className="text-[11px] text-ink-tertiary">Belum diproses AI</span>
+            )
           )}
         </div>
       </div>
@@ -1110,7 +1107,7 @@ export function QuestionReviewCard({
         <p className="text-[10px] text-ink-tertiary mt-1.5">{question.sourceRef}</p>
       </div>
       <div className="flex gap-2 pt-1">
-        {onApprove && <Button variant="default" className="flex-1 h-8 text-[12px]" onClick={onApprove}>Setujui</Button>}
+        {onApprove && <Button variant="success" className="flex-1 h-8 text-[12px]" onClick={onApprove}>Setujui</Button>}
         {onEdit && <Button variant="outline" className="h-8 text-[12px]" onClick={onEdit}>Edit</Button>}
         {onReject && <Button variant="danger" className="h-8 text-[12px]" onClick={onReject}>Tolak</Button>}
       </div>

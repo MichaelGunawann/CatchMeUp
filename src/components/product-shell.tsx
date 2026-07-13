@@ -65,7 +65,7 @@ export function AppShell({
   return (
     <div className="flex min-h-screen bg-background text-ink">
       {/* ── Sidebar ── */}
-      <aside className="sticky top-0 hidden h-screen w-[256px] shrink-0 flex-col border-r border-border bg-surface lg:flex">
+      <aside className="sticky top-0 hidden h-screen w-[clamp(200px,18vw,280px)] shrink-0 flex-col border-r border-border bg-surface lg:flex">
         {/* Brand */}
         <div className="flex shrink-0 flex-col items-center border-b border-border px-4 py-4 gap-1">
           <Link href={`/${role}/dashboard`} className="flex flex-col items-center">
@@ -96,7 +96,7 @@ export function AppShell({
                   href={item.href}
                   aria-current={active ? "page" : undefined}
                   className={cn(
-                    "group flex h-[34px] items-center gap-2.5 rounded-[6px] px-2.5 text-[13px] font-medium transition-all duration-150",
+                    "group flex h-9 items-center gap-2.5 rounded-[6px] px-2.5 text-[13px] font-medium transition-all duration-150",
                     active
                       ? "bg-primary/10 text-primary font-semibold"
                       : "text-ink-secondary hover:bg-ink/[0.05] hover:text-ink"
@@ -178,9 +178,9 @@ export function AppShell({
       <div className="min-w-0 flex-1 flex flex-col">
         {/* Top header */}
         <header className="sticky top-0 z-30 border-b border-border bg-surface/95 backdrop-blur-sm">
-          <div className="mx-auto flex h-[58px] max-w-[1400px] items-center justify-between gap-4 px-6">
+          <div className="mx-auto flex h-14 max-w-[90rem] items-center justify-between gap-4 px-6">
             {/* Search */}
-            <div className="hidden min-w-[240px] max-w-xs items-center gap-2 rounded-[8px] border border-border bg-background px-3 py-1.5 md:flex">
+            <div className="hidden w-60 max-w-xs items-center gap-2 rounded-[8px] border border-border bg-background px-3 py-1.5 md:flex">
               <Search className="h-3.5 w-3.5 shrink-0 text-ink-tertiary" aria-hidden="true" />
               <Input
                 type="search"
@@ -191,15 +191,6 @@ export function AppShell({
             </div>
 
             <div className="ml-auto flex items-center gap-2">
-              {/* AI status badge */}
-              <div className="hidden items-center gap-1.5 rounded-full border border-primary/20 bg-primary-soft px-2.5 py-1 sm:flex">
-                <span className="relative flex h-1.5 w-1.5">
-                  <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary opacity-60" />
-                  <span className="relative h-1.5 w-1.5 rounded-full bg-primary" />
-                </span>
-                <span className="text-[11px] font-semibold text-primary-dark">AI aktif</span>
-              </div>
-
               <NotificationsMenu role={role} />
 
               {/* User chip */}
@@ -252,7 +243,7 @@ export function AppShell({
         </header>
 
         {/* Page content */}
-        <main className="flex-1 mx-auto w-full max-w-[1400px] px-6 py-7">{children}</main>
+        <main className="flex-1 mx-auto w-full max-w-[90rem] px-6 py-7">{children}</main>
       </div>
     </div>
   );
@@ -265,7 +256,7 @@ function NotificationsMenu({ role }: { role: Role }) {
   return (
     <Dropdown
       align="end"
-      panelClassName="w-[380px] p-0"
+      panelClassName="w-[23.75rem] p-0"
       trigger={({ toggle, open }) => (
         <button
           type="button"

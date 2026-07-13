@@ -12,7 +12,9 @@ const buttonVariants = cva(
         secondary: "bg-primary-soft text-primary-dark hover:bg-primary-soft/80",
         outline: "border border-border bg-surface text-ink hover:bg-background",
         ghost: "text-ink-secondary hover:bg-background hover:text-ink",
-        danger: "bg-danger text-white hover:bg-danger/90"
+        danger: "bg-danger text-white hover:bg-danger/90",
+        success: "bg-success text-white shadow-[0_4px_12px_rgba(5,150,105,0.2)] hover:bg-success/90",
+        amber: "bg-warning text-white shadow-[0_4px_12px_rgba(217,119,6,0.2)] hover:bg-warning/90"
       },
       size: {
         sm: "h-9 px-3 text-xs",

@@ -33,9 +33,6 @@ export const masteryTone: Record<MasteryLevel, "success" | "primary" | "warning"
   Mahir: "success", Berkembang: "primary", "Perlu Bantuan": "warning", "Belum Diukur": "neutral"
 };
 
-export const statusTone: Record<StudentStatus, "success" | "warning" | "danger"> = {
-  "On Track": "success", "Need Review": "warning", "At Risk": "danger"
-};
 
 // ── School ─────────────────────────────────────────────────────────────
 export type School = { id: string; name: string; city: string; province: string; npsn: string; since: number };
@@ -385,7 +382,7 @@ export const suggestedPrompts = [
   "Apa ibu kota Prancis?",
 ];
 
-export const NOT_COVERED_MESSAGE = "Topik ini tidak tercakup dalam materi yang disediakan gurumu. Coba tanya tentang materi Matematika XI yang sudah diunggah.";
+const NOT_COVERED_MESSAGE = "Topik ini tidak tercakup dalam materi yang disediakan gurumu. Coba tanya tentang materi Matematika XI yang sudah diunggah.";
 
 const groundedReplies: { match: RegExp; content: string; sources: string[] }[] = [
   { match: /diskriminan|discriminant/i, content: "Dari Modul Matematika hal. 18: Diskriminan D = b² − 4ac. Jika D > 0 → dua akar real berbeda. Jika D = 0 → satu akar kembar. Jika D < 0 → tidak ada akar real. Perhatikan tanda konstanta c saat menghitung −4ac.", sources: ["Modul Matematika – Fungsi Kuadrat, hal. 18"] },
