@@ -1777,6 +1777,11 @@ function TeacherAssessmentBuilder() {
                 )}
               </div>
               <div className="p-4 space-y-2">
+                {materials.length === 0 && (
+                  <div className="rounded-[8px] border border-dashed border-border bg-background p-6 text-center">
+                    <p className="text-[12px] text-ink-secondary">Belum ada materi — unggah materi di <span className="font-semibold text-primary">Pustaka Materi</span> terlebih dahulu.</p>
+                  </div>
+                )}
                 {materials.map(mat => {
                   const checked = selectedMaterials.has(mat.id);
                   const canProcess = mat.aiProcessed;

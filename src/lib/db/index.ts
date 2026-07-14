@@ -155,18 +155,7 @@ export type Material = {
   aiProcessed: boolean; questionsGenerated: number;
 };
 
-export const materials: Material[] = [
-  { id: "mat1", title: "Buku Teks Matematika XI (Erlangga)", type: "Buku Teks", subject: "Matematika XI", publisher: "Erlangga", year: 2023, uploadedAt: "3 Sep 2025", pages: 312, status: "Aktif", aiProcessed: true, questionsGenerated: 284 },
-  { id: "mat2", title: "Modul Ajar – Fungsi Kuadrat", type: "Modul Ajar", subject: "Matematika XI", uploadedAt: "10 Sep 2025", pages: 24, status: "Aktif", aiProcessed: true, questionsGenerated: 48 },
-  { id: "mat3", title: "PPT Persamaan & Fungsi Kuadrat", type: "PPT", subject: "Matematika XI", uploadedAt: "12 Sep 2025", pages: 42, status: "Aktif", aiProcessed: true, questionsGenerated: 36 },
-  { id: "mat4", title: "RPP Kuadrat Semester 1 (Revisi K13)", type: "RPP", subject: "Matematika XI", uploadedAt: "5 Sep 2025", pages: 18, status: "Aktif", aiProcessed: true, questionsGenerated: 0 },
-  { id: "mat5", title: "Lembar Latihan Diskriminan & Vieta", type: "Soal Latihan", subject: "Matematika XI", uploadedAt: "20 Okt 2025", pages: 6, status: "Aktif", aiProcessed: true, questionsGenerated: 24 },
-  { id: "mat6", title: "Kunci Jawaban UTS Matematika 2025", type: "Kunci Jawaban", subject: "Matematika XI", uploadedAt: "20 Nov 2025", pages: 4, status: "Aktif", aiProcessed: false, questionsGenerated: 0 },
-  { id: "mat7", title: "RPP Barisan & Deret Aritmetika", type: "RPP", subject: "Matematika XI", uploadedAt: "1 Nov 2025", pages: 16, status: "Aktif", aiProcessed: true, questionsGenerated: 32 },
-  { id: "mat8", title: "PPT Barisan Geometri – Visualisasi", type: "PPT", subject: "Matematika XI", uploadedAt: "3 Nov 2025", pages: 28, status: "Diproses", aiProcessed: false, questionsGenerated: 0 },
-  { id: "mat9", title: "Modul Ajar – Trigonometri Dasar", type: "Modul Ajar", subject: "Matematika XI", uploadedAt: "10 Nov 2025", pages: 30, status: "Draf", aiProcessed: false, questionsGenerated: 0 },
-  { id: "mat10", title: "Buku Teks Fisika X (Grafindo)", type: "Buku Teks", subject: "Fisika X", publisher: "Grafindo", year: 2022, uploadedAt: "5 Sep 2025", pages: 288, status: "Aktif", aiProcessed: true, questionsGenerated: 198 },
-];
+export const materials: Material[] = [];
 
 // ── Assessment Style Corpus ────────────────────────────────────────────
 export type AssessmentStyleCorpus = {
