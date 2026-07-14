@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import Link from "next/link";
 import {
   AlertCircle,
   AlertTriangle,
@@ -651,10 +652,10 @@ export function BloomBadge({ level }: { level: BloomLevel }) {
 
 export function ConfidenceBadge({ diagnosis }: { diagnosis: ConfidenceDiagnosis }) {
   const tones: Record<ConfidenceDiagnosis, "danger" | "warning" | "primary" | "success"> = {
-    Misconception: "danger",
-    "Knowledge Gap": "warning",
-    "Needs Reinforcement": "primary",
-    Mastery: "success",
+    Miskonsepsi: "danger",
+    "Celah Pengetahuan": "warning",
+    "Perlu Pengulangan": "primary",
+    Mahir: "success",
   };
   return <Badge tone={tones[diagnosis]}>{diagnosis}</Badge>;
 }
@@ -758,11 +759,8 @@ export function NotificationItem({ notification: n }: { notification: AppNotific
     neutral: "bg-ink-tertiary",
   }[n.tone];
 
-  return (
-    <div className={cn(
-      "flex gap-3 px-4 py-3 border-b border-border last:border-0 hover:bg-background transition-colors cursor-pointer",
-      !n.read && "bg-primary-soft/40"
-    )}>
+  const inner = (
+    <>
       <div className="mt-1.5 shrink-0">
         <div className={cn("h-2 w-2 rounded-full", dotColor)} />
       </div>
@@ -776,8 +774,18 @@ export function NotificationItem({ notification: n }: { notification: AppNotific
         <p className="text-[11px] text-ink-secondary mt-0.5 leading-snug line-clamp-2">{n.description}</p>
         <p className="text-[10px] text-ink-tertiary mt-1">{n.time}</p>
       </div>
-    </div>
+    </>
   );
+
+  const className = cn(
+    "flex gap-3 px-4 py-3 border-b border-border last:border-0 hover:bg-background transition-colors cursor-pointer",
+    !n.read && "bg-primary-soft/40"
+  );
+
+  if (n.href) {
+    return <Link href={n.href} className={className}>{inner}</Link>;
+  }
+  return <div className={className}>{inner}</div>;
 }
 
 // ─── Chat Bubble ─────────────────────────────────────────────────────────────

@@ -68,6 +68,7 @@ import {
   teacherNav,
   studentNav,
   parentNav,
+  parentNotifications,
   adminNav,
   type ChatMessage,
   type Material,
@@ -86,9 +87,9 @@ import {
   Download,
   Eye,
   FilePlus2,
-  FileQuestion,
   Filter,
-  Maximize2,
+  HelpCircle,
+  MessageCircle,
   Pencil,
   Plus,
   Search,
@@ -96,6 +97,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  ThumbsUp,
   Trophy,
   Upload,
   Users,
@@ -199,13 +201,18 @@ function TeacherApp({ page }: { page: string }) {
 
 function TeacherDashboard() {
   const [activeTab, setActiveTab] = useState<"semua" | "at-risk" | "need-review">("semua");
+  const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
+  const [showAllStudents, setShowAllStudents] = useState(false);
+  const [upcomingDetailId, setUpcomingDetailId] = useState<string | null>(null);
+  const selectedStudent = students.find(s => s.id === selectedStudentId);
+  const upcomingDetail = assessments.find(a => a.id === upcomingDetailId);
 
   const allFiltered = students.filter(s => {
     if (activeTab === "at-risk") return s.status === "At Risk";
     if (activeTab === "need-review") return s.status === "Need Review";
     return true;
   });
-  const filteredStudents = allFiltered.slice(0, 8);
+  const filteredStudents = showAllStudents ? allFiltered : allFiltered.slice(0, 8);
 
   return (
     <div className="space-y-6">
@@ -277,11 +284,22 @@ function TeacherDashboard() {
             </div>
           </div>
           <div className="px-5 py-2">
-            {filteredStudents.map(s => <StudentStatusRow key={s.id} student={s} />)}
-            {allFiltered.length > 8 && (
+            {filteredStudents.map(s => (
+              <div key={s.id} onClick={() => setSelectedStudentId(s.id)} className="cursor-pointer">
+                <StudentStatusRow student={s} />
+              </div>
+            ))}
+            {allFiltered.length > 8 && !showAllStudents && (
               <div className="py-3 text-center">
-                <button className="text-[12px] font-semibold text-primary hover:underline">
+                <button onClick={() => setShowAllStudents(true)} className="text-[12px] font-semibold text-primary hover:underline">
                   Lihat semua {allFiltered.length} siswa →
+                </button>
+              </div>
+            )}
+            {showAllStudents && (
+              <div className="py-3 text-center">
+                <button onClick={() => setShowAllStudents(false)} className="text-[12px] font-semibold text-ink-secondary hover:text-ink">
+                  ↑ Sembunyikan
                 </button>
               </div>
             )}
@@ -325,14 +343,9 @@ function TeacherDashboard() {
             <h3 className="text-[13px] font-bold text-ink mb-3">Asesmen Mendatang</h3>
             <div className="space-y-2.5">
               {assessments.filter(a => a.status === "Terjadwal").slice(0, 2).map(a => (
-                <UpcomingCard
-                  key={a.id}
-                  title={a.title}
-                  type={a.type}
-                  date={a.scheduledFor}
-                  duration={a.duration}
-                  questions={a.totalQuestions}
-                />
+                <div key={a.id} onClick={() => setUpcomingDetailId(a.id)} className="cursor-pointer">
+                  <UpcomingCard title={a.title} type={a.type} date={a.scheduledFor} duration={a.duration} questions={a.totalQuestions} />
+                </div>
               ))}
             </div>
           </div>
@@ -344,6 +357,134 @@ function TeacherDashboard() {
           AI mengekstrak soal baru dari materi yang diunggah. Tinjau dan setujui sebelum diterbitkan.{" "}
           <Link href="/teacher/question-review" className="font-semibold underline">Tinjau sekarang →</Link>
         </AlertPanel>
+      )}
+
+      {/* ── Student Detail Dialog ── */}
+      {selectedStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setSelectedStudentId(null)} />
+          <div className="relative w-full max-w-lg rounded-card border border-border bg-surface shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-border px-6 py-4 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="flex h-10 w-10 items-center justify-center rounded-full bg-primary-soft text-[14px] font-bold text-primary">
+                  {selectedStudent.name.split(" ").map(n => n[0]).slice(0, 2).join("")}
+                </div>
+                <div>
+                  <h2 className="text-[15px] font-bold text-ink">{selectedStudent.name}</h2>
+                  <p className="text-[11px] text-ink-secondary">XI IPA 2 · Peringkat #{selectedStudent.rank ?? "—"}</p>
+                </div>
+              </div>
+              <button onClick={() => setSelectedStudentId(null)}
+                className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-5">
+              <div className="grid grid-cols-3 gap-3">
+                {[
+                  { label: "Rata-rata", value: `${selectedStudent.avgScore ?? "—"}` },
+                  { label: "Status", value: selectedStudent.status },
+                  { label: "Asesmen", value: `${studentResults.length}` },
+                ].map(k => (
+                  <div key={k.label} className="rounded-[10px] border border-border bg-background p-3 text-center">
+                    <div className="text-[18px] font-bold text-ink">{k.value}</div>
+                    <div className="text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-tertiary mt-0.5">{k.label}</div>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <h3 className="text-[12px] font-bold text-ink mb-2">Riwayat Asesmen Terakhir</h3>
+                <div className="space-y-2">
+                  {studentResults.slice(0, 4).map(r => (
+                    <div key={r.id} className="flex items-center justify-between rounded-[8px] border border-border bg-background px-3 py-2">
+                      <div>
+                        <div className="text-[12px] font-medium text-ink">{r.assessmentTitle}</div>
+                        <div className="text-[10px] text-ink-secondary">{r.date}</div>
+                      </div>
+                      <div className={cn("text-[15px] font-bold tabular-nums",
+                        r.score >= 80 ? "text-success" : r.score >= 65 ? "text-primary" : "text-warning"
+                      )}>{r.score}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <h3 className="text-[12px] font-bold text-ink mb-2">Topik Kuat</h3>
+                  <div className="space-y-1.5">
+                    {subjectMastery.filter(s => s.value >= 70).slice(0, 3).map(s => (
+                      <div key={s.label} className="flex items-center justify-between text-[11px]">
+                        <span className="text-ink-secondary truncate flex-1">{s.label}</span>
+                        <span className="font-semibold text-success ml-2">{s.value}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <h3 className="text-[12px] font-bold text-ink mb-2">Topik Lemah</h3>
+                  <div className="space-y-1.5">
+                    {weakTopics.slice(0, 3).map(t => (
+                      <div key={t.id} className="flex items-center justify-between text-[11px]">
+                        <span className="text-ink-secondary truncate flex-1">{t.topic}</span>
+                        <span className="font-semibold text-danger ml-2">{t.accuracyRate}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
+              <Button variant="outline" className="h-8 text-[12px]" onClick={() => setSelectedStudentId(null)}>Tutup</Button>
+              <Link href="/teacher/analytics"><Button variant="default" className="h-8 text-[12px]">Lihat Analitik Lengkap</Button></Link>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Upcoming Assessment Detail Dialog ── */}
+      {upcomingDetail && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setUpcomingDetailId(null)} />
+          <div className="relative w-full max-w-md rounded-card border border-border bg-surface shadow-xl">
+            <div className="flex items-center justify-between border-b border-border px-5 py-4">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-primary mb-0.5">{upcomingDetail.type}</p>
+                <h2 className="text-[15px] font-bold text-ink">{upcomingDetail.title}</h2>
+              </div>
+              <button onClick={() => setUpcomingDetailId(null)}
+                className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  { label: "Tanggal", value: upcomingDetail.scheduledFor },
+                  { label: "Durasi", value: `${upcomingDetail.duration} menit` },
+                  { label: "Jumlah Soal", value: `${upcomingDetail.totalQuestions} soal` },
+                  { label: "Status", value: upcomingDetail.status },
+                ].map(k => (
+                  <div key={k.label} className="rounded-[8px] border border-border bg-background p-3">
+                    <div className="text-[10px] font-bold uppercase tracking-[0.08em] text-ink-tertiary mb-0.5">{k.label}</div>
+                    <div className="text-[13px] font-semibold text-ink">{k.value}</div>
+                  </div>
+                ))}
+              </div>
+              <div>
+                <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-tertiary mb-2">Topik yang Diuji</p>
+                <div className="flex flex-wrap gap-1.5">
+                  {["Fungsi Kuadrat", "Diskriminan", "Rumus Vieta", "Transformasi Grafik"].map(t => (
+                    <Badge key={t} tone="neutral">{t}</Badge>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5">
+              <Button variant="outline" className="h-8 text-[12px]" onClick={() => setUpcomingDetailId(null)}>Tutup</Button>
+              <Link href="/teacher/assessment-builder"><Button variant="default" className="h-8 text-[12px]">Edit Asesmen</Button></Link>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
@@ -800,6 +941,8 @@ function TeacherAssessmentStyles() {
 
 function TeacherQuestionBank() {
   const [search, setSearch] = useState("");
+  const [showManualAdd, setShowManualAdd] = useState(false);
+  const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
   const filtered = questionBank.filter(q =>
     search === "" || q.question.toLowerCase().includes(search.toLowerCase()) || q.topic.toLowerCase().includes(search.toLowerCase())
   );
@@ -811,7 +954,7 @@ function TeacherQuestionBank() {
         title="Bank Soal Terkurasi"
         description="Soal yang telah disetujui. AI mengekstrak dari materi dan mempelajari gaya asesmen."
         actions={
-          <Button variant="default" className="h-8 text-[12px]">
+          <Button variant="default" className="h-8 text-[12px]" onClick={() => setShowManualAdd(true)}>
             <Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Manual
           </Button>
         }
@@ -842,6 +985,69 @@ function TeacherQuestionBank() {
         {filtered.map(q => <QuestionBankRow key={q.id} entry={q} />)}
         {filtered.length === 0 && <EmptyState icon={Database} title="Tidak ada soal ditemukan" description="Coba kata kunci lain." />}
       </div>
+
+      {/* Manual Add Dialog */}
+      {showManualAdd && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setShowManualAdd(false)} />
+          <div className="relative w-full max-w-2xl rounded-card border border-border bg-surface shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-border px-5 py-3.5 shrink-0">
+              <h2 className="text-[14px] font-bold text-ink">Tambah Soal Manual</h2>
+              <button onClick={() => setShowManualAdd(false)}
+                className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="overflow-y-auto p-5 space-y-4">
+              <div>
+                <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pertanyaan *</label>
+                <textarea rows={3} placeholder="Tuliskan pertanyaan di sini..."
+                  className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] resize-none focus:border-primary focus:outline-none" />
+              </div>
+              {["A", "B", "C", "D"].map(opt => (
+                <div key={opt}>
+                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pilihan {opt} *</label>
+                  <input type="text" placeholder={`Jawaban pilihan ${opt}`}
+                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+                </div>
+              ))}
+              <div className="grid grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kunci Jawaban *</label>
+                  <select className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+                    {["A", "B", "C", "D"].map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kesulitan *</label>
+                  <select className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+                    {["Mudah", "Sedang", "Sulit"].map(d => <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik *</label>
+                  <input type="text" placeholder="Fungsi Kuadrat"
+                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+                </div>
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pembahasan (opsional)</label>
+                <textarea rows={2} placeholder="Jelaskan jawaban benar..."
+                  className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] resize-none focus:border-primary focus:outline-none" />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
+              <Button variant="outline" size="sm" onClick={() => setShowManualAdd(false)}>Batal</Button>
+              <Button variant="default" size="sm" onClick={() => {
+                setShowManualAdd(false);
+                setToast({ message: "Soal berhasil ditambahkan ke bank soal", tone: "success" });
+              }}>Simpan Soal</Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {toast && <AppToast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>
   );
 }
@@ -1013,6 +1219,11 @@ function TeacherAssessmentBuilder() {
   const [aiGenerating, setAiGenerating] = useState(false);
   const [aiGenerated, setAiGenerated] = useState(false);
   const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(new Set());
+  const [assessmentType, setAssessmentType] = useState<"uniform" | "adaptive">("uniform");
+  const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
+  const [showAddQuestion, setShowAddQuestion] = useState(false);
+  const [confirmAddToBank, setConfirmAddToBank] = useState(false);
+  const [newQ, setNewQ] = useState({ text: "", optA: "", optB: "", optC: "", optD: "", correct: "A", difficulty: "Sedang", topic: "", explanation: "" });
 
   function toggleMaterial(id: string) {
     setSelectedMaterials(prev => {
@@ -1086,6 +1297,39 @@ function TeacherAssessmentBuilder() {
               <input type="number" defaultValue={45} className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
             </div>
           </div>
+
+          {/* Assessment distribution type */}
+          <div>
+            <label className="block text-[11px] font-semibold text-ink-secondary mb-2">Distribusi Soal ke Siswa *</label>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+              {([
+                { key: "uniform" as const, label: "Sama untuk Semua Siswa", desc: "Setiap siswa mendapat soal yang identik — cocok untuk ujian formal & perbandingan nilai.", icon: Users },
+                { key: "adaptive" as const, label: "Adaptif per Siswa", desc: "Soal dipilih otomatis berdasarkan topik lemah tiap siswa — cocok untuk latihan diagnostik.", icon: Zap },
+              ]).map(({ key, label, desc, icon: Icon }) => (
+                <button key={key} onClick={() => setAssessmentType(key)}
+                  className={cn(
+                    "flex items-start gap-3 rounded-[10px] border p-3.5 text-left transition-all",
+                    assessmentType === key ? "border-primary/40 bg-primary-soft" : "border-border bg-background hover:border-primary/20"
+                  )}>
+                  <div className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 mt-0.5",
+                    assessmentType === key ? "border-primary bg-primary" : "border-border"
+                  )}>
+                    {assessmentType === key ? <CheckCircle2 className="h-3.5 w-3.5 text-white" /> : <Icon className="h-3.5 w-3.5 text-ink-secondary" />}
+                  </div>
+                  <div>
+                    <div className="text-[12px] font-bold text-ink">{label}</div>
+                    <div className="text-[11px] text-ink-secondary mt-0.5 leading-relaxed">{desc}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+            {assessmentType === "adaptive" && (
+              <AlertPanel tone="primary" title="Mode Adaptif">
+                Sistem akan memilih soal dari bank soal berdasarkan topik di mana setiap siswa menunjukkan pemahaman rendah. Soal yang diterima setiap siswa bisa berbeda.
+              </AlertPanel>
+            )}
+          </div>
+
           <div className="flex justify-end">
             <Button variant="default" className="h-8 text-[12px]" onClick={() => setStep(2)}>Lanjut →</Button>
           </div>
@@ -1094,86 +1338,138 @@ function TeacherAssessmentBuilder() {
 
       {step === 2 && (
         <div className="space-y-5">
-          {/* Material selection */}
-          <div className="rounded-card border border-border bg-surface shadow-sm">
-            <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
-              <div>
-                <h3 className="text-[14px] font-bold text-ink">Pilih Materi Sumber</h3>
-                <p className="text-[11px] text-ink-secondary mt-0.5">AI akan membuat soal gabungan dari materi yang kamu pilih</p>
-              </div>
-              {selectedMaterials.size > 0 && (
-                <Badge tone="primary">{selectedMaterials.size} dipilih</Badge>
-              )}
-            </div>
-            <div className="p-4 space-y-2">
-              {materials.map(mat => {
-                const checked = selectedMaterials.has(mat.id);
-                const canProcess = mat.aiProcessed;
-                return (
-                  <div key={mat.id}
-                    onClick={() => canProcess && toggleMaterial(mat.id)}
-                    className={cn(
-                      "flex items-center gap-3 rounded-[8px] border p-3 transition-all",
-                      !canProcess ? "opacity-50 cursor-not-allowed border-border bg-background" :
-                      checked ? "border-primary/40 bg-primary-soft cursor-pointer" :
-                      "border-border bg-background hover:border-primary/20 cursor-pointer"
-                    )}>
-                    <div className={cn(
-                      "flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 transition-colors",
-                      checked ? "border-primary bg-primary" : "border-border"
-                    )}>
-                      {checked && <CheckCircle2 className="h-2.5 w-2.5 text-white" />}
-                    </div>
-                    <BookOpen className="h-4 w-4 shrink-0 text-ink-secondary" />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[12px] font-semibold text-ink truncate">{mat.title}</div>
-                      <div className="text-[10px] text-ink-secondary">{mat.type} · {mat.pages} hal.</div>
-                    </div>
-                    <div className="shrink-0">
-                      {canProcess ? (
-                        <Badge tone="success">{mat.questionsGenerated} soal</Badge>
-                      ) : (
-                        <Badge tone="neutral">Belum diproses AI</Badge>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="border-t border-border px-5 py-3.5 flex items-center justify-between">
-              <span className="text-[11px] text-ink-secondary">
-                {selectedMaterials.size === 0
-                  ? "Pilih minimal 1 materi untuk generate soal"
-                  : `${selectedMaterials.size} materi dipilih · estimasi ~${selectedMaterials.size * 15} soal`}
-              </span>
-              <Button variant="default" className="h-8 text-[12px]"
-                disabled={selectedMaterials.size === 0 || aiGenerating}
-                onClick={generateAI}>
-                {aiGenerating ? (
-                  <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />Membuat Soal...</>
-                ) : (
-                  <><Sparkles className="mr-1.5 h-3.5 w-3.5" />Generate Soal AI</>
-                )}
-              </Button>
-            </div>
+          {/* Source tabs */}
+          <div className="flex gap-2">
+            {([
+              { key: "ai" as const, label: "Generate AI dari Materi", icon: Sparkles },
+              { key: "bank" as const, label: "Pilih dari Bank Soal", icon: Database },
+            ]).map(({ key, label, icon: Icon }) => (
+              <button key={key} onClick={() => setQuestionSource(key)}
+                className={cn(
+                  "flex items-center gap-1.5 rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors border",
+                  questionSource === key ? "bg-primary text-white border-primary" : "bg-background text-ink-secondary border-border hover:border-primary/30"
+                )}>
+                <Icon className="h-3.5 w-3.5" />{label}
+              </button>
+            ))}
           </div>
 
-          {/* Generated questions */}
-          {aiGenerated && (
-            <div className="rounded-card border border-success/30 bg-surface shadow-sm">
-              <div className="flex items-center justify-between border-b border-success/20 px-5 py-3.5">
-                <div className="flex items-center gap-2">
-                  <CheckCircle2 className="h-4 w-4 text-success" />
-                  <h3 className="text-[13px] font-bold text-ink">
-                    {questionBank.length} soal berhasil dibuat AI
-                  </h3>
+          {questionSource === "ai" && <>
+            {/* Material selection */}
+            <div className="rounded-card border border-border bg-surface shadow-sm">
+              <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
+                <div>
+                  <h3 className="text-[14px] font-bold text-ink">Pilih Materi Sumber</h3>
+                  <p className="text-[11px] text-ink-secondary mt-0.5">AI akan membuat soal gabungan dari materi yang kamu pilih</p>
                 </div>
-                <Badge tone="primary">{selectedQuestions.size} dipilih</Badge>
+                {selectedMaterials.size > 0 && (
+                  <Badge tone="primary">{selectedMaterials.size} dipilih</Badge>
+                )}
               </div>
               <div className="p-4 space-y-2">
-                {questionBank.slice(0, 6).map(q => (
-                  <div key={q.id}
-                    onClick={() => toggleQuestion(q.id)}
+                {materials.map(mat => {
+                  const checked = selectedMaterials.has(mat.id);
+                  const canProcess = mat.aiProcessed;
+                  return (
+                    <div key={mat.id}
+                      onClick={() => canProcess && toggleMaterial(mat.id)}
+                      className={cn(
+                        "flex items-center gap-3 rounded-[8px] border p-3 transition-all",
+                        !canProcess ? "opacity-50 cursor-not-allowed border-border bg-background" :
+                        checked ? "border-primary/40 bg-primary-soft cursor-pointer" :
+                        "border-border bg-background hover:border-primary/20 cursor-pointer"
+                      )}>
+                      <div className={cn(
+                        "flex h-4 w-4 shrink-0 items-center justify-center rounded border-2 transition-colors",
+                        checked ? "border-primary bg-primary" : "border-border"
+                      )}>
+                        {checked && <CheckCircle2 className="h-2.5 w-2.5 text-white" />}
+                      </div>
+                      <BookOpen className="h-4 w-4 shrink-0 text-ink-secondary" />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[12px] font-semibold text-ink truncate">{mat.title}</div>
+                        <div className="text-[10px] text-ink-secondary">{mat.type} · {mat.pages} hal.</div>
+                      </div>
+                      <div className="shrink-0">
+                        {canProcess ? (
+                          <Badge tone="success">{mat.questionsGenerated} soal</Badge>
+                        ) : (
+                          <Badge tone="neutral">Belum diproses AI</Badge>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div className="border-t border-border px-5 py-3.5 flex items-center justify-between">
+                <span className="text-[11px] text-ink-secondary">
+                  {selectedMaterials.size === 0
+                    ? "Pilih minimal 1 materi untuk generate soal"
+                    : `${selectedMaterials.size} materi dipilih · estimasi ~${selectedMaterials.size * 15} soal`}
+                </span>
+                <Button variant="default" className="h-8 text-[12px]"
+                  disabled={selectedMaterials.size === 0 || aiGenerating}
+                  onClick={generateAI}>
+                  {aiGenerating ? (
+                    <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />Membuat Soal...</>
+                  ) : (
+                    <><Sparkles className="mr-1.5 h-3.5 w-3.5" />Generate Soal AI</>
+                  )}
+                </Button>
+              </div>
+            </div>
+
+            {/* Generated questions */}
+            {aiGenerated && (
+              <div className="rounded-card border border-success/30 bg-surface shadow-sm">
+                <div className="flex items-center justify-between border-b border-success/20 px-5 py-3.5">
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="h-4 w-4 text-success" />
+                    <h3 className="text-[13px] font-bold text-ink">{questionBank.length} soal berhasil dibuat AI</h3>
+                  </div>
+                  <Badge tone="primary">{selectedQuestions.size} dipilih</Badge>
+                </div>
+                <div className="p-4 space-y-2">
+                  {questionBank.slice(0, 6).map(q => (
+                    <div key={q.id} onClick={() => toggleQuestion(q.id)}
+                      className={cn(
+                        "flex items-start gap-3 rounded-[8px] border p-3 cursor-pointer transition-all",
+                        selectedQuestions.has(q.id) ? "border-primary/40 bg-primary-soft" : "border-border bg-background hover:border-primary/20"
+                      )}>
+                      <div className={cn(
+                        "flex h-4 w-4 mt-0.5 shrink-0 items-center justify-center rounded border-2 transition-colors",
+                        selectedQuestions.has(q.id) ? "border-primary bg-primary" : "border-border"
+                      )}>
+                        {selectedQuestions.has(q.id) && <CheckCircle2 className="h-2.5 w-2.5 text-white" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[12px] font-medium text-ink line-clamp-2">{q.question}</div>
+                        <div className="flex items-center gap-2 mt-1">
+                          <Badge tone="neutral">{q.topic}</Badge>
+                          <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>}
+
+          {questionSource === "bank" && (
+            <div className="rounded-card border border-border bg-surface shadow-sm">
+              <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
+                <div>
+                  <h3 className="text-[14px] font-bold text-ink">Bank Soal</h3>
+                  <p className="text-[11px] text-ink-secondary mt-0.5">{selectedQuestions.size} soal dipilih dari {questionBank.length} tersedia</p>
+                </div>
+                <Button variant="outline" className="h-8 text-[12px]" onClick={() => setShowAddQuestion(true)}>
+                  <Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Soal Baru
+                </Button>
+              </div>
+              <div className="p-4 space-y-2">
+                {questionBank.map(q => (
+                  <div key={q.id} onClick={() => toggleQuestion(q.id)}
                     className={cn(
                       "flex items-start gap-3 rounded-[8px] border p-3 cursor-pointer transition-all",
                       selectedQuestions.has(q.id) ? "border-primary/40 bg-primary-soft" : "border-border bg-background hover:border-primary/20"
@@ -1194,13 +1490,88 @@ function TeacherAssessmentBuilder() {
                   </div>
                 ))}
               </div>
+              <div className="border-t border-border px-5 py-3 flex items-center justify-between">
+                <button onClick={() => {
+                  const allIds = new Set(questionBank.map(q => q.id));
+                  setSelectedQuestions(prev => prev.size === questionBank.length ? new Set() : allIds);
+                }} className="text-[11px] text-primary font-semibold hover:underline">
+                  {selectedQuestions.size === questionBank.length ? "Batal semua" : "Pilih semua"}
+                </button>
+                <span className="text-[11px] text-ink-secondary">{selectedQuestions.size} / {questionBank.length} dipilih</span>
+              </div>
             </div>
           )}
+
+          {/* Add question dialog */}
+          {showAddQuestion && (
+            <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+              <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setShowAddQuestion(false)} />
+              <div className="relative w-full max-w-lg rounded-card border border-border bg-surface p-6 shadow-xl max-h-[90vh] overflow-y-auto space-y-4">
+                <div className="flex items-center justify-between">
+                  <h2 className="text-[16px] font-bold text-ink">Tambah Soal ke Bank Soal</h2>
+                  <button onClick={() => setShowAddQuestion(false)} className="text-ink-secondary hover:text-ink"><X className="h-4 w-4" /></button>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pertanyaan *</label>
+                  <textarea rows={3} value={newQ.text} onChange={e => setNewQ(p => ({ ...p, text: e.target.value }))}
+                    placeholder="Tulis pertanyaan di sini..."
+                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none resize-none" />
+                </div>
+                {(["A", "B", "C", "D"] as const).map(opt => (
+                  <div key={opt}>
+                    <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Opsi {opt}</label>
+                    <input type="text" placeholder={`Pilihan ${opt}`}
+                      className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
+                  </div>
+                ))}
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Jawaban Benar</label>
+                    <select value={newQ.correct} onChange={e => setNewQ(p => ({ ...p, correct: e.target.value }))}
+                      className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+                      {["A", "B", "C", "D"].map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tingkat Kesulitan</label>
+                    <select value={newQ.difficulty} onChange={e => setNewQ(p => ({ ...p, difficulty: e.target.value }))}
+                      className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+                      {["Mudah", "Sedang", "Sulit"].map(d => <option key={d} value={d}>{d}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik</label>
+                  <input type="text" placeholder="e.g. Gerak Lurus Beraturan"
+                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <Button variant="outline" className="h-8 text-[12px]" onClick={() => setShowAddQuestion(false)}>Batal</Button>
+                  <Button variant="default" className="h-8 text-[12px]" onClick={() => { setShowAddQuestion(false); setConfirmAddToBank(true); }}>
+                    Simpan ke Bank Soal
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <ConfirmDialog
+            open={confirmAddToBank}
+            title="Tambahkan ke Bank Soal?"
+            message="Soal ini akan disimpan permanen ke bank soal dan dapat digunakan pada asesmen lainnya. Apakah kamu yakin?"
+            confirmLabel="Ya, Tambahkan"
+            confirmVariant="default"
+            onConfirm={() => {
+              setConfirmAddToBank(false);
+              setToast({ message: "Soal berhasil ditambahkan ke bank soal", tone: "success" });
+            }}
+            onCancel={() => setConfirmAddToBank(false)}
+          />
 
           <div className="flex justify-between">
             <Button variant="outline" className="h-8 text-[12px]" onClick={() => setStep(1)}>← Kembali</Button>
             <Button variant="default" className="h-8 text-[12px]"
-              disabled={!aiGenerated || selectedQuestions.size === 0}
+              disabled={questionSource === "ai" ? (!aiGenerated || selectedQuestions.size === 0) : selectedQuestions.size === 0}
               onClick={() => setStep(3)}>
               Lanjut dengan {selectedQuestions.size} soal →
             </Button>
@@ -1385,7 +1756,17 @@ function TeacherResults() {
             <div className="flex justify-end gap-2 border-t border-border px-6 py-4 shrink-0">
               <Button variant="outline" className="h-8 text-[12px]" onClick={() => setDetailId(null)}>Tutup</Button>
               {detail.avgScore && (
-                <Button variant="default" className="h-8 text-[12px]">
+                <Button variant="default" className="h-8 text-[12px]" onClick={() => {
+                  const csv = [
+                    "Nama,Nilai,Peringkat",
+                    ...students.slice(0, 8).map((s, i) => `${s.name},${80 + (8 - i) * 2},${i + 1}`)
+                  ].join("\n");
+                  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+                  const url = URL.createObjectURL(blob);
+                  const a = document.createElement("a");
+                  a.href = url; a.download = `${detail.title}.csv`; a.click();
+                  URL.revokeObjectURL(url);
+                }}>
                   <Download className="mr-1.5 h-3.5 w-3.5" />Ekspor Hasil
                 </Button>
               )}
@@ -1672,20 +2053,29 @@ function StudentDashboard() {
 function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: (p: string) => void }) {
   const [current, setCurrent] = useState(0);
   const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [confidence, setConfidence] = useState<Record<number, "yakin" | "cukup" | "ragu">>({});
   const [finished, setFinished] = useState(false);
   const [timeLeft, setTimeLeft] = useState(45 * 60);
   const [confirmSubmit, setConfirmSubmit] = useState(false);
-  const [fullscreenWarning, setFullscreenWarning] = useState(false);
-  const [focusWarning, setFocusWarning] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
   const finishedRef = React.useRef(finished);
   finishedRef.current = finished;
+  const answersRef = React.useRef(answers);
+  answersRef.current = answers;
 
   function enterFullscreen() {
     document.documentElement.requestFullscreen?.().catch(() => {});
   }
   function exitFullscreen() {
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
+  }
+
+  function autoSubmit() {
+    if (finishedRef.current) return;
+    finishedRef.current = true;
+    try { localStorage.removeItem("catchup_exam_session"); } catch {}
+    exitFullscreen();
+    setFinished(true);
   }
 
   // On exam start: fullscreen + restore session
@@ -1695,8 +2085,9 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     try {
       const saved = localStorage.getItem("catchup_exam_session");
       if (saved) {
-        const s = JSON.parse(saved) as { answers?: Record<number, string>; current?: number; timeLeft?: number };
+        const s = JSON.parse(saved) as { answers?: Record<number, string>; confidence?: Record<number, "yakin" | "cukup" | "ragu">; current?: number; timeLeft?: number };
         if (s.answers) setAnswers(s.answers);
+        if (s.confidence) setConfidence(s.confidence);
         if (typeof s.current === "number") setCurrent(s.current);
         if (typeof s.timeLeft === "number") setTimeLeft(s.timeLeft);
       }
@@ -1707,8 +2098,8 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   // Persist session to localStorage
   React.useEffect(() => {
     if (page !== "exam") return;
-    try { localStorage.setItem("catchup_exam_session", JSON.stringify({ answers, current, timeLeft })); } catch {}
-  }, [answers, current, timeLeft, page]);
+    try { localStorage.setItem("catchup_exam_session", JSON.stringify({ answers, confidence, current, timeLeft })); } catch {}
+  }, [answers, confidence, current, timeLeft, page]);
 
   // KIOSK: Block ESC and F11 keys (capture phase)
   React.useEffect(() => {
@@ -1723,32 +2114,30 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [page]);
 
-  // KIOSK: Detect tab switching / window focus loss
+  // KIOSK: Tab switch or focus loss → auto-submit
   React.useEffect(() => {
     if (page !== "exam") return;
     function onVisibilityChange() {
-      if (document.hidden && !finishedRef.current) setFocusWarning(true);
+      if (document.hidden) autoSubmit();
     }
-    function onBlur() {
-      if (!finishedRef.current) setFocusWarning(true);
-    }
+    function onBlur() { autoSubmit(); }
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("blur", onBlur);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("blur", onBlur);
     };
-  }, [page]);
+  }, [page]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // KIOSK: Detect fullscreen exit (browser UI exit)
+  // KIOSK: Fullscreen exit → auto-submit
   React.useEffect(() => {
     if (page !== "exam") return;
     function onFsChange() {
-      if (!document.fullscreenElement && !finishedRef.current) setFullscreenWarning(true);
+      if (!document.fullscreenElement) autoSubmit();
     }
     document.addEventListener("fullscreenchange", onFsChange);
     return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, [page]);
+  }, [page]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Online / offline detection
   React.useEffect(() => {
@@ -1777,41 +2166,47 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     return (
       <AppShell role="student" nav={studentNav}>
         <div className="space-y-6">
-          <PageHeader eyebrow="Simulasi Ujian" title="Pilih Asesmen"
-            description="Pilih asesmen yang ingin disimulasikan. Ujian akan berjalan dalam mode kiosk layar penuh." />
-          <AlertPanel tone="primary" title="Mode Ujian Aman aktif">
-            Selama ujian berlangsung, layar penuh wajib dipertahankan. Tab/jendela lain tidak dapat diakses.
+          <PageHeader eyebrow="Simulasi Ujian" title="Pilih Asesmen Resmi"
+            description="Pilih ujian yang akan diikuti. Ujian resmi berjalan dalam mode kiosk — berpindah tab atau keluar layar penuh otomatis mengakhiri ujian." />
+          <AlertPanel tone="danger" title="Perhatian: Mode Ujian Ketat">
+            Berpindah tab, meminimalkan jendela, atau keluar layar penuh akan otomatis menyelesaikan dan mengumpulkan jawaban kamu.
           </AlertPanel>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {assessments.filter(a => a.status === "Terjadwal").map(a => (
               <div key={a.id} role="button" tabIndex={0}
                 onClick={() => onPageChange("exam")}
                 onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPageChange("exam"); } }}
-                className="rounded-card border border-border bg-surface p-5 hover:border-primary/30 hover:shadow-soft transition-all cursor-pointer">
+                className="rounded-card border border-border bg-surface p-5 hover:border-primary/30 hover:shadow-soft transition-all cursor-pointer group">
                 <div className="flex items-start gap-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-primary-soft">
-                    <FileQuestion className="h-5 w-5 text-primary" />
+                    <ShieldCheck className="h-5 w-5 text-primary" />
                   </div>
-                  <div>
+                  <div className="flex-1">
                     <div className="text-[13px] font-bold text-ink">{a.title}</div>
                     <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.totalQuestions} soal · {a.duration} mnt</div>
-                    <div className="mt-2"><Badge tone="neutral">{a.scheduledFor}</Badge></div>
+                    <div className="flex items-center gap-2 mt-2">
+                      <Badge tone="neutral">{a.scheduledFor}</Badge>
+                      <Badge tone="danger">Mode Kiosk</Badge>
+                    </div>
                   </div>
                 </div>
               </div>
             ))}
-            <div role="button" tabIndex={0}
-              onClick={() => onPageChange("exam")}
-              onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPageChange("exam"); } }}
-              className="rounded-card border border-dashed border-primary/30 bg-primary-soft p-5 cursor-pointer flex items-center gap-3">
+          </div>
+
+          <div className="pt-2 border-t border-border">
+            <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-3">Latihan Mandiri (Tanpa Kiosk)</p>
+            <p className="text-[12px] text-ink-secondary mb-3">Latihan santai tanpa timer ketat dan mode layar penuh. Cocok untuk belajar sehari-hari.</p>
+            <Link href="/student/adaptive"
+              className="inline-flex items-center gap-3 rounded-card border border-dashed border-primary/30 bg-primary-soft p-4 cursor-pointer hover:border-primary/50 transition-colors">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-primary/10">
                 <Sparkles className="h-5 w-5 text-primary" />
               </div>
               <div>
-                <div className="text-[13px] font-bold text-primary">Latihan Topik Lemah</div>
-                <div className="text-[11px] text-primary/70 mt-0.5">Dibuat AI · Disesuaikan untuk kamu</div>
+                <div className="text-[13px] font-bold text-primary">Mulai Latihan Adaptif</div>
+                <div className="text-[11px] text-primary/70 mt-0.5">AI menyesuaikan soal berdasarkan kemampuanmu · Bebas kapan saja</div>
               </div>
-            </div>
+            </Link>
           </div>
         </div>
       </AppShell>
@@ -1918,6 +2313,28 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
             })}
           </div>
 
+          {/* Confidence selector */}
+          <div className="rounded-card border border-border bg-surface p-4 shadow-sm">
+            <p className="text-[12px] font-semibold text-ink-secondary mb-3">
+              Seberapa yakin kamu dengan jawaban ini?
+            </p>
+            <div className="flex gap-2">
+              {([
+                { key: "yakin" as const, label: "Yakin", icon: ThumbsUp, bg: confidence[current] === "yakin" ? "border-success/40 bg-success-light text-success" : "border-border bg-background text-ink-secondary hover:border-success/30" },
+                { key: "cukup" as const, label: "Cukup Yakin", icon: HelpCircle, bg: confidence[current] === "cukup" ? "border-warning/40 bg-warning-light text-warning" : "border-border bg-background text-ink-secondary hover:border-warning/30" },
+                { key: "ragu" as const, label: "Tidak Yakin", icon: AlertCircle, bg: confidence[current] === "ragu" ? "border-danger/40 bg-danger-light text-danger" : "border-border bg-background text-ink-secondary hover:border-danger/30" },
+              ] as const).map(({ key, label, icon: Icon, bg }) => (
+                <button key={key}
+                  onClick={() => setConfidence(prev => ({ ...prev, [current]: key }))}
+                  className={cn("flex flex-1 items-center justify-center gap-1.5 rounded-[8px] border px-3 py-2.5 text-[12px] font-semibold transition-all", bg)}>
+                  <Icon className="h-3.5 w-3.5 shrink-0" />
+                  <span className="hidden sm:inline">{label}</span>
+                  <span className="sm:hidden">{key === "yakin" ? "Yakin" : key === "cukup" ? "Cukup" : "Ragu"}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
           {/* Navigation */}
           <div className="flex justify-between items-center">
             <Button variant="outline" className="h-9"
@@ -1946,48 +2363,6 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
         </div>
       </main>
 
-      {/* KIOSK: Fullscreen exit warning */}
-      {fullscreenWarning && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-ink/70 backdrop-blur-md" />
-          <div className="relative w-full max-w-sm rounded-card border border-warning/40 bg-surface p-6 shadow-xl">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-warning/10">
-                <Maximize2 className="h-5 w-5 text-warning" />
-              </div>
-              <h2 className="text-[15px] font-bold text-ink">Layar Penuh Dinonaktifkan</h2>
-            </div>
-            <p className="text-[13px] text-ink-secondary leading-relaxed mb-5">
-              Ujian harus berjalan dalam mode layar penuh. Kembali ke layar penuh untuk melanjutkan.
-            </p>
-            <Button variant="default" className="w-full" onClick={() => { setFullscreenWarning(false); enterFullscreen(); }}>
-              <Maximize2 className="mr-2 h-4 w-4" />Kembali ke Layar Penuh
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* KIOSK: Focus/tab-switch warning */}
-      {focusWarning && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-ink/70 backdrop-blur-md" />
-          <div className="relative w-full max-w-sm rounded-card border border-danger/40 bg-surface p-6 shadow-xl">
-            <div className="flex items-center gap-3 mb-3">
-              <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-danger/10">
-                <AlertCircle className="h-5 w-5 text-danger" />
-              </div>
-              <h2 className="text-[15px] font-bold text-ink">Peringatan Keamanan</h2>
-            </div>
-            <p className="text-[13px] text-ink-secondary leading-relaxed mb-5">
-              Kamu terdeteksi berpindah tab atau aplikasi lain. Tindakan ini tercatat. Kembali ke ujian sekarang.
-            </p>
-            <Button variant="danger" className="w-full" onClick={() => { setFocusWarning(false); window.focus(); }}>
-              Kembali ke Ujian
-            </Button>
-          </div>
-        </div>
-      )}
-
       {/* Submit confirmation */}
       <ConfirmDialog
         open={confirmSubmit}
@@ -1997,9 +2372,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
         confirmVariant="success"
         onConfirm={() => {
           setConfirmSubmit(false);
-          try { localStorage.removeItem("catchup_exam_session"); } catch {}
-          exitFullscreen();
-          setFinished(true);
+          autoSubmit();
         }}
         onCancel={() => setConfirmSubmit(false)}
       />
@@ -2265,13 +2638,30 @@ function ParentApp({ page }: { page: string }) {
 }
 
 function ParentDashboard() {
+  const [waToast, setWaToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
+  const missedAssessments = assessments.filter(a => a.status === "Terjadwal");
+
   return (
     <div className="space-y-6">
-      <div>
-        <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-ink-secondary mb-1">{new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
-        <h1 className="text-2xl font-bold text-ink">Portal Orang Tua</h1>
-        <p className="text-[13px] text-ink-secondary mt-1">Pantau perkembangan belajar Andi Pratama · XI IPA 2</p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-ink-secondary mb-1">{new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
+          <h1 className="text-2xl font-bold text-ink">Portal Orang Tua</h1>
+          <p className="text-[13px] text-ink-secondary mt-1">Pantau perkembangan belajar Andi Pratama · XI IPA 2</p>
+        </div>
+        <Button variant="default" className="h-8 text-[12px] shrink-0" onClick={() => {
+          setWaToast({ message: "Ringkasan performa Andi telah dikirim ke WhatsApp kamu", tone: "success" });
+        }}>
+          <MessageCircle className="mr-1.5 h-3.5 w-3.5" />Kirim ke WhatsApp
+        </Button>
       </div>
+
+      {missedAssessments.length > 0 && (
+        <AlertPanel tone="danger" title={`${missedAssessments.length} asesmen belum dikerjakan Andi`}>
+          {missedAssessments.map(a => a.title).join(", ")} — segera ingatkan Andi untuk mempersiapkan diri.
+          <Link href="/parent/assessments" className="ml-1 font-semibold underline">Lihat detail →</Link>
+        </AlertPanel>
+      )}
 
       <div className="rounded-card border border-border bg-gradient-hero text-white p-6">
         <div className="flex items-center gap-5">
@@ -2325,8 +2715,19 @@ function ParentDashboard() {
               {weakTopics.slice(0, 3).map(t => <TopicBar key={t.id} label={t.topic} value={t.accuracyRate} />)}
             </div>
           </div>
+          <div className="rounded-card border border-border bg-surface shadow-sm p-4">
+            <h3 className="text-[13px] font-bold text-ink mb-1">Notifikasi WhatsApp</h3>
+            <p className="text-[11px] text-ink-secondary mb-3">Terima ringkasan performa Andi langsung di WhatsApp setiap minggu.</p>
+            <Button variant="default" className="w-full h-8 text-[12px]" onClick={() => {
+              setWaToast({ message: "Notifikasi WhatsApp diaktifkan — laporan mingguan akan terkirim setiap Senin pukul 07.00", tone: "success" });
+            }}>
+              <MessageCircle className="mr-1.5 h-3.5 w-3.5" />Aktifkan Laporan Mingguan
+            </Button>
+          </div>
         </div>
       </div>
+
+      {waToast && <AppToast message={waToast.message} tone={waToast.tone} onDismiss={() => setWaToast(null)} />}
     </div>
   );
 }
@@ -2374,8 +2775,8 @@ function ParentAssessments() {
 function ParentRecommendations() {
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Rekomendasi Guru" title="Saran dari Bu Ratna"
-        description="Rekomendasi belajar untuk Andi berdasarkan analisis AI dan penilaian guru." />
+      <PageHeader eyebrow="Rekomendasi Pengajaran" title="Saran Belajar dari Bu Ratna"
+        description="Rekomendasi pengajaran untuk Andi berdasarkan analisis AI dan penilaian guru." />
       <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
         <p>Andi berkembang baik (peringkat #{studentProfile.rank} dari {students.length} siswa). Fokus minggu ini adalah <strong className="text-ink">Diskriminan</strong> dan <strong className="text-ink">Rumus Vieta</strong>.</p>
       </AIInsightPanel>
@@ -2387,17 +2788,12 @@ function ParentRecommendations() {
 }
 
 function ParentNotificationsPage() {
-  const items = [
-    { id: "pn1", title: "Hasil Kuis Fungsi Kuadrat", description: "Andi mendapat nilai 87 — di atas rata-rata kelas (82). Peringkat ke-4.", time: "1 jam lalu", read: false, tone: "success" as const },
-    { id: "pn2", title: "Topik yang perlu perhatian", description: "Andi masih kesulitan di Diskriminan (38%). Bu Ratna menyarankan latihan tambahan.", time: "3 jam lalu", read: false, tone: "warning" as const },
-    { id: "pn3", title: "Asesmen baru dijadwalkan", description: "Tes Diagnostik Fisika pada 28 November 2025 pukul 13.00 WIB.", time: "Kemarin", read: true, tone: "neutral" as const },
-    { id: "pn4", title: "Streak belajar 7 hari", description: "Andi telah belajar konsisten 7 hari berturut-turut!", time: "3 hari lalu", read: true, tone: "success" as const },
-  ];
   return (
     <div className="space-y-4">
-      <PageHeader eyebrow="Notifikasi" title="Notifikasi" />
+      <PageHeader eyebrow="Notifikasi" title="Notifikasi"
+        description="Klik notifikasi untuk langsung menuju halaman terkait." />
       <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
-        {items.map(n => <NotificationItem key={n.id} notification={n} />)}
+        {parentNotifications.map(n => <NotificationItem key={n.id} notification={n} />)}
       </div>
     </div>
   );
@@ -2407,9 +2803,30 @@ function ParentNotificationsPage() {
 // ADMIN
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ── Shared admin table helpers ────────────────────────────────────────────────
+
+function AdminTableHead({ cols }: { cols: string[] }) {
+  return (
+    <thead>
+      <tr className="border-b border-border bg-background">
+        {cols.map(c => (
+          <th key={c} className="px-4 py-2.5 text-left text-[11px] font-bold uppercase tracking-[0.06em] text-ink-secondary">{c}</th>
+        ))}
+      </tr>
+    </thead>
+  );
+}
+
 function AdminApp({ page }: { page: string }) {
   const screens: Record<string, React.ReactNode> = {
     dashboard: <AdminDashboard />,
+    schools: <AdminSchools />,
+    teachers: <AdminTeachers />,
+    students: <AdminStudents />,
+    classes: <AdminClasses />,
+    assessments: <AdminAssessments />,
+    analytics: <AdminAnalytics />,
+    settings: <AdminSettings />,
   };
   return (
     <AppShell role="admin" nav={adminNav}>
@@ -2462,6 +2879,309 @@ function AdminDashboard() {
           Pak Doni, Bu Wulan, dan 1 guru lain belum login sejak Senin. Hubungi untuk memastikan tidak ada kendala.
         </AlertPanel>
       </div>
+    </div>
+  );
+}
+
+function AdminSchools() {
+  const mockSchools = [
+    { id: "s1", name: "SMA Negeri 1 Bandung", level: "SMA", students: 1312, teachers: 48, status: "Aktif" },
+    { id: "s2", name: "SMA Negeri 2 Bandung", level: "SMA", students: 1104, teachers: 41, status: "Aktif" },
+    { id: "s3", name: "SMP Negeri 5 Bandung", level: "SMP", students: 876, teachers: 34, status: "Aktif" },
+    { id: "s4", name: "SMK Negeri 3 Bandung", level: "SMK", students: 960, teachers: 37, status: "Aktif" },
+    { id: "s5", name: "SMA Swasta Al-Ikhlas", level: "SMA", students: 420, teachers: 18, status: "Percobaan" },
+  ];
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <PageHeader eyebrow="Admin" title="Manajemen Sekolah" />
+        <Button variant="default" className="h-8 text-[12px]"><Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Sekolah</Button>
+      </div>
+      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
+        <table className="w-full">
+          <AdminTableHead cols={["Nama Sekolah", "Jenjang", "Siswa", "Guru", "Status", "Aksi"]} />
+          <tbody>
+            {mockSchools.map(s => (
+              <tr key={s.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
+                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{s.name}</span></td>
+                <td className="px-4 py-3 text-[12px]"><Badge tone="neutral">{s.level}</Badge></td>
+                <td className="px-4 py-3 text-[12px] text-ink">{s.students.toLocaleString("id")}</td>
+                <td className="px-4 py-3 text-[12px] text-ink">{s.teachers}</td>
+                <td className="px-4 py-3 text-[12px]"><Badge tone={s.status === "Aktif" ? "success" : "warning"}>{s.status}</Badge></td>
+                <td className="px-4 py-3 text-right">
+                  <div className="flex justify-end gap-1.5">
+                    <Button variant="ghost" className="h-7 px-2 text-[11px]"><Eye className="h-3.5 w-3.5" /></Button>
+                    <Button variant="ghost" className="h-7 px-2 text-[11px]"><Pencil className="h-3.5 w-3.5" /></Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AdminTeachers() {
+  const mockTeachers = [
+    { id: "t1", name: "Bu Ratna Dewi", school: "SMA Negeri 1 Bandung", subject: "Fisika", classes: 3, assessments: 12, status: "Aktif" },
+    { id: "t2", name: "Pak Budi Santoso", school: "SMA Negeri 1 Bandung", subject: "Matematika", classes: 4, assessments: 18, status: "Aktif" },
+    { id: "t3", name: "Bu Sari Utami", school: "SMA Negeri 2 Bandung", subject: "Kimia", classes: 3, assessments: 9, status: "Aktif" },
+    { id: "t4", name: "Pak Doni", school: "SMA Negeri 1 Bandung", subject: "Biologi", classes: 2, assessments: 4, status: "Tidak Aktif" },
+    { id: "t5", name: "Bu Wulan", school: "SMA Negeri 1 Bandung", subject: "Bahasa Indonesia", classes: 3, assessments: 7, status: "Tidak Aktif" },
+  ];
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <PageHeader eyebrow="Admin" title="Manajemen Guru" />
+        <Button variant="default" className="h-8 text-[12px]"><Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Guru</Button>
+      </div>
+      <div className="grid grid-cols-3 gap-4">
+        {[
+          { label: "Total Guru", value: "48", detail: "Platform", tone: "primary" as const },
+          { label: "Aktif Minggu Ini", value: "45", detail: "93.8% aktif", tone: "success" as const },
+          { label: "Perlu Perhatian", value: "3", detail: "Tidak login >7 hari", tone: "danger" as const },
+        ].map(s => <StatCard key={s.label} {...s} />)}
+      </div>
+      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
+        <table className="w-full">
+          <AdminTableHead cols={["Nama Guru", "Sekolah", "Mapel", "Kelas", "Asesmen", "Status", "Aksi"]} />
+          <tbody>
+            {mockTeachers.map(t => (
+              <tr key={t.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
+                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{t.name}</span></td>
+                <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary">{t.school}</span></td>
+                <td className="px-4 py-3 text-[12px] text-ink">{t.subject}</td>
+                <td className="px-4 py-3 text-[12px] text-ink">{t.classes}</td>
+                <td className="px-4 py-3 text-[12px] text-ink">{t.assessments}</td>
+                <td className="px-4 py-3 text-[12px]"><Badge tone={t.status === "Aktif" ? "success" : "danger"}>{t.status}</Badge></td>
+                <td className="px-4 py-3 text-right">
+                  <div className="flex justify-end gap-1.5">
+                    <Button variant="ghost" className="h-7 px-2 text-[11px]"><Eye className="h-3.5 w-3.5" /></Button>
+                    <Button variant="ghost" className="h-7 px-2 text-[11px]"><MessageCircle className="h-3.5 w-3.5" /></Button>
+                  </div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AdminStudents() {
+  const mockStudentList = [
+    { id: "s1", name: "Adi Pratama", school: "SMA N 1 Bandung", class: "XI IPA 2", avgScore: 88, lastActive: "Hari ini" },
+    { id: "s2", name: "Budi Rahmat", school: "SMA N 1 Bandung", class: "XI IPA 2", avgScore: 76, lastActive: "Kemarin" },
+    { id: "s3", name: "Citra Lestari", school: "SMA N 2 Bandung", class: "X IPS 1", avgScore: 91, lastActive: "Hari ini" },
+    { id: "s4", name: "Dewi Amalia", school: "SMA N 1 Bandung", class: "XII IPA 1", avgScore: 82, lastActive: "3 hari lalu" },
+    { id: "s5", name: "Eko Susanto", school: "SMP N 5 Bandung", class: "IX A", avgScore: 68, lastActive: "1 minggu lalu" },
+  ];
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <PageHeader eyebrow="Admin" title="Manajemen Siswa" />
+        <div className="flex gap-2">
+          <Button variant="outline" className="h-8 text-[12px]"><Upload className="mr-1.5 h-3.5 w-3.5" />Import CSV</Button>
+          <Button variant="default" className="h-8 text-[12px]"><Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Siswa</Button>
+        </div>
+      </div>
+      <div className="grid grid-cols-3 gap-4">
+        {[
+          { label: "Total Siswa", value: "1.312", detail: "Seluruh sekolah", tone: "primary" as const },
+          { label: "Aktif Bulan Ini", value: "1.189", detail: "90.6% aktif", tone: "success" as const },
+          { label: "Rata-rata Nilai", value: "79.4", detail: "Semua asesmen", tone: "neutral" as const },
+        ].map(s => <StatCard key={s.label} {...s} />)}
+      </div>
+      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
+        <table className="w-full">
+          <AdminTableHead cols={["Nama Siswa", "Sekolah", "Kelas", "Rata-rata Nilai", "Terakhir Aktif", "Aksi"]} />
+          <tbody>
+            {mockStudentList.map(s => (
+              <tr key={s.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
+                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{s.name}</span></td>
+                <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary">{s.school}</span></td>
+                <td className="px-4 py-3 text-[12px] text-ink">{s.class}</td>
+                <td className="px-4 py-3 text-[12px]">
+                  <span className={cn("font-semibold", s.avgScore >= 80 ? "text-success" : s.avgScore >= 70 ? "text-warning" : "text-danger")}>{s.avgScore}</span>
+                </td>
+                <td className="px-4 py-3 text-[12px] text-ink">{s.lastActive}</td>
+                <td className="px-4 py-3 text-right">
+                  <Button variant="ghost" className="h-7 px-2 text-[11px]"><Eye className="h-3.5 w-3.5" /></Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AdminClasses() {
+  const mockClasses = [
+    { id: "c1", name: "XI IPA 2", school: "SMA N 1 Bandung", teacher: "Bu Ratna Dewi", students: 32, avgScore: 82 },
+    { id: "c2", name: "XI IPA 1", school: "SMA N 1 Bandung", teacher: "Pak Budi Santoso", students: 34, avgScore: 78 },
+    { id: "c3", name: "XII IPA 1", school: "SMA N 1 Bandung", teacher: "Bu Ratna Dewi", students: 30, avgScore: 86 },
+    { id: "c4", name: "X IPS 1", school: "SMA N 2 Bandung", teacher: "Bu Sari Utami", students: 28, avgScore: 74 },
+    { id: "c5", name: "IX A", school: "SMP N 5 Bandung", teacher: "Pak Hendra", students: 35, avgScore: 71 },
+  ];
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <PageHeader eyebrow="Admin" title="Manajemen Kelas" />
+        <Button variant="default" className="h-8 text-[12px]"><Plus className="mr-1.5 h-3.5 w-3.5" />Buat Kelas</Button>
+      </div>
+      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
+        <table className="w-full">
+          <AdminTableHead cols={["Kelas", "Sekolah", "Wali Kelas", "Jumlah Siswa", "Rata-rata Nilai", "Aksi"]} />
+          <tbody>
+            {mockClasses.map(c => (
+              <tr key={c.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
+                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{c.name}</span></td>
+                <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary">{c.school}</span></td>
+                <td className="px-4 py-3 text-[12px] text-ink">{c.teacher}</td>
+                <td className="px-4 py-3 text-[12px] text-ink">{c.students}</td>
+                <td className="px-4 py-3 text-[12px]">
+                  <div className="flex items-center gap-2">
+                    <div className="h-1.5 w-16 rounded-full bg-border overflow-hidden">
+                      <div className="h-full rounded-full bg-primary" style={{ width: `${c.avgScore}%` }} />
+                    </div>
+                    <span className="font-semibold text-ink">{c.avgScore}</span>
+                  </div>
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <Button variant="ghost" className="h-7 px-2 text-[11px]"><Eye className="h-3.5 w-3.5" /></Button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AdminAssessments() {
+  const platformAssessments = [
+    { id: "a1", title: "Tes Diagnostik Fisika XI", school: "SMA N 1 Bandung", teacher: "Bu Ratna", participants: 32, avgScore: 78, status: "Selesai" },
+    { id: "a2", title: "Kuis Fungsi Kuadrat", school: "SMA N 1 Bandung", teacher: "Pak Budi", participants: 34, avgScore: 82, status: "Selesai" },
+    { id: "a3", title: "UTS Kimia X", school: "SMA N 2 Bandung", teacher: "Bu Sari", participants: 28, avgScore: 0, status: "Terjadwal" },
+    { id: "a4", title: "Latihan Adaptif Biologi", school: "SMA N 1 Bandung", teacher: "Pak Doni", participants: 30, avgScore: 71, status: "Selesai" },
+  ];
+  return (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <PageHeader eyebrow="Admin" title="Asesmen Platform" />
+        <Button variant="outline" className="h-8 text-[12px]"><Download className="mr-1.5 h-3.5 w-3.5" />Ekspor Laporan</Button>
+      </div>
+      <div className="grid grid-cols-3 gap-4">
+        {[
+          { label: "Total Asesmen", value: "247", detail: "Semester ini", tone: "primary" as const },
+          { label: "Partisipasi Rata-rata", value: "96%", detail: "Seluruh kelas", tone: "success" as const },
+          { label: "Rata-rata Platform", value: "78.4", detail: "Semua sekolah", tone: "neutral" as const },
+        ].map(s => <StatCard key={s.label} {...s} />)}
+      </div>
+      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
+        <table className="w-full">
+          <AdminTableHead cols={["Judul Asesmen", "Sekolah", "Guru", "Peserta", "Rata-rata", "Status"]} />
+          <tbody>
+            {platformAssessments.map(a => (
+              <tr key={a.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
+                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{a.title}</span></td>
+                <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary text-[11px]">{a.school}</span></td>
+                <td className="px-4 py-3 text-[12px] text-ink">{a.teacher}</td>
+                <td className="px-4 py-3 text-[12px] text-ink">{a.participants}</td>
+                <td className="px-4 py-3 text-[12px]">
+                  {a.status === "Terjadwal" ? <span className="text-ink-tertiary">—</span> : <span className="font-semibold text-ink">{a.avgScore}</span>}
+                </td>
+                <td className="px-4 py-3 text-[12px]"><Badge tone={a.status === "Selesai" ? "success" : "warning"}>{a.status}</Badge></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function AdminAnalytics() {
+  return (
+    <div className="space-y-6">
+      <PageHeader eyebrow="Admin" title="Analitik Platform"
+        description="Ringkasan performa dan keterlibatan seluruh sekolah yang terdaftar." />
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {[
+          { label: "Pengguna Aktif Hari Ini", value: "842", detail: "+12% vs kemarin", tone: "primary" as const },
+          { label: "Soal Dijawab Hari Ini", value: "14.320", detail: "Seluruh platform", tone: "success" as const },
+          { label: "Rata-rata Sesi", value: "18 mnt", detail: "Per siswa aktif", tone: "neutral" as const },
+          { label: "Tingkat Penyelesaian", value: "94%", detail: "Asesmen selesai", tone: "neutral" as const },
+        ].map(s => <StatCard key={s.label} {...s} />)}
+      </div>
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+        <div className="rounded-card border border-border bg-surface shadow-sm">
+          <div className="border-b border-border px-5 py-3.5">
+            <h3 className="text-[14px] font-bold text-ink">Pengguna Aktif — 30 Hari Terakhir</h3>
+          </div>
+          <div className="p-5">
+            <SimpleChart data={[620, 680, 710, 695, 730, 780, 810, 842, 798, 820, 860, 842, 790, 830]} labels={[]} height={130} />
+          </div>
+        </div>
+        <div className="rounded-card border border-border bg-surface shadow-sm">
+          <div className="border-b border-border px-5 py-3.5">
+            <h3 className="text-[14px] font-bold text-ink">Performa per Sekolah</h3>
+          </div>
+          <div className="p-5 space-y-3">
+            {[
+              { label: "SMA N 1 Bandung", value: 84 },
+              { label: "SMA N 2 Bandung", value: 78 },
+              { label: "SMP N 5 Bandung", value: 72 },
+              { label: "SMK N 3 Bandung", value: 69 },
+              { label: "SMA Swasta Al-Ikhlas", value: 75 },
+            ].map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminSettings() {
+  const [saved, setSaved] = useState(false);
+  const settings = [
+    { section: "Umum", fields: [
+      { label: "Nama Platform", value: "Catch Up — Platform Diagnostik Sekolah" },
+      { label: "Email Kontak Admin", value: "admin@catchup.id" },
+    ]},
+    { section: "Keamanan", fields: [
+      { label: "Batas Percobaan Login", value: "5" },
+      { label: "Masa Berlaku Sesi (jam)", value: "8" },
+    ]},
+    { section: "Notifikasi", fields: [
+      { label: "Email Notifikasi Laporan", value: "laporan@catchup.id" },
+    ]},
+  ];
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <PageHeader eyebrow="Admin" title="Pengaturan Platform" />
+      {settings.map(sec => (
+        <div key={sec.section} className="rounded-card border border-border bg-surface shadow-sm p-6 space-y-4">
+          <h3 className="text-[13px] font-bold text-ink border-b border-border pb-3">{sec.section}</h3>
+          {sec.fields.map(f => (
+            <div key={f.label}>
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">{f.label}</label>
+              <input defaultValue={f.value}
+                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+            </div>
+          ))}
+        </div>
+      ))}
+      <div className="flex justify-end gap-2">
+        <Button variant="default" className="h-8 text-[12px]" onClick={() => setSaved(true)}>Simpan Pengaturan</Button>
+      </div>
+      {saved && <AppToast message="Pengaturan berhasil disimpan" tone="success" onDismiss={() => setSaved(false)} />}
     </div>
   );
 }

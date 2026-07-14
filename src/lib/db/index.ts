@@ -5,7 +5,7 @@
  */
 
 import {
-  AlertCircle, BarChart3, Bell, BookMarked, BookOpen, ClipboardList,
+  AlertCircle, BarChart3, BookMarked, BookOpen, ClipboardList,
   Database, FilePlus2, FileSearch, GraduationCap, Home, Library,
   Lightbulb, LineChart, LucideIcon, MessageSquare, Monitor,
   School, Settings, Settings2, ShieldCheck, Trophy, TrendingUp,
@@ -24,7 +24,7 @@ export type AssessmentType = "TKA" | "UTS" | "UAS" | "Ujian Sekolah" | "Kuis Gur
 export type AssessmentStyleType = "TKA" | "Ujian Sekolah" | "UTS" | "UAS" | "Tryout" | "Kuis";
 export type MaterialType = "Buku Teks" | "PPT" | "RPP" | "Modul Ajar" | "Soal Latihan" | "Kunci Jawaban" | "Past Paper";
 export type BloomLevel = "Mengingat" | "Memahami" | "Menerapkan" | "Menganalisis" | "Mengevaluasi" | "Mencipta";
-export type ConfidenceDiagnosis = "Misconception" | "Knowledge Gap" | "Needs Reinforcement" | "Mastery";
+export type ConfidenceDiagnosis = "Miskonsepsi" | "Celah Pengetahuan" | "Perlu Pengulangan" | "Mahir";
 export type QuestionStatus = "Disetujui" | "Perlu Ditinjau" | "Ditolak";
 export type Difficulty = "Mudah" | "Sedang" | "Sulit";
 export type Priority = "Tinggi" | "Sedang" | "Rendah";
@@ -280,10 +280,10 @@ export type IncorrectQuestion = {
 };
 
 export const incorrectQuestions: IncorrectQuestion[] = [
-  { id: "iq1", question: "Diskriminan dari 2x² + 3x − 5 = 0 adalah...", yourAnswer: "C (41)", correctAnswer: "D (49)", explanation: "D = b² − 4ac = 3² − 4(2)(−5) = 9 + 40 = 49. Perhatikan tanda minus pada c = −5.", topic: "Diskriminan", assessmentTitle: "Kuis Diskriminan & Vieta", date: "29 Okt 2025", difficulty: "Sedang", confidenceDiagnosis: "Misconception" },
-  { id: "iq2", question: "Jika jumlah akar x² + px + 12 = 0 adalah 7, maka p adalah...", yourAnswer: "B (7)", correctAnswer: "A (−7)", explanation: "Rumus Vieta: x₁ + x₂ = −b/a = −p. Jika jumlah = 7, maka −p = 7, p = −7.", topic: "Rumus Vieta", assessmentTitle: "Kuis Diskriminan & Vieta", date: "29 Okt 2025", difficulty: "Sulit", confidenceDiagnosis: "Knowledge Gap" },
-  { id: "iq3", question: "Grafik y = (x − 2)² bergeser ke mana dibandingkan y = x²?", yourAnswer: "B (2 satuan ke kiri)", correctAnswer: "A (2 satuan ke kanan)", explanation: "Substitusi (x − 2) menggeser grafik ke kanan. Tanda minus dalam kurung → ke kanan.", topic: "Transformasi Grafik", assessmentTitle: "UTS Matematika XI", date: "15 Nov 2025", difficulty: "Mudah", confidenceDiagnosis: "Misconception" },
-  { id: "iq4", question: "Persamaan yang akar-akarnya 3 dan −5 adalah...", yourAnswer: "B (x² − 2x − 15 = 0)", correctAnswer: "A (x² + 2x − 15 = 0)", explanation: "Jumlah akar = −2, hasil kali = −15. Persamaan: x² − (jumlah)x + (kali) = x² + 2x − 15 = 0.", topic: "Persamaan Kuadrat", assessmentTitle: "UTS Matematika XI", date: "15 Nov 2025", difficulty: "Sedang", confidenceDiagnosis: "Knowledge Gap" },
+  { id: "iq1", question: "Diskriminan dari 2x² + 3x − 5 = 0 adalah...", yourAnswer: "C (41)", correctAnswer: "D (49)", explanation: "D = b² − 4ac = 3² − 4(2)(−5) = 9 + 40 = 49. Perhatikan tanda minus pada c = −5.", topic: "Diskriminan", assessmentTitle: "Kuis Diskriminan & Vieta", date: "29 Okt 2025", difficulty: "Sedang", confidenceDiagnosis: "Miskonsepsi" },
+  { id: "iq2", question: "Jika jumlah akar x² + px + 12 = 0 adalah 7, maka p adalah...", yourAnswer: "B (7)", correctAnswer: "A (−7)", explanation: "Rumus Vieta: x₁ + x₂ = −b/a = −p. Jika jumlah = 7, maka −p = 7, p = −7.", topic: "Rumus Vieta", assessmentTitle: "Kuis Diskriminan & Vieta", date: "29 Okt 2025", difficulty: "Sulit", confidenceDiagnosis: "Celah Pengetahuan" },
+  { id: "iq3", question: "Grafik y = (x − 2)² bergeser ke mana dibandingkan y = x²?", yourAnswer: "B (2 satuan ke kiri)", correctAnswer: "A (2 satuan ke kanan)", explanation: "Substitusi (x − 2) menggeser grafik ke kanan. Tanda minus dalam kurung → ke kanan.", topic: "Transformasi Grafik", assessmentTitle: "UTS Matematika XI", date: "15 Nov 2025", difficulty: "Mudah", confidenceDiagnosis: "Miskonsepsi" },
+  { id: "iq4", question: "Persamaan yang akar-akarnya 3 dan −5 adalah...", yourAnswer: "B (x² − 2x − 15 = 0)", correctAnswer: "A (x² + 2x − 15 = 0)", explanation: "Jumlah akar = −2, hasil kali = −15. Persamaan: x² − (jumlah)x + (kali) = x² + 2x − 15 = 0.", topic: "Persamaan Kuadrat", assessmentTitle: "UTS Matematika XI", date: "15 Nov 2025", difficulty: "Sedang", confidenceDiagnosis: "Celah Pengetahuan" },
 ];
 
 // ── Teaching Recommendations ───────────────────────────────────────────
@@ -452,18 +452,18 @@ export const teacherNotifications: AppNotification[] = [
 ];
 
 export const studentNotifications: AppNotification[] = [
-  { id: "sn1", title: "Asesmen baru tersedia", description: "Tes Diagnostik Fisika dijadwalkan 28 November, pukul 13.00. Persiapkan dirimu!", time: "5 menit lalu", read: false, tone: "primary" },
-  { id: "sn2", title: "Topik lemah: Diskriminan 38%", description: "Akurasi kamu masih rendah. Latihan adaptif telah disiapkan khusus untukmu.", time: "2 jam lalu", read: false, tone: "warning" },
-  { id: "sn3", title: "Hasil Kuis Fungsi Kuadrat", description: "Selamat! Kamu meraih skor 87 — di atas rata-rata kelas (82). Peringkat ke-4.", time: "Kemarin", read: true, tone: "success" },
-  { id: "sn4", title: "Materi baru: Barisan & Deret", description: "Bu Ratna menambahkan modul baru. Pelajari sebelum kuis minggu depan.", time: "2 hari lalu", read: true, tone: "neutral" },
-  { id: "sn5", title: "Pencapaian: Streak 7 Hari!", description: "Kamu sudah belajar 7 hari berturut-turut dan mendapat +100 XP. Pertahankan!", time: "3 hari lalu", read: true, tone: "success" },
+  { id: "sn1", title: "Asesmen baru tersedia", description: "Tes Diagnostik Fisika dijadwalkan 28 November, pukul 13.00. Persiapkan dirimu!", time: "5 menit lalu", read: false, tone: "primary", href: "/student/simulator" },
+  { id: "sn2", title: "Topik lemah: Diskriminan 38%", description: "Akurasi kamu masih rendah. Latihan adaptif telah disiapkan khusus untukmu.", time: "2 jam lalu", read: false, tone: "warning", href: "/student/adaptive" },
+  { id: "sn3", title: "Hasil Kuis Fungsi Kuadrat", description: "Selamat! Kamu meraih skor 87 — di atas rata-rata kelas (82). Peringkat ke-4.", time: "Kemarin", read: true, tone: "success", href: "/student/review" },
+  { id: "sn4", title: "Materi baru: Barisan & Deret", description: "Bu Ratna menambahkan modul baru. Pelajari sebelum kuis minggu depan.", time: "2 hari lalu", read: true, tone: "neutral", href: "/student/dashboard" },
+  { id: "sn5", title: "Pencapaian: Streak 7 Hari!", description: "Kamu sudah belajar 7 hari berturut-turut dan mendapat +100 XP. Pertahankan!", time: "3 hari lalu", read: true, tone: "success", href: "/student/achievements" },
 ];
 
 export const parentNotifications: AppNotification[] = [
-  { id: "pn1", title: "Hasil Kuis Fungsi Kuadrat", description: "Andi mendapat nilai 87 — di atas rata-rata kelas (82). Peringkat ke-4 dari 30 peserta.", time: "1 jam lalu", read: false, tone: "success" },
-  { id: "pn2", title: "Topik yang perlu perhatian", description: "Andi masih kesulitan di Diskriminan (38% akurasi). Bu Ratna menyarankan latihan tambahan.", time: "3 jam lalu", read: false, tone: "warning" },
-  { id: "pn3", title: "Asesmen baru dijadwalkan", description: "Tes Diagnostik Fisika pada 28 November 2025 pukul 13.00 WIB.", time: "Kemarin", read: true, tone: "neutral" },
-  { id: "pn4", title: "Streak belajar 7 hari", description: "Andi telah belajar konsisten 7 hari berturut-turut. Semangat belajarnya sangat baik!", time: "3 hari lalu", read: true, tone: "success" },
+  { id: "pn1", title: "Hasil Kuis Fungsi Kuadrat", description: "Andi mendapat nilai 87 — di atas rata-rata kelas (82). Peringkat ke-4 dari 30 peserta.", time: "1 jam lalu", read: false, tone: "success", href: "/parent/assessments" },
+  { id: "pn2", title: "Topik yang perlu perhatian", description: "Andi masih kesulitan di Diskriminan (38% akurasi). Bu Ratna menyarankan latihan tambahan.", time: "3 jam lalu", read: false, tone: "warning", href: "/parent/recommendations" },
+  { id: "pn3", title: "⚠️ Asesmen belum dikerjakan", description: "Tes Diagnostik Fisika (28 Nov) belum dikerjakan Andi. Ingatkan segera!", time: "Kemarin", read: false, tone: "danger", href: "/parent/assessments" },
+  { id: "pn4", title: "Streak belajar 7 hari", description: "Andi telah belajar konsisten 7 hari berturut-turut. Semangat belajarnya sangat baik!", time: "3 hari lalu", read: true, tone: "success", href: "/parent/progress" },
 ];
 
 export const adminNotifications: AppNotification[] = [
@@ -502,8 +502,7 @@ export const parentNav: NavItem[] = [
   { title: "Dasbor", href: "/parent/dashboard", icon: Home, group: "OVERVIEW" },
   { title: "Progres Andi", href: "/parent/progress", icon: TrendingUp, group: "PEMANTAUAN" },
   { title: "Riwayat Asesmen", href: "/parent/assessments", icon: ClipboardList, group: "PEMANTAUAN" },
-  { title: "Rekomendasi Guru", href: "/parent/recommendations", icon: Lightbulb, group: "PEMANTAUAN" },
-  { title: "Notifikasi", href: "/parent/notifications", icon: Bell, group: "LAINNYA" },
+  { title: "Rekomendasi Pengajaran", href: "/parent/recommendations", icon: Lightbulb, group: "PEMANTAUAN" },
 ];
 
 export const adminNav: NavItem[] = [
