@@ -45,7 +45,6 @@ import {
   classStats,
   currentSemester,
   currentTeacher,
-  getAssistantReply,
   incorrectQuestions,
   leaderboard,
   materials,
@@ -677,27 +676,48 @@ function TeacherMaterials() {
           <div className="mt-4 flex justify-end gap-2">
             <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowUpload(false); setUploadedFile(null); }}>Batal</Button>
             <Button variant="default" className="h-8 text-[12px]" disabled={uploading}
-              onClick={() => {
+              onClick={async () => {
                 setUploading(true);
-                setTimeout(() => {
-                  const fileName = uploadedFile?.name ?? "Materi Baru";
-                  const newMat: Material = {
-                    id: `mat-upload-${Date.now()}`,
-                    title: fileName.replace(/\.[^/.]+$/, ""),
-                    type: "Modul Ajar",
-                    subject: currentTeacher.subject,
-                    uploadedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
-                    pages: 0,
-                    status: "Diproses",
-                    aiProcessed: false,
-                    questionsGenerated: 0,
-                  };
-                  setUploadedMaterials(prev => [newMat, ...prev]);
-                  setUploading(false);
-                  setShowUpload(false);
-                  setUploadedFile(null);
-                  setToast({ message: "Materi berhasil diunggah dan sedang diproses AI", tone: "success" });
-                }, 2000);
+                const fileName = uploadedFile?.name ?? "Materi Baru";
+                const title = fileName.replace(/\.[^/.]+$/, "");
+                const newMat: Material = {
+                  id: `mat-upload-${Date.now()}`,
+                  title,
+                  type: "Modul Ajar",
+                  subject: currentTeacher.subject,
+                  uploadedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+                  pages: 0,
+                  status: "Diproses",
+                  aiProcessed: false,
+                  questionsGenerated: 0,
+                };
+                setUploadedMaterials(prev => [newMat, ...prev]);
+
+                // Call real AI summarizer
+                try {
+                  const res = await fetch("/api/summarize", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ materialTitle: title, topic: title, subject: currentTeacher.subject }),
+                  });
+                  const data = await res.json() as { estimatedStudyTime?: string; error?: string };
+                  if (!data.error) {
+                    setUploadedMaterials(prev => prev.map(m =>
+                      m.id === newMat.id ? { ...m, status: "Aktif" as Material["status"], aiProcessed: true, questionsGenerated: 15 } : m
+                    ));
+                    setToast({ message: "Materi diproses AI — 15 soal siap diekstrak", tone: "success" });
+                  } else {
+                    setUploadedMaterials(prev => prev.map(m => m.id === newMat.id ? { ...m, status: "Aktif" as Material["status"] } : m));
+                    setToast({ message: "Materi diunggah (API offline — isi API key di .env.local)", tone: "primary" });
+                  }
+                } catch {
+                  setUploadedMaterials(prev => prev.map(m => m.id === newMat.id ? { ...m, status: "Aktif" as Material["status"] } : m));
+                  setToast({ message: "Materi diunggah (API offline)", tone: "primary" });
+                }
+
+                setUploading(false);
+                setShowUpload(false);
+                setUploadedFile(null);
               }}>
               {uploading ? (
                 <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />Mengunggah...</>
@@ -1445,6 +1465,7 @@ function TeacherAssessmentBuilder() {
   const [selectedMaterials, setSelectedMaterials] = useState<Set<string>>(new Set());
   const [aiGenerating, setAiGenerating] = useState(false);
   const [aiGenerated, setAiGenerated] = useState(false);
+  const [aiGeneratedQuestions, setAiGeneratedQuestions] = useState<typeof questionBank>([]);
   const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(new Set());
   const [assessmentType, setAssessmentType] = useState<"uniform" | "adaptive">("uniform");
   const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
@@ -1461,15 +1482,62 @@ function TeacherAssessmentBuilder() {
       return next;
     });
     setAiGenerated(false);
+    setAiGeneratedQuestions([]);
   }
 
-  function generateAI() {
+  async function generateAI() {
     if (selectedMaterials.size === 0) return;
     setAiGenerating(true);
-    setTimeout(() => {
-      setAiGenerating(false);
-      setAiGenerated(true);
-    }, 2200);
+    setAiGeneratedQuestions([]);
+
+    const matList = materials.filter(m => selectedMaterials.has(m.id));
+    const allGenerated: typeof questionBank = [];
+
+    for (const mat of matList) {
+      try {
+        const res = await fetch("/api/generate-questions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            materialTitle: mat.title,
+            topic: mat.subject ?? mat.title,
+            subject: mat.subject ?? "Umum",
+            count: 5,
+            difficulty: "Sedang",
+          }),
+        });
+        const data = await res.json() as { questions?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }>; error?: string };
+        if (data.questions?.length) {
+          allGenerated.push(...data.questions.map((q, i) => ({
+            id: `gen-${mat.id}-${i}`,
+            question: q.question,
+            topic: q.topic,
+            subtopic: q.topic,
+            bloom: "Menerapkan" as const,
+            difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
+            styleType: "TKA" as const,
+            source: mat.title,
+            usageCount: 0,
+            successRate: 0,
+            status: "Disetujui" as const,
+            isLocked: false,
+            options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
+            correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
+            explanation: q.explanation,
+          })));
+        }
+      } catch { /* fallback to db bank below */ }
+    }
+
+    if (allGenerated.length === 0) {
+      // Fallback to existing question bank when API is unavailable
+      allGenerated.push(...questionBank.slice(0, 6));
+      setToast({ message: "API belum tersambung — menampilkan soal dari bank lokal", tone: "primary" });
+    }
+
+    setAiGeneratedQuestions(allGenerated);
+    setAiGenerating(false);
+    setAiGenerated(true);
   }
 
   function toggleQuestion(id: string) {
@@ -1668,12 +1736,12 @@ function TeacherAssessmentBuilder() {
                 <div className="flex items-center justify-between border-b border-success/20 px-5 py-3.5">
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className="h-4 w-4 text-success" />
-                    <h3 className="text-[13px] font-bold text-ink">{questionBank.length} soal berhasil dibuat AI</h3>
+                    <h3 className="text-[13px] font-bold text-ink">{aiGeneratedQuestions.length} soal berhasil dibuat AI</h3>
                   </div>
                   <Badge tone="primary">{selectedQuestions.size} dipilih</Badge>
                 </div>
                 <div className="p-4 space-y-2">
-                  {questionBank.slice(0, 6).map(q => (
+                  {aiGeneratedQuestions.map(q => (
                     <div key={q.id} onClick={() => toggleQuestion(q.id)}
                       className={cn(
                         "flex items-start gap-3 rounded-[8px] border p-3 cursor-pointer transition-all",
@@ -3004,22 +3072,67 @@ function StudentTutor() {
   const [messages, setMessages] = useState<ChatMessage[]>([assistantGreeting]);
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
 
-  function send(text: string) {
-    if (!text.trim()) return;
+  async function send(text: string) {
+    if (!text.trim() || isTyping) return;
     const userMsg: ChatMessage = { id: Date.now().toString(), role: "user", content: text, timestamp: "Baru saja" };
     setMessages(prev => [...prev, userMsg]);
     setInput("");
     setIsTyping(true);
-    setTimeout(() => {
-      const reply = getAssistantReply(text);
-      setMessages(prev => [...prev, {
-        id: (Date.now() + 1).toString(), role: "assistant",
-        content: reply.content, sources: reply.sources, grounded: reply.grounded, timestamp: "Baru saja",
-      }]);
+    setApiError(null);
+
+    const assistantId = (Date.now() + 1).toString();
+    setMessages(prev => [...prev, { id: assistantId, role: "assistant", content: "", grounded: true, timestamp: "Baru saja" }]);
+
+    try {
+      const history = messages
+        .filter(m => m.id !== "greeting")
+        .map(m => ({ role: m.role, content: m.content }));
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: [...history, { role: "user", content: text }],
+          materials: materials.map(m => ({ title: m.title, topic: m.subject ?? "" })),
+        }),
+      });
+
+      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream: true });
+        for (const line of chunk.split("\n")) {
+          if (!line.startsWith("data: ")) continue;
+          const data = line.slice(6);
+          if (data === "[DONE]") break;
+          try {
+            const parsed = JSON.parse(data) as { text?: string; error?: string };
+            if (parsed.error) throw new Error(parsed.error);
+            if (parsed.text) {
+              accumulated += parsed.text;
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId ? { ...m, content: accumulated } : m
+              ));
+            }
+          } catch { /* skip malformed chunks */ }
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "Gagal menghubungi AI";
+      setApiError(msg);
+      setMessages(prev => prev.filter(m => m.id !== assistantId));
+    } finally {
       setIsTyping(false);
-    }, 900);
+    }
   }
 
   return (
@@ -3030,7 +3143,13 @@ function StudentTutor() {
       <div role="log" aria-label="Riwayat percakapan" aria-live="polite"
         className="flex-1 overflow-y-auto space-y-4 rounded-card border border-border bg-surface p-5 shadow-sm">
         {messages.map(m => <ChatBubble key={m.id} message={m} grounded={m.grounded !== false} />)}
-        {isTyping && <TypingIndicator />}
+        {isTyping && messages[messages.length - 1]?.content === "" && <TypingIndicator />}
+        {apiError && (
+          <div className="flex items-center gap-2 rounded-[10px] border border-danger/20 bg-danger-light px-4 py-2.5">
+            <AlertCircle className="h-4 w-4 shrink-0 text-danger" />
+            <span className="text-[12px] text-danger">{apiError} — pastikan API key sudah diisi di .env.local</span>
+          </div>
+        )}
       </div>
       {messages.length <= 1 && (
         <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
