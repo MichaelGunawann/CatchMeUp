@@ -43,6 +43,7 @@ import {
   assessments,
   assistantGreeting,
   classStats,
+  currentSemester,
   currentTeacher,
   getAssistantReply,
   incorrectQuestions,
@@ -51,6 +52,7 @@ import {
   pastPaperTopics,
   pendingQuestions,
   questionBank,
+  school,
   scoreTrend,
   scoreTrendLabels,
   scoreDistribution,
@@ -206,6 +208,11 @@ function TeacherDashboard() {
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
   const [showAllStudents, setShowAllStudents] = useState(false);
   const [upcomingDetailId, setUpcomingDetailId] = useState<string | null>(null);
+  const [showUploadModal, setShowUploadModal] = useState(false);
+  const [uploadDragOver, setUploadDragOver] = useState(false);
+  const [uploadFile, setUploadFile] = useState<File | null>(null);
+  const [uploadToast, setUploadToast] = useState<string | null>(null);
+  const dashboardFileInputRef = React.useRef<HTMLInputElement>(null);
   const selectedStudent = students.find(s => s.id === selectedStudentId);
   const upcomingDetail = assessments.find(a => a.id === upcomingDetailId);
 
@@ -237,11 +244,9 @@ function TeacherDashboard() {
               <Plus className="mr-1.5 h-3.5 w-3.5" />Buat Asesmen
             </Button>
           </Link>
-          <Link href="/teacher/materials">
-            <Button variant="default" className="h-8 text-[12px]">
-              <Upload className="mr-1.5 h-3.5 w-3.5" />Unggah Materi
-            </Button>
-          </Link>
+          <Button variant="default" className="h-8 text-[12px]" onClick={() => setShowUploadModal(true)}>
+            <Upload className="mr-1.5 h-3.5 w-3.5" />Unggah Materi
+          </Button>
         </div>
       </div>
 
@@ -373,7 +378,7 @@ function TeacherDashboard() {
                 </div>
                 <div>
                   <h2 className="text-[15px] font-bold text-ink">{selectedStudent.name}</h2>
-                  <p className="text-[11px] text-ink-secondary">XI IPA 2 · Peringkat #{selectedStudent.rank ?? "—"}</p>
+                  <p className="text-[11px] text-ink-secondary">{selectedStudent.className} · Peringkat #{selectedStudent.rank ?? "—"}</p>
                 </div>
               </div>
               <button onClick={() => setSelectedStudentId(null)}
@@ -488,6 +493,79 @@ function TeacherDashboard() {
           </div>
         </div>
       )}
+
+      {/* ── Quick Upload Modal ── */}
+      {showUploadModal && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => { setShowUploadModal(false); setUploadFile(null); }} />
+          <div className="relative w-full max-w-lg rounded-card border border-border bg-surface shadow-xl">
+            <div className="flex items-center justify-between border-b border-border px-5 py-4 shrink-0">
+              <h2 className="text-[15px] font-bold text-ink">Unggah Materi Baru</h2>
+              <button onClick={() => { setShowUploadModal(false); setUploadFile(null); }}
+                className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <input ref={dashboardFileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx" className="hidden"
+                onChange={e => setUploadFile(e.target.files?.[0] ?? null)} />
+              <div
+                className={cn("flex flex-col items-center gap-3 rounded-[10px] border-2 border-dashed p-6 text-center transition-colors",
+                  uploadDragOver ? "border-primary bg-primary/5" : "border-primary/30 bg-primary-soft")}
+                onDragOver={e => { e.preventDefault(); setUploadDragOver(true); }}
+                onDragLeave={() => setUploadDragOver(false)}
+                onDrop={e => { e.preventDefault(); setUploadDragOver(false); setUploadFile(e.dataTransfer.files[0] ?? null); }}>
+                <div className={cn("flex h-12 w-12 items-center justify-center rounded-xl border-2 border-dashed transition-colors",
+                  uploadDragOver ? "border-primary bg-primary/10" : "border-primary/30 bg-white")}>
+                  <Upload className="h-6 w-6 text-primary" />
+                </div>
+                <div>
+                  <p className="text-[13px] font-semibold text-ink">Tarik & lepas file di sini</p>
+                  <p className="text-[11px] text-ink-secondary mt-0.5">PDF, PPT, DOCX · Maks. 50 MB</p>
+                </div>
+                <Button variant="outline" className="h-7 text-[11px]" onClick={() => dashboardFileInputRef.current?.click()}>
+                  Pilih File
+                </Button>
+              </div>
+              {uploadFile && (
+                <div className="flex items-center gap-2 rounded-[8px] border border-success/30 bg-success-light px-3 py-2">
+                  <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[12px] font-semibold text-ink truncate">{uploadFile.name}</div>
+                    <div className="text-[10px] text-ink-secondary">{(uploadFile.size / 1024).toFixed(0)} KB</div>
+                  </div>
+                  <button onClick={() => setUploadFile(null)} className="text-ink-tertiary hover:text-danger shrink-0">
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              )}
+              <div className="grid grid-cols-2 gap-3">
+                {[
+                  { label: "Mata Pelajaran *", ph: currentTeacher.subject },
+                  { label: "Kelas *", ph: currentTeacher.classes[0] },
+                ].map(f => (
+                  <div key={f.label}>
+                    <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">{f.label}</label>
+                    <input type="text" defaultValue={f.ph}
+                      className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5">
+              <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowUploadModal(false); setUploadFile(null); }}>Batal</Button>
+              <Button variant="default" className="h-8 text-[12px]" onClick={() => {
+                setShowUploadModal(false); setUploadFile(null);
+                setUploadToast("Materi berhasil diunggah dan sedang diproses AI");
+              }}>
+                <Sparkles className="mr-1.5 h-3.5 w-3.5" />Unggah & Proses AI
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {uploadToast && <AppToast message={uploadToast} tone="success" onDismiss={() => setUploadToast(null)} />}
     </div>
   );
 }
@@ -497,12 +575,18 @@ function TeacherDashboard() {
 function TeacherMaterials() {
   const [showUpload, setShowUpload] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadedMaterials, setUploadedMaterials] = useState<Material[]>([]);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [selectedMaterial, setSelectedMaterial] = useState<Material | null>(null);
   const [confirmProcessId, setConfirmProcessId] = useState<string | null>(null);
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
   const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
   const [editMeta, setEditMeta] = useState(false);
+
+  const allMaterials = [...uploadedMaterials, ...materials];
 
   function handleProcessAI(id: string) {
     setConfirmProcessId(id);
@@ -537,6 +621,8 @@ function TeacherMaterials() {
 
       {showUpload && (
         <div className="rounded-card border-2 border-dashed border-primary/30 bg-primary-soft p-8">
+          <input ref={fileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx" className="hidden"
+            onChange={e => setUploadedFile(e.target.files?.[0] ?? null)} />
           <div className="flex flex-col items-center gap-4 text-center">
             <div
               className={cn(
@@ -545,7 +631,7 @@ function TeacherMaterials() {
               )}
               onDragOver={e => { e.preventDefault(); setDragOver(true); }}
               onDragLeave={() => setDragOver(false)}
-              onDrop={e => { e.preventDefault(); setDragOver(false); }}
+              onDrop={e => { e.preventDefault(); setDragOver(false); setUploadedFile(e.dataTransfer.files[0] ?? null); }}
             >
               <Upload className="h-7 w-7 text-primary" />
             </div>
@@ -553,13 +639,25 @@ function TeacherMaterials() {
               <p className="text-[15px] font-bold text-ink">Tarik & lepas file di sini</p>
               <p className="text-[12px] text-ink-secondary mt-1">PDF, PPT, DOCX · Maks. 50 MB per file</p>
             </div>
-            <Button variant="outline" className="h-8 text-[12px]">Pilih File</Button>
+            <Button variant="outline" className="h-8 text-[12px]" onClick={() => fileInputRef.current?.click()}>Pilih File</Button>
           </div>
+          {uploadedFile && (
+            <div className="mt-3 flex items-center gap-2 rounded-[8px] border border-success/30 bg-success-light px-3 py-2">
+              <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-[12px] font-semibold text-ink truncate">{uploadedFile.name}</div>
+                <div className="text-[10px] text-ink-secondary">{(uploadedFile.size / 1024).toFixed(0)} KB</div>
+              </div>
+              <button onClick={() => setUploadedFile(null)} className="text-ink-tertiary hover:text-danger shrink-0">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
           <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-primary/10 pt-6">
             {[
               { label: "Tipe Materi *", ph: "Buku Teks, PPT, RPP, Modul Ajar..." },
-              { label: "Mata Pelajaran *", ph: "Matematika XI" },
-              { label: "Kelas/Tingkat *", ph: "XI" },
+              { label: "Mata Pelajaran *", ph: currentTeacher.subject },
+              { label: "Kelas/Tingkat *", ph: currentTeacher.classes[0] },
               { label: "Bab/Topik *", ph: "Fungsi Kuadrat" },
               { label: "Tahun Ajaran *", ph: "2025/2026" },
               { label: "Penerbit (opsional)", ph: "Erlangga, Grafindo, dst." },
@@ -577,9 +675,35 @@ function TeacherMaterials() {
             </div>
           </div>
           <div className="mt-4 flex justify-end gap-2">
-            <Button variant="outline" className="h-8 text-[12px]" onClick={() => setShowUpload(false)}>Batal</Button>
-            <Button variant="default" className="h-8 text-[12px]">
-              <Sparkles className="mr-1.5 h-3.5 w-3.5" />Unggah & Proses AI
+            <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowUpload(false); setUploadedFile(null); }}>Batal</Button>
+            <Button variant="default" className="h-8 text-[12px]" disabled={uploading}
+              onClick={() => {
+                setUploading(true);
+                setTimeout(() => {
+                  const fileName = uploadedFile?.name ?? "Materi Baru";
+                  const newMat: Material = {
+                    id: `mat-upload-${Date.now()}`,
+                    title: fileName.replace(/\.[^/.]+$/, ""),
+                    type: "Modul Ajar",
+                    subject: currentTeacher.subject,
+                    uploadedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+                    pages: 0,
+                    status: "Diproses",
+                    aiProcessed: false,
+                    questionsGenerated: 0,
+                  };
+                  setUploadedMaterials(prev => [newMat, ...prev]);
+                  setUploading(false);
+                  setShowUpload(false);
+                  setUploadedFile(null);
+                  setToast({ message: "Materi berhasil diunggah dan sedang diproses AI", tone: "success" });
+                }, 2000);
+              }}>
+              {uploading ? (
+                <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />Mengunggah...</>
+              ) : (
+                <><Sparkles className="mr-1.5 h-3.5 w-3.5" />Unggah & Proses AI</>
+              )}
             </Button>
           </div>
         </div>
@@ -587,22 +711,22 @@ function TeacherMaterials() {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { label: "Total materi", value: `${materials.length}`, detail: "Aktif & draf", tone: "neutral" as const },
-          { label: "Diproses AI", value: `${materials.filter(mat => mat.aiProcessed).length + processedIds.size}`, detail: "Dari total materi", tone: "success" as const },
-          { label: "Soal diekstrak", value: materials.reduce((s, mat) => s + mat.questionsGenerated, 0).toString(), detail: "Siap digunakan", tone: "primary" as const },
-          { label: "Menunggu proses", value: `${Math.max(0, materials.filter(mat => !mat.aiProcessed && mat.status !== "Draf").length - processedIds.size)}`, detail: "Dalam antrean", tone: "warning" as const },
+          { label: "Total materi", value: `${allMaterials.length}`, detail: "Aktif & draf", tone: "neutral" as const },
+          { label: "Diproses AI", value: `${allMaterials.filter(mat => mat.aiProcessed).length + processedIds.size}`, detail: "Dari total materi", tone: "success" as const },
+          { label: "Soal diekstrak", value: allMaterials.reduce((s, mat) => s + mat.questionsGenerated, 0).toString(), detail: "Siap digunakan", tone: "primary" as const },
+          { label: "Menunggu proses", value: `${Math.max(0, allMaterials.filter(mat => !mat.aiProcessed && mat.status !== "Draf").length - processedIds.size)}`, detail: "Dalam antrean", tone: "warning" as const },
         ].map(s => <StatCard key={s.label} {...s} />)}
       </div>
 
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
-          <h2 className="text-[14px] font-bold text-ink">Daftar Materi ({materials.length})</h2>
+          <h2 className="text-[14px] font-bold text-ink">Daftar Materi ({allMaterials.length})</h2>
           <button className="flex items-center gap-1.5 rounded-[6px] border border-border bg-background px-3 py-1.5 text-[11px] font-semibold text-ink-secondary hover:text-ink transition-colors">
             <Filter className="h-3 w-3" />Filter
           </button>
         </div>
         <div className="p-4 space-y-3">
-          {materials.map(mat => (
+          {allMaterials.map(mat => (
             <MaterialCard key={mat.id} title={mat.title} type={mat.type} subject={mat.subject ?? ""} pages={mat.pages}
               uploadedAt={mat.uploadedAt} status={mat.status}
               aiProcessed={mat.aiProcessed || processedIds.has(mat.id)}
@@ -700,6 +824,41 @@ function TeacherMaterials() {
                   )}
                 </div>
               </div>
+
+              {/* Soal Diekstrak section */}
+              {isDialogProcessed && (() => {
+                const subjectLower = (m.subject ?? "").toLowerCase();
+                const topicLower = (m.chapter ?? "").toLowerCase();
+                const relatedQs = questionBank.filter(q =>
+                  q.topic.toLowerCase().includes(subjectLower.replace(" xi", "").replace(" x", "").trim()) ||
+                  q.topic.toLowerCase().includes(topicLower) ||
+                  subjectLower.includes(q.topic.toLowerCase())
+                );
+                const displayQs = relatedQs.length > 0 ? relatedQs : questionBank;
+                return (
+                  <div>
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="text-[12px] font-bold text-ink">Soal Diekstrak ({displayQs.length})</div>
+                      {relatedQs.length === 0 && (
+                        <span className="text-[10px] text-ink-tertiary">Menampilkan semua soal (demo)</span>
+                      )}
+                    </div>
+                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
+                      {displayQs.slice(0, 8).map(q => (
+                        <div key={q.id} className="flex items-start gap-2 rounded-[8px] border border-border bg-background px-3 py-2">
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[11px] text-ink line-clamp-2">{q.question}</p>
+                          </div>
+                          <div className="flex gap-1 shrink-0">
+                            <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+                            <Badge tone="neutral">{q.topic}</Badge>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
 
             {/* Footer */}
@@ -743,6 +902,9 @@ function TeacherMaterials() {
 function TeacherAssessmentStyles() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showUploadPaket, setShowUploadPaket] = useState(false);
+  const [paketFile, setPaketFile] = useState<File | null>(null);
+  const [paketDragOver, setPaketDragOver] = useState(false);
+  const paketFileInputRef = React.useRef<HTMLInputElement>(null);
   const selected = assessmentStyles.find(a => a.id === selectedId) as AssessmentStyleCorpus | undefined;
   const [config, setConfig] = useState({
     duration: 90, questions: 50,
@@ -809,12 +971,32 @@ function TeacherAssessmentStyles() {
             </div>
             <div className="md:col-span-2">
               <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">File Paket Soal *</label>
-              <div className="flex items-center gap-3 rounded-[8px] border border-dashed border-primary/40 bg-white px-4 py-4 text-center">
+              <input ref={paketFileInputRef} type="file" accept=".pdf,.docx,.xlsx" className="hidden"
+                onChange={e => setPaketFile(e.target.files?.[0] ?? null)} />
+              <div
+                className={cn("flex items-center gap-3 rounded-[8px] border border-dashed px-4 py-4 text-center transition-colors",
+                  paketDragOver ? "border-primary bg-primary/5" : "border-primary/40 bg-white")}
+                onDragOver={e => { e.preventDefault(); setPaketDragOver(true); }}
+                onDragLeave={() => setPaketDragOver(false)}
+                onDrop={e => { e.preventDefault(); setPaketDragOver(false); setPaketFile(e.dataTransfer.files[0] ?? null); }}>
                 <Upload className="h-5 w-5 text-primary shrink-0" />
                 <div className="flex-1">
-                  <p className="text-[12px] text-ink-secondary">Tarik file ke sini atau</p>
-                  <button className="text-[12px] font-semibold text-primary hover:underline">Pilih File</button>
-                  <p className="text-[10px] text-ink-tertiary mt-0.5">PDF, DOCX, XLSX · Maks. 20 MB</p>
+                  {paketFile ? (
+                    <div className="flex items-center gap-2">
+                      <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+                      <span className="text-[12px] font-semibold text-ink truncate">{paketFile.name}</span>
+                      <span className="text-[10px] text-ink-secondary shrink-0">{(paketFile.size / 1024).toFixed(0)} KB</span>
+                      <button onClick={() => setPaketFile(null)} className="text-ink-tertiary hover:text-danger ml-auto shrink-0">
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="text-[12px] text-ink-secondary">Tarik file ke sini atau</p>
+                      <button onClick={() => paketFileInputRef.current?.click()} className="text-[12px] font-semibold text-primary hover:underline">Pilih File</button>
+                      <p className="text-[10px] text-ink-tertiary mt-0.5">PDF, DOCX, XLSX · Maks. 20 MB</p>
+                    </>
+                  )}
                 </div>
               </div>
             </div>
@@ -1268,7 +1450,9 @@ function TeacherAssessmentBuilder() {
   const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
   const [showAddQuestion, setShowAddQuestion] = useState(false);
   const [confirmAddToBank, setConfirmAddToBank] = useState(false);
+  const [selectedStyle, setSelectedStyle] = useState<string>("");
   const [newQ, setNewQ] = useState({ text: "", optA: "", optB: "", optC: "", optD: "", correct: "A", difficulty: "Sedang", topic: "", explanation: "" });
+  const selectedStyleData = assessmentStyles.find(s => s.id === selectedStyle);
 
   function toggleMaterial(id: string) {
     setSelectedMaterials(prev => {
@@ -1345,12 +1529,16 @@ function TeacherAssessmentBuilder() {
 
           <div>
             <label className="block text-[11px] font-semibold text-ink-secondary mb-2">Gaya Asesmen *</label>
-            <select className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+            <select value={selectedStyle} onChange={e => setSelectedStyle(e.target.value)}
+              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
               <option value="">Pilih gaya asesmen...</option>
               {assessmentStyles.map(s => (
                 <option key={s.id} value={s.id}>{s.name}</option>
               ))}
             </select>
+            {selectedStyleData?.description && (
+              <p className="mt-1.5 text-[11px] text-ink-secondary leading-relaxed">{selectedStyleData.description}</p>
+            )}
           </div>
 
           {/* Assessment distribution type */}
@@ -1693,8 +1881,6 @@ function TeacherResults() {
   const [detailId, setDetailId] = useState<string | null>(null);
   const detail = assessments.find(a => a.id === detailId);
 
-  const mockScoreDist = [2, 5, 8, 12, 9, 6, 3];
-  const mockScoreLabels = ["40–49", "50–59", "60–69", "70–79", "80–89", "90–95", "96–100"];
 
   return (
     <div className="space-y-6">
@@ -1774,14 +1960,7 @@ function TeacherResults() {
                   {/* Score distribution */}
                   <div className="rounded-[10px] border border-border bg-background p-4">
                     <h3 className="text-[12px] font-bold text-ink mb-3">Distribusi Nilai</h3>
-                    <div className="flex items-end gap-1 h-16">
-                      {mockScoreDist.map((v, i) => (
-                        <div key={i} className="flex-1 flex flex-col items-center gap-0.5">
-                          <div className="w-full rounded-t-sm bg-primary/60 transition-all" style={{ height: `${(v / 12) * 100}%` }} />
-                          <div className="text-[8px] text-ink-tertiary">{mockScoreLabels[i]}</div>
-                        </div>
-                      ))}
-                    </div>
+                    <SimpleChart data={scoreDistribution} labels={scoreDistributionLabels} type="bar" height={100} />
                   </div>
 
                   {/* Top performers */}
@@ -1846,7 +2025,7 @@ function TeacherAnalytics() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Analitik Kelas" title="Analitik XI IPA 2" description="Performa kelas berdasarkan data asesmen semester ini." />
+      <PageHeader eyebrow="Analitik Kelas" title={`Analitik ${currentTeacher.classes[0]}`} description="Performa kelas berdasarkan data asesmen semester ini." />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {teacherAnalyticsStats.map(s => <StatCard key={s.label} {...s} />)}
@@ -2352,6 +2531,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     );
   }
 
+  const examTitle = assessments.find(a => a.status === "Terjadwal")?.title ?? "Asesmen Diagnostik";
   const total = simulatorQuestions.length;
   const currentQ = simulatorQuestions[current];
   const currentOpts = [currentQ.optionA, currentQ.optionB, currentQ.optionC, currentQ.optionD, currentQ.optionE];
@@ -2375,7 +2555,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
         <div className="mx-auto flex h-14 max-w-4xl items-center justify-between px-4 sm:px-6">
           <div className="flex items-center gap-2.5 min-w-0">
             <ShieldCheck className="h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-            <div className="text-[13px] font-bold text-ink truncate">Tes Diagnostik Fisika</div>
+            <div className="text-[13px] font-bold text-ink truncate">{examTitle}</div>
             <Badge tone="primary">Soal {current + 1}/{total}</Badge>
           </div>
           <div className="flex items-center gap-3 shrink-0">
@@ -2644,9 +2824,9 @@ function StudentAdaptive() {
       <CatchMeUpCard studentName={studentProfile.name}
         weakTopics={weakTopics.slice(0, 2).map(t => t.topic)}
         nextAction="Latihan hari ini fokus pada Diskriminan — 10 soal pilihan AI."
-        onStart={() => setShowSession(true)} />
+        onStart={() => { document.getElementById("adaptive-topics")?.scrollIntoView({ behavior: "smooth" }); }} />
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      <div id="adaptive-topics" className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {weakTopics.slice(0, 3).map(t => (
           <div key={t.id} className="rounded-card border border-border bg-surface p-4 hover:border-primary/30 hover:shadow-soft transition-all">
             <div className="flex items-start justify-between gap-2 mb-3">
@@ -2670,12 +2850,13 @@ function StudentAdaptive() {
 // ── Student Review ────────────────────────────────────────────────────────────
 
 function StudentReview() {
+  const router = useRouter();
   const [reviewDetailId, setReviewDetailId] = useState<string | null>(null);
   const reviewResult = studentResults.find(r => r.id === reviewDetailId);
 
   // Mock student answers: sq3 wrong (answered C, correct D), sq5 wrong (answered B, correct A)
   const mockStudentAnswers: Record<string, string> = { sq3: "C", sq5: "B" };
-  const reviewQs = simulatorQuestions.slice(0, 8);
+  const reviewQs = simulatorQuestions.slice(0, 5);
 
   return (
     <div className="space-y-6">
@@ -2722,9 +2903,10 @@ function StudentReview() {
                     <div className="flex items-center gap-2 mb-2">
                       <span className="text-[11px] font-bold text-ink-secondary">Soal {idx + 1}</span>
                       <Badge tone={isWrong ? "danger" : "success"}>{isWrong ? "Salah" : "Benar"}</Badge>
+                      <Badge tone="neutral">{q.topic}</Badge>
                     </div>
                     <p className="text-[13px] font-medium text-ink mb-3">{q.question}</p>
-                    <div className="grid grid-cols-1 gap-1.5">
+                    <div className="grid grid-cols-1 gap-1.5 mb-3">
                       {(["A", "B", "C", "D", "E"] as const).map(opt => {
                         const isCorrect = q.correctAnswer === opt;
                         const isStudentAns = studentAns === opt;
@@ -2741,26 +2923,40 @@ function StudentReview() {
                               "bg-border text-ink-secondary"
                             )}>{opt}</span>
                             <span className="text-[12px] text-ink flex-1">{opts[opt]}</span>
-                            {isWrongAns && <span className="text-[10px] text-danger font-semibold shrink-0">Jawaban kamu</span>}
-                            {isCorrect && <span className="text-[10px] text-success font-semibold shrink-0">Benar</span>}
+                            {isWrongAns && <span className={cn("text-[10px] font-semibold shrink-0", "text-danger")}>Jawaban kamu (Salah)</span>}
+                            {isCorrect && <span className="text-[10px] text-success font-semibold shrink-0">Jawaban benar</span>}
                           </div>
                         );
                       })}
                     </div>
-                    {isWrong && (
-                      <div className="mt-2 rounded-[6px] bg-background border border-border p-2.5">
-                        <p className="text-[11px] text-ink">Jawaban benar: {q.correctAnswer} — {q.explanation}</p>
+                    <div className="rounded-[6px] bg-background border border-border p-2.5 space-y-1.5">
+                      <div className="flex items-center gap-1.5">
+                        <span className={cn("text-[11px] font-semibold", isWrong ? "text-danger" : "text-success")}>
+                          {isWrong ? `Jawaban kamu: ${studentAns} (Salah)` : `Jawaban kamu: ${studentAns} (Benar)`}
+                        </span>
                       </div>
-                    )}
+                      {isWrong && (
+                        <p className="text-[11px] text-ink-secondary">Jawaban benar: <strong className="text-success">{q.correctAnswer}</strong></p>
+                      )}
+                      <p className="text-[11px] text-ink leading-relaxed">{q.explanation}</p>
+                      <div className="flex items-center gap-1.5 pt-1">
+                        <span className="text-[10px] text-ink-tertiary">Referensi:</span>
+                        <span className="inline-flex items-center gap-1 rounded-[4px] border border-primary/20 bg-primary-soft px-2 py-0.5 text-[10px] font-medium text-primary">
+                          {q.topic}
+                        </span>
+                      </div>
+                    </div>
                   </div>
                 );
               })}
+              <div className="pt-2">
+                <Button variant="default" className="w-full h-9 text-[13px]" onClick={() => { setReviewDetailId(null); router.push("/student/adaptive"); }}>
+                  <Zap className="mr-1.5 h-4 w-4" />Pelajari Ulang Topik Ini
+                </Button>
+              </div>
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
               <Button variant="outline" className="h-8 text-[12px]" onClick={() => setReviewDetailId(null)}>Tutup</Button>
-              <Button variant="default" className="h-8 text-[12px]" onClick={() => setReviewDetailId(null)}>
-                <Zap className="mr-1.5 h-3.5 w-3.5" />Retake Asesmen
-              </Button>
             </div>
           </div>
         </div>
@@ -2855,7 +3051,7 @@ function StudentTutor() {
             }
           }}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); } }}
-          placeholder="Tanyakan tentang materi matematika..."
+          placeholder="Tanyakan tentang materi pelajaran..."
           rows={1}
           className="flex-1 resize-none bg-transparent text-[13px] text-ink placeholder:text-ink-tertiary focus:outline-none leading-relaxed" />
         <Button variant="default" className="h-8 w-8 p-0 shrink-0" onClick={() => send(input)} disabled={!input.trim() || isTyping}>
@@ -2980,18 +3176,18 @@ function ParentDashboard() {
         <div>
           <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-ink-secondary mb-1">{new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}</p>
           <h1 className="text-2xl font-bold text-ink">Portal Orang Tua</h1>
-          <p className="text-[13px] text-ink-secondary mt-1">Pantau perkembangan belajar Andi Pratama · XI IPA 2</p>
+          <p className="text-[13px] text-ink-secondary mt-1">Pantau perkembangan belajar {studentProfile.name} · {studentProfile.className}</p>
         </div>
         <Button variant="default" className="h-8 text-[12px] shrink-0" onClick={() => {
-          setWaToast({ message: "Ringkasan performa Andi telah dikirim ke WhatsApp kamu", tone: "success" });
+          setWaToast({ message: `Ringkasan performa ${studentProfile.name.split(" ")[0]} telah dikirim ke WhatsApp kamu`, tone: "success" });
         }}>
           <MessageCircle className="mr-1.5 h-3.5 w-3.5" />Kirim ke WhatsApp
         </Button>
       </div>
 
       {missedAssessments.length > 0 && (
-        <AlertPanel tone="danger" title={`${missedAssessments.length} asesmen belum dikerjakan Andi`}>
-          {missedAssessments.map(a => a.title).join(", ")} — segera ingatkan Andi untuk mempersiapkan diri.
+        <AlertPanel tone="danger" title={`${missedAssessments.length} asesmen belum dikerjakan ${studentProfile.name.split(" ")[0]}`}>
+          {missedAssessments.map(a => a.title).join(", ")} — segera ingatkan {studentProfile.name.split(" ")[0]} untuk mempersiapkan diri.
           <Link href="/parent/assessments" className="ml-1 font-semibold underline">Lihat detail →</Link>
         </AlertPanel>
       )}
@@ -3000,8 +3196,8 @@ function ParentDashboard() {
         <div className="flex items-center gap-5">
           <div className="flex h-14 w-14 items-center justify-center rounded-full bg-white/20 text-[18px] font-bold">AP</div>
           <div className="flex-1">
-            <div className="text-[18px] font-bold">Andi Pratama</div>
-            <div className="text-[12px] text-blue-200">XI IPA 2 · SMA Negeri 1 Bandung · Peringkat #{studentProfile.rank}</div>
+            <div className="text-[18px] font-bold">{studentProfile.name}</div>
+            <div className="text-[12px] text-blue-200">{studentProfile.className} · {school.name} · Peringkat #{studentProfile.rank}</div>
             <div className="flex items-center gap-5 mt-3">
               {[
                 { val: studentProfile.avgScore, label: "Rata-rata Nilai" },
@@ -3033,14 +3229,14 @@ function ParentDashboard() {
             </div>
           </div>
           <div className="rounded-card border border-border bg-surface shadow-sm p-5">
-            <h3 className="text-[14px] font-bold text-ink mb-4">Tren Nilai Andi</h3>
+            <h3 className="text-[14px] font-bold text-ink mb-4">Tren Nilai {studentProfile.name.split(" ")[0]}</h3>
             <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={90} />
           </div>
         </div>
         <div className="space-y-4">
-          <AIInsightPanel title="Pesan dari Bu Ratna (AI)">
-            <p className="mb-2">Andi menunjukkan perkembangan positif di Fungsi Kuadrat. Namun, <strong className="text-ink">Diskriminan</strong> masih memerlukan latihan tambahan.</p>
-            <p>Mohon dorong Andi untuk latihan adaptif 15 menit setiap hari.</p>
+          <AIInsightPanel title={`Pesan dari ${currentTeacher.name} (AI)`}>
+            <p className="mb-2">{studentProfile.name.split(" ")[0]} menunjukkan perkembangan positif di Fungsi Kuadrat. Namun, <strong className="text-ink">Diskriminan</strong> masih memerlukan latihan tambahan.</p>
+            <p>Mohon dorong {studentProfile.name.split(" ")[0]} untuk latihan adaptif 15 menit setiap hari.</p>
           </AIInsightPanel>
           <div className="rounded-card border border-border bg-surface shadow-sm p-4">
             <h3 className="text-[13px] font-bold text-ink mb-3">Topik Perlu Perhatian</h3>
@@ -3050,9 +3246,9 @@ function ParentDashboard() {
           </div>
           <div className="rounded-card border border-border bg-surface shadow-sm p-4">
             <h3 className="text-[13px] font-bold text-ink mb-1">Notifikasi WhatsApp</h3>
-            <p className="text-[11px] text-ink-secondary mb-3">Terima ringkasan performa Andi langsung di WhatsApp setiap minggu.</p>
+            <p className="text-[11px] text-ink-secondary mb-3">Terima ringkasan performa {studentProfile.name.split(" ")[0]} langsung di WhatsApp setiap minggu.</p>
             <Button variant="default" className="w-full h-8 text-[12px]" onClick={() => {
-              setWaToast({ message: "Notifikasi WhatsApp diaktifkan — laporan mingguan akan terkirim setiap Senin pukul 07.00", tone: "success" });
+              setWaToast({ message: `Notifikasi WhatsApp diaktifkan — laporan ${studentProfile.name.split(" ")[0]} terkirim setiap Senin pukul 07.00`, tone: "success" });
             }}>
               <MessageCircle className="mr-1.5 h-3.5 w-3.5" />Aktifkan Laporan Mingguan
             </Button>
@@ -3068,7 +3264,7 @@ function ParentDashboard() {
 function ParentProgress() {
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Progres Andi" title="Perkembangan Belajar Andi" />
+      <PageHeader eyebrow={`Progres ${studentProfile.name.split(" ")[0]}`} title={`Perkembangan Belajar ${studentProfile.name.split(" ")[0]}`} />
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {studentProgressStats.map(s => <StatCard key={s.label} {...s} />)}
       </div>
@@ -3091,7 +3287,7 @@ function ParentProgress() {
 function ParentAssessments() {
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Riwayat Asesmen" title="Asesmen Andi" />
+      <PageHeader eyebrow="Riwayat Asesmen" title={`Asesmen ${studentProfile.name.split(" ")[0]}`} />
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="border-b border-border px-5 py-3.5"><h3 className="text-[14px] font-bold text-ink">Semua Asesmen</h3></div>
         <div className="px-5 py-1">
@@ -3109,10 +3305,10 @@ function ParentRecommendations() {
   const parentRecs = [...teachingRecommendations].sort((a, b) => b.wrongCount - a.wrongCount);
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Rekomendasi Pengajaran" title="Saran Belajar dari Bu Ratna"
-        description="Rekomendasi pengajaran untuk Andi berdasarkan analisis AI dan penilaian guru." />
+      <PageHeader eyebrow="Rekomendasi Pengajaran" title={`Saran Belajar dari ${currentTeacher.name}`}
+        description={`Rekomendasi pengajaran untuk ${studentProfile.name} berdasarkan analisis AI dan penilaian guru.`} />
       <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
-        <p>Andi paling sering salah di <strong className="text-ink">{parentRecs[0].topic}</strong> ({parentRecs[0].wrongCount}× salah) dan <strong className="text-ink">{parentRecs[1].topic}</strong> ({parentRecs[1].wrongCount}× salah). Fokus latihan pada topik-topik ini.</p>
+        <p>{studentProfile.name.split(" ")[0]} paling sering salah di <strong className="text-ink">{parentRecs[0].topic}</strong> ({parentRecs[0].wrongCount}× salah) dan <strong className="text-ink">{parentRecs[1].topic}</strong> ({parentRecs[1].wrongCount}× salah). Fokus latihan pada topik-topik ini.</p>
       </AIInsightPanel>
       <div className="space-y-4">
         {parentRecs.slice(0, 2).map(r => <RecommendationCard key={r.id} rec={r} />)}
@@ -3174,8 +3370,8 @@ function AdminDashboard() {
     <div className="space-y-6">
       <div>
         <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-ink-secondary mb-1">Admin Platform</p>
-        <h1 className="text-2xl font-bold text-ink">Dasbor SMA Negeri 1 Bandung</h1>
-        <p className="text-[13px] text-ink-secondary mt-1">Semester Ganjil 2025/2026 · 48 Guru · 1.312 Siswa</p>
+        <h1 className="text-2xl font-bold text-ink">Dasbor {school.name}</h1>
+        <p className="text-[13px] text-ink-secondary mt-1">{currentSemester} · 48 Guru · 1.312 Siswa</p>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

@@ -55,6 +55,8 @@ export const teachers: Teacher[] = [
 
 export const currentTeacher = teachers[0];
 
+export const currentSemester = "Semester Ganjil 2025/2026";
+
 // ── Students ───────────────────────────────────────────────────────────
 export type Student = {
   id: string; name: string; initials: string; nis: string;
@@ -170,17 +172,17 @@ export const materials: Material[] = [
 export type AssessmentStyleCorpus = {
   id: string; name: string; styleType: AssessmentStyleType;
   year: number; papersCount: number; questionsCount: number;
-  subject: string; status: "Aktif" | "Draf";
+  subject: string; status: "Aktif" | "Draf"; description?: string;
 };
 
 export const assessmentStyles: AssessmentStyleCorpus[] = [
-  { id: "as1", name: "TKA Matematika 2024", styleType: "TKA", year: 2024, papersCount: 5, questionsCount: 250, subject: "Matematika", status: "Aktif" },
-  { id: "as2", name: "TKA Matematika 2023", styleType: "TKA", year: 2023, papersCount: 5, questionsCount: 250, subject: "Matematika", status: "Aktif" },
-  { id: "as3", name: "TKA Matematika 2022", styleType: "TKA", year: 2022, papersCount: 4, questionsCount: 200, subject: "Matematika", status: "Aktif" },
-  { id: "as4", name: "UTS SMA Negeri 1 Bandung 2024", styleType: "UTS", year: 2024, papersCount: 3, questionsCount: 120, subject: "Matematika", status: "Aktif" },
-  { id: "as5", name: "UAS Gabungan Bandung 2023", styleType: "UAS", year: 2023, papersCount: 4, questionsCount: 160, subject: "Matematika", status: "Aktif" },
-  { id: "as6", name: "Tryout Nasional SNBT 2024", styleType: "Tryout", year: 2024, papersCount: 3, questionsCount: 120, subject: "Matematika", status: "Aktif" },
-  { id: "as7", name: "Kuis Harian Matematika (Internal)", styleType: "Kuis", year: 2025, papersCount: 8, questionsCount: 80, subject: "Matematika", status: "Draf" },
+  { id: "as1", name: "TKA Matematika 2024", styleType: "TKA", year: 2024, papersCount: 5, questionsCount: 250, subject: "Matematika", status: "Aktif", description: "Format soal TKA resmi 2024 — 45 soal pilihan ganda (5 opsi), durasi 90 menit. Penekanan pada pemahaman konseptual dan penerapan." },
+  { id: "as2", name: "TKA Matematika 2023", styleType: "TKA", year: 2023, papersCount: 5, questionsCount: 250, subject: "Matematika", status: "Aktif", description: "Format soal TKA resmi 2023 — 45 soal pilihan ganda (5 opsi), durasi 90 menit. Banyak soal berbasis grafik dan konteks nyata." },
+  { id: "as3", name: "TKA Matematika 2022", styleType: "TKA", year: 2022, papersCount: 4, questionsCount: 200, subject: "Matematika", status: "Aktif", description: "Format soal TKA resmi 2022 — 40 soal pilihan ganda (5 opsi), durasi 75 menit. Cocok untuk simulasi awal sebelum latihan soal terbaru." },
+  { id: "as4", name: "UTS SMA Negeri 1 Bandung 2024", styleType: "UTS", year: 2024, papersCount: 3, questionsCount: 120, subject: "Matematika", status: "Aktif", description: "Soal UTS internal SMAN 1 Bandung — 40 soal pilihan ganda + 5 uraian singkat, durasi 90 menit. Mencerminkan standar soal gurumu." },
+  { id: "as5", name: "UAS Gabungan Bandung 2023", styleType: "UAS", year: 2023, papersCount: 4, questionsCount: 160, subject: "Matematika", status: "Aktif", description: "Soal UAS gabungan sekolah-sekolah Bandung — 50 soal pilihan ganda + uraian, durasi 120 menit. Tingkat kesulitan lebih tinggi dari UTS." },
+  { id: "as6", name: "Tryout Nasional SNBT 2024", styleType: "Tryout", year: 2024, papersCount: 3, questionsCount: 120, subject: "Matematika", status: "Aktif", description: "Paket tryout SNBT nasional — mengikuti format resmi, 40 soal per sesi. Cocok untuk persiapan seleksi perguruan tinggi negeri." },
+  { id: "as7", name: "Kuis Harian Matematika (Internal)", styleType: "Kuis", year: 2025, papersCount: 8, questionsCount: 80, subject: "Matematika", status: "Draf", description: "Kuis harian internal — 10 soal, durasi 20 menit. Dirancang untuk asesmen formatif cepat setiap awal atau akhir pertemuan." },
 ];
 
 export const pastPaperTopics = [
@@ -213,6 +215,13 @@ export const questionBank: QuestionBankEntry[] = [
   { id: "qb6", question: "Grafik y = (x − 2)² bergeser ke mana dibandingkan y = x²?", topic: "Transformasi Grafik", subtopic: "Pergeseran Horizontal", bloom: "Memahami", difficulty: "Mudah", styleType: "UTS", source: "Modul Matematika, hal. 12", usageCount: 10, successRate: 61, status: "Disetujui", isLocked: false, options: { A: "2 satuan ke kanan", B: "2 satuan ke kiri", C: "2 satuan ke atas", D: "2 satuan ke bawah" }, correctAnswer: "A", explanation: "Substitusi x − 2 menggeser grafik ke kanan sejauh 2 satuan." },
   { id: "qb7", question: "Suku ke-n barisan aritmetika dengan suku pertama 3 dan beda 4 adalah...", topic: "Barisan Aritmetika", subtopic: "Rumus Suku ke-n", bloom: "Menerapkan", difficulty: "Mudah", styleType: "UTS", source: "Buku Teks Matematika XI, hal. 142", usageCount: 5, successRate: 78, status: "Disetujui", isLocked: false, options: { A: "4n − 1", B: "4n + 3", C: "3n + 4", D: "4n − 3" }, correctAnswer: "A", explanation: "Uₙ = a + (n−1)b = 3 + (n−1)·4 = 3 + 4n − 4 = 4n − 1." },
   { id: "qb8", question: "Barisan geometri 2, 6, 18, 54, ... memiliki rasio...", topic: "Barisan Geometri", subtopic: "Rasio", bloom: "Mengingat", difficulty: "Mudah", styleType: "Kuis", source: "Buku Teks Matematika XI, hal. 158", usageCount: 6, successRate: 89, status: "Disetujui", isLocked: false, options: { A: "2", B: "3", C: "4", D: "6" }, correctAnswer: "B", explanation: "r = U₂/U₁ = 6/2 = 3." },
+  { id: "qb9", question: "Suku ke-10 barisan aritmetika 5, 9, 13, 17, ... adalah...", topic: "Barisan Aritmetika", subtopic: "Suku ke-n", bloom: "Menerapkan", difficulty: "Mudah", styleType: "UTS", source: "Buku Teks Matematika XI, hal. 143", usageCount: 4, successRate: 85, status: "Disetujui", isLocked: false, options: { A: "37", B: "41", C: "45", D: "49" }, correctAnswer: "B", explanation: "Uₙ = a + (n−1)d = 5 + (10−1)×4 = 5 + 36 = 41." },
+  { id: "qb10", question: "Suku ke-5 barisan geometri 3, 6, 12, ... adalah...", topic: "Barisan Geometri", subtopic: "Suku ke-n", bloom: "Menerapkan", difficulty: "Sedang", styleType: "UTS", source: "Buku Teks Matematika XI, hal. 160", usageCount: 5, successRate: 72, status: "Disetujui", isLocked: false, options: { A: "24", B: "36", C: "48", D: "96" }, correctAnswer: "C", explanation: "r = 2. U₅ = 3 × 2⁴ = 3 × 16 = 48." },
+  { id: "qb11", question: "Grafik y = x² + 3 dibandingkan y = x² bergeser sejauh...", topic: "Transformasi Grafik", subtopic: "Pergeseran Vertikal", bloom: "Memahami", difficulty: "Mudah", styleType: "UTS", source: "Modul Matematika, hal. 13", usageCount: 8, successRate: 78, status: "Disetujui", isLocked: false, options: { A: "3 satuan ke kanan", B: "3 satuan ke kiri", C: "3 satuan ke atas", D: "3 satuan ke bawah" }, correctAnswer: "C", explanation: "Penambahan konstanta di luar fungsi (+ 3) menggeser grafik 3 satuan ke atas." },
+  { id: "qb12", question: "Persamaan 3x² − 2x + 5 = 0 memiliki jenis akar...", topic: "Diskriminan", subtopic: "Jenis Akar", bloom: "Menganalisis", difficulty: "Sedang", styleType: "TKA", source: "Modul Matematika, hal. 19", usageCount: 7, successRate: 45, status: "Disetujui", isLocked: false, options: { A: "Dua akar real berbeda", B: "Dua akar real sama", C: "Tidak memiliki akar real", D: "Satu akar real" }, correctAnswer: "C", explanation: "D = (−2)² − 4(3)(5) = 4 − 60 = −56 < 0. Karena D < 0, tidak ada akar real." },
+  { id: "qb13", question: "Persamaan kuadrat x² − (p+q)x + pq = 0 memiliki akar p dan q. Jika p × q = 8 dan p + q = 6, maka persamaannya adalah...", topic: "Rumus Vieta", subtopic: "Membentuk Persamaan", bloom: "Menerapkan", difficulty: "Sedang", styleType: "TKA", source: "Modul Matematika, hal. 21", usageCount: 6, successRate: 55, status: "Disetujui", isLocked: false, options: { A: "x² − 6x + 8 = 0", B: "x² + 6x + 8 = 0", C: "x² − 6x − 8 = 0", D: "x² + 6x − 8 = 0" }, correctAnswer: "A", explanation: "Persamaan: x² − (p+q)x + pq = 0 → x² − 6x + 8 = 0." },
+  { id: "qb14", question: "Nilai minimum dari f(x) = 2x² − 8x + 5 adalah...", topic: "Fungsi Kuadrat", subtopic: "Nilai Optimum", bloom: "Menganalisis", difficulty: "Sulit", styleType: "TKA", source: "Modul Matematika, hal. 11", usageCount: 3, successRate: 41, status: "Disetujui", isLocked: false, options: { A: "−3", B: "−5", C: "−8", D: "5" }, correctAnswer: "A", explanation: "x optimum = −b/(2a) = 8/4 = 2. f(2) = 2(4) − 16 + 5 = 8 − 16 + 5 = −3." },
+  { id: "qb15", question: "Selisih akar-akar persamaan x² − 7x + 12 = 0 adalah...", topic: "Persamaan Kuadrat", subtopic: "Hubungan Akar", bloom: "Menganalisis", difficulty: "Sulit", styleType: "TKA", source: "Modul Matematika, hal. 16", usageCount: 4, successRate: 48, status: "Disetujui", isLocked: false, options: { A: "1", B: "2", C: "3", D: "4" }, correctAnswer: "A", explanation: "Akar-akarnya: (x−3)(x−4)=0, jadi x₁=3, x₂=4. Selisih = |4−3| = 1." },
 ];
 
 // ── Pending AI Questions ───────────────────────────────────────────────
@@ -376,7 +385,7 @@ export type ChatMessage = {
 
 export const assistantGreeting: ChatMessage = {
   id: "greeting", role: "assistant", grounded: true, timestamp: "Baru saja",
-  content: "Halo Andi! Saya AI Companion kamu. Tanyakan apapun tentang materi yang sudah gurumu upload — saya hanya menjawab berdasarkan materi yang tersedia.",
+  content: "Halo! Saya AI Companion kamu. Tanyakan apapun tentang materi yang sudah gurumu unggah — saya akan menjawab berdasarkan dokumen tersebut.",
 };
 
 export const suggestedPrompts = [
@@ -388,7 +397,7 @@ export const suggestedPrompts = [
   "Apa ibu kota Prancis?",
 ];
 
-const NOT_COVERED_MESSAGE = "Topik ini belum tercakup dalam materi yang tersedia. Coba tanyakan topik lain atau minta gurumu mengunggah materi yang relevan.";
+const NOT_COVERED_MESSAGE = "Topik ini belum tersedia dalam materi yang diunggah gurumu. Coba tanyakan tentang topik lain atau minta gurumu mengunggah materi terkait.";
 
 const groundedReplies: { match: RegExp; content: string; sources: string[] }[] = [
   { match: /diskriminan|discriminant/i, content: "Diskriminan D = b² − 4ac. Jika D > 0 → dua akar real berbeda. Jika D = 0 → satu akar kembar. Jika D < 0 → tidak ada akar real. Perhatikan tanda konstanta c saat menghitung −4ac.", sources: [] },
