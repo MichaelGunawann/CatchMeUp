@@ -586,6 +586,7 @@ function TeacherMaterials() {
   const [editMeta, setEditMeta] = useState(false);
   const [materialFiles, setMaterialFiles] = useState<Record<string, File>>({});
   const [materialQuestions, setMaterialQuestions] = useState<Record<string, typeof questionBank>>({});
+  const [generatingMore, setGeneratingMore] = useState<string | null>(null);
 
   const allMaterials = [...uploadedMaterials, ...materials];
 
@@ -593,49 +594,89 @@ function TeacherMaterials() {
     setConfirmProcessId(id);
   }
 
+  async function generateQuestionsFromMaterial(id: string, append = false) {
+    const mat = allMaterials.find(m => m.id === id);
+    const file = materialFiles[id];
+
+    let rawQuestions: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> = [];
+
+    if (file) {
+      // Real extraction: send the actual file to Gemini
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("count", "5");
+      fd.append("materialTitle", mat?.title ?? "Materi");
+      fd.append("subject", mat?.subject ?? currentTeacher.subject);
+      try {
+        const res = await fetch("/api/extract-and-generate", { method: "POST", body: fd });
+        const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
+        if (data.error && !data.questions?.length) {
+          setToast({ message: data.error, tone: "primary" });
+          return;
+        }
+        rawQuestions = data.questions ?? [];
+      } catch {
+        setToast({ message: "Gagal menghubungi AI. Periksa koneksi dan API key.", tone: "primary" });
+        return;
+      }
+    } else {
+      // Fallback for demo materials: generate from metadata
+      try {
+        const res = await fetch("/api/generate-questions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            materialTitle: mat?.title ?? "Materi",
+            topic: mat?.subject ?? mat?.title ?? "Umum",
+            subject: mat?.subject ?? currentTeacher.subject,
+            count: 5,
+            difficulty: "Sedang",
+          }),
+        });
+        const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
+        rawQuestions = data.questions ?? [];
+      } catch {
+        setToast({ message: "Gagal menghubungi AI. Periksa koneksi dan API key.", tone: "primary" });
+        return;
+      }
+    }
+
+    if (!rawQuestions.length) {
+      setToast({ message: "AI tidak menghasilkan soal. Coba lagi.", tone: "primary" });
+      return;
+    }
+
+    const existingCount = materialQuestions[id]?.length ?? 0;
+    const generated: typeof questionBank = rawQuestions.map((q, i) => ({
+      id: `ai-${id}-${existingCount + i}`,
+      question: q.question,
+      topic: q.topic,
+      subtopic: q.topic,
+      bloom: "Menerapkan" as const,
+      difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
+      styleType: "TKA" as const,
+      source: mat?.title ?? "AI Generated",
+      usageCount: 0,
+      successRate: 0,
+      status: "Disetujui" as const,
+      isLocked: false,
+      options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
+      correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
+      explanation: q.explanation,
+    }));
+
+    setMaterialQuestions(prev => ({
+      ...prev,
+      [id]: append ? [...(prev[id] ?? []), ...generated] : generated,
+    }));
+    const total = (append ? existingCount : 0) + generated.length;
+    setToast({ message: `${generated.length} soal baru dari materi ini ditambahkan (total: ${total}).`, tone: "success" });
+  }
+
   async function startAIProcess(id: string) {
     setConfirmProcessId(null);
     setProcessingIds(prev => new Set([...prev, id]));
-    const mat = allMaterials.find(m => m.id === id);
-    try {
-      const res = await fetch("/api/generate-questions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          materialTitle: mat?.title ?? "Materi",
-          topic: mat?.subject ?? mat?.title ?? "Umum",
-          subject: mat?.subject ?? currentTeacher.subject,
-          count: 10,
-          difficulty: "Sedang",
-        }),
-      });
-      const data = await res.json() as { questions?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }>; error?: string };
-      if (data.questions?.length) {
-        const generated: typeof questionBank = data.questions.map((q, i) => ({
-          id: `ai-${id}-${i}`,
-          question: q.question,
-          topic: q.topic,
-          subtopic: q.topic,
-          bloom: "Menerapkan" as const,
-          difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
-          styleType: "TKA" as const,
-          source: mat?.title ?? "AI Generated",
-          usageCount: 0,
-          successRate: 0,
-          status: "Disetujui" as const,
-          isLocked: false,
-          options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
-          correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
-          explanation: q.explanation,
-        }));
-        setMaterialQuestions(prev => ({ ...prev, [id]: generated }));
-        setToast({ message: `AI selesai — ${generated.length} soal dari materi ini siap digunakan.`, tone: "success" });
-      } else {
-        setToast({ message: "AI tidak menghasilkan soal. Coba lagi atau periksa API key.", tone: "primary" });
-      }
-    } catch {
-      setToast({ message: "Gagal menghubungi AI. Periksa koneksi dan API key.", tone: "primary" });
-    }
+    await generateQuestionsFromMaterial(id, false);
     setProcessingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
     setProcessedIds(prev => new Set([...prev, id]));
   }
@@ -860,9 +901,9 @@ function TeacherMaterials() {
                     <div className="text-[13px] font-semibold text-ink">Status Pemrosesan AI</div>
                     <div className="text-[11px] text-ink-secondary mt-0.5">
                       {isDialogProcessed
-                        ? `${m.questionsGenerated || "~48"} soal berhasil diekstrak dari materi ini`
+                        ? `${materialQuestions[m.id]?.length ?? m.questionsGenerated ?? 0} soal berhasil diekstrak dari materi ini`
                         : isDialogProcessing
-                        ? "AI sedang menganalisis materi, harap tunggu..."
+                        ? "AI sedang membaca dan menganalisis isi materi..."
                         : "Materi belum dianalisis AI — klik tombol untuk memulai"}
                     </div>
                   </div>
@@ -894,14 +935,15 @@ function TeacherMaterials() {
                 });
                 const totalCount = aiQs ? aiQs.length : (m.questionsGenerated || displayQs.length);
                 const isAiGenerated = !!aiQs;
+                const isGenerating = generatingMore === m.id;
                 return (
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <div className="text-[12px] font-bold text-ink">Soal Diekstrak ({totalCount} soal)</div>
-                      <span className="text-[10px] text-ink-tertiary">{isAiGenerated ? "Dibuat AI dari materi ini" : `Preview ${Math.min(8, displayQs.length)} soal`}</span>
+                      <span className="text-[10px] text-ink-tertiary">{isAiGenerated ? "Dibuat AI dari isi materi" : `Preview ${Math.min(8, displayQs.length)} soal`}</span>
                     </div>
                     <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                      {displayQs.slice(0, 8).map(q => (
+                      {displayQs.map(q => (
                         <div key={q.id} className="flex items-start gap-2 rounded-[8px] border border-border bg-background px-3 py-2">
                           <div className="flex-1 min-w-0">
                             <p className="text-[11px] text-ink line-clamp-2">{q.question}</p>
@@ -913,6 +955,16 @@ function TeacherMaterials() {
                         </div>
                       ))}
                     </div>
+                    <Button variant="outline" className="mt-2 h-7 w-full text-[11px]" disabled={isGenerating}
+                      onClick={async () => {
+                        setGeneratingMore(m.id);
+                        await generateQuestionsFromMaterial(m.id, true);
+                        setGeneratingMore(null);
+                      }}>
+                      {isGenerating
+                        ? <><span className="h-3 w-3 rounded-full border-2 border-primary border-t-transparent animate-spin mr-1.5" />Membuat soal...</>
+                        : <><Sparkles className="mr-1.5 h-3 w-3" />Generate 5 Soal Lagi</>}
+                    </Button>
                   </div>
                 );
               })()}
