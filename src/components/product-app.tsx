@@ -855,13 +855,12 @@ function TeacherMaterials() {
                   subjectLower.includes(q.topic.toLowerCase())
                 );
                 const displayQs = relatedQs.length > 0 ? relatedQs : questionBank;
+                const totalCount = m.questionsGenerated || displayQs.length;
                 return (
                   <div>
                     <div className="flex items-center justify-between mb-2">
-                      <div className="text-[12px] font-bold text-ink">Soal Diekstrak ({displayQs.length})</div>
-                      {relatedQs.length === 0 && (
-                        <span className="text-[10px] text-ink-tertiary">Menampilkan semua soal (demo)</span>
-                      )}
+                      <div className="text-[12px] font-bold text-ink">Soal Diekstrak ({totalCount} soal)</div>
+                      <span className="text-[10px] text-ink-tertiary">Preview 8 soal</span>
                     </div>
                     <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                       {displayQs.slice(0, 8).map(q => (
@@ -892,7 +891,22 @@ function TeacherMaterials() {
                 <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setSelectedMaterial(null); setEditMeta(false); }}>Tutup</Button>
                 {editMeta
                   ? <Button variant="default" className="h-8 text-[12px]">Simpan Perubahan</Button>
-                  : <Button variant="outline" className="h-8 text-[12px]"><Download className="mr-1.5 h-3.5 w-3.5" />Unduh</Button>
+                  : <Button variant="outline" className="h-8 text-[12px]" onClick={() => {
+                      const info = [
+                        `Judul: ${m.title}`,
+                        `Tipe: ${m.type}`,
+                        `Mata Pelajaran: ${m.subject ?? "-"}`,
+                        `Halaman: ${m.pages}`,
+                        `Diunggah: ${m.uploadedAt}`,
+                        `Status: ${m.status}`,
+                        `Soal Diekstrak: ${m.questionsGenerated}`,
+                      ].join("\n");
+                      const blob = new Blob([info], { type: "text/plain;charset=utf-8" });
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement("a");
+                      a.href = url; a.download = `${m.title}.txt`; a.click();
+                      URL.revokeObjectURL(url);
+                    }}><Download className="mr-1.5 h-3.5 w-3.5" />Unduh</Button>
                 }
               </div>
             </div>
