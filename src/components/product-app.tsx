@@ -584,6 +584,8 @@ function TeacherMaterials() {
   const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
   const [editMeta, setEditMeta] = useState(false);
+  const [materialFiles, setMaterialFiles] = useState<Record<string, File>>({});
+  const [materialQuestions, setMaterialQuestions] = useState<Record<string, typeof questionBank>>({});
 
   const allMaterials = [...uploadedMaterials, ...materials];
 
@@ -591,14 +593,51 @@ function TeacherMaterials() {
     setConfirmProcessId(id);
   }
 
-  function startAIProcess(id: string) {
+  async function startAIProcess(id: string) {
     setConfirmProcessId(null);
     setProcessingIds(prev => new Set([...prev, id]));
-    setTimeout(() => {
-      setProcessingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
-      setProcessedIds(prev => new Set([...prev, id]));
-      setToast({ message: "AI selesai memproses materi. Soal baru siap diekstrak.", tone: "success" });
-    }, 2800);
+    const mat = allMaterials.find(m => m.id === id);
+    try {
+      const res = await fetch("/api/generate-questions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          materialTitle: mat?.title ?? "Materi",
+          topic: mat?.subject ?? mat?.title ?? "Umum",
+          subject: mat?.subject ?? currentTeacher.subject,
+          count: 10,
+          difficulty: "Sedang",
+        }),
+      });
+      const data = await res.json() as { questions?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }>; error?: string };
+      if (data.questions?.length) {
+        const generated: typeof questionBank = data.questions.map((q, i) => ({
+          id: `ai-${id}-${i}`,
+          question: q.question,
+          topic: q.topic,
+          subtopic: q.topic,
+          bloom: "Menerapkan" as const,
+          difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
+          styleType: "TKA" as const,
+          source: mat?.title ?? "AI Generated",
+          usageCount: 0,
+          successRate: 0,
+          status: "Disetujui" as const,
+          isLocked: false,
+          options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
+          correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
+          explanation: q.explanation,
+        }));
+        setMaterialQuestions(prev => ({ ...prev, [id]: generated }));
+        setToast({ message: `AI selesai — ${generated.length} soal dari materi ini siap digunakan.`, tone: "success" });
+      } else {
+        setToast({ message: "AI tidak menghasilkan soal. Coba lagi atau periksa API key.", tone: "primary" });
+      }
+    } catch {
+      setToast({ message: "Gagal menghubungi AI. Periksa koneksi dan API key.", tone: "primary" });
+    }
+    setProcessingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
+    setProcessedIds(prev => new Set([...prev, id]));
   }
 
   const m = selectedMaterial;
@@ -692,6 +731,7 @@ function TeacherMaterials() {
                   questionsGenerated: 0,
                 };
                 setUploadedMaterials(prev => [newMat, ...prev]);
+                if (uploadedFile) setMaterialFiles(prev => ({ ...prev, [newMat.id]: uploadedFile }));
 
                 // Call real AI summarizer
                 try {
@@ -847,20 +887,18 @@ function TeacherMaterials() {
 
               {/* Soal Diekstrak section */}
               {isDialogProcessed && (() => {
-                const subjectLower = (m.subject ?? "").toLowerCase();
-                const topicLower = (m.chapter ?? "").toLowerCase();
-                const relatedQs = questionBank.filter(q =>
-                  q.topic.toLowerCase().includes(subjectLower.replace(" xi", "").replace(" x", "").trim()) ||
-                  q.topic.toLowerCase().includes(topicLower) ||
-                  subjectLower.includes(q.topic.toLowerCase())
-                );
-                const displayQs = relatedQs.length > 0 ? relatedQs : questionBank;
-                const totalCount = m.questionsGenerated || displayQs.length;
+                const aiQs = materialQuestions[m.id];
+                const displayQs = aiQs ?? questionBank.filter(q => {
+                  const sub = (m.subject ?? "").toLowerCase().replace(/ xi| x/g, "").trim();
+                  return q.topic.toLowerCase().includes(sub) || sub.includes(q.topic.toLowerCase());
+                });
+                const totalCount = aiQs ? aiQs.length : (m.questionsGenerated || displayQs.length);
+                const isAiGenerated = !!aiQs;
                 return (
                   <div>
                     <div className="flex items-center justify-between mb-2">
                       <div className="text-[12px] font-bold text-ink">Soal Diekstrak ({totalCount} soal)</div>
-                      <span className="text-[10px] text-ink-tertiary">Preview 8 soal</span>
+                      <span className="text-[10px] text-ink-tertiary">{isAiGenerated ? "Dibuat AI dari materi ini" : `Preview ${Math.min(8, displayQs.length)} soal`}</span>
                     </div>
                     <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
                       {displayQs.slice(0, 8).map(q => (
@@ -892,20 +930,15 @@ function TeacherMaterials() {
                 {editMeta
                   ? <Button variant="default" className="h-8 text-[12px]">Simpan Perubahan</Button>
                   : <Button variant="outline" className="h-8 text-[12px]" onClick={() => {
-                      const info = [
-                        `Judul: ${m.title}`,
-                        `Tipe: ${m.type}`,
-                        `Mata Pelajaran: ${m.subject ?? "-"}`,
-                        `Halaman: ${m.pages}`,
-                        `Diunggah: ${m.uploadedAt}`,
-                        `Status: ${m.status}`,
-                        `Soal Diekstrak: ${m.questionsGenerated}`,
-                      ].join("\n");
-                      const blob = new Blob([info], { type: "text/plain;charset=utf-8" });
-                      const url = URL.createObjectURL(blob);
-                      const a = document.createElement("a");
-                      a.href = url; a.download = `${m.title}.txt`; a.click();
-                      URL.revokeObjectURL(url);
+                      const file = materialFiles[m.id];
+                      if (file) {
+                        const url = URL.createObjectURL(file);
+                        const a = document.createElement("a");
+                        a.href = url; a.download = file.name; a.click();
+                        URL.revokeObjectURL(url);
+                      } else {
+                        setToast({ message: "File asli tidak tersedia — materi ini adalah data demo.", tone: "primary" });
+                      }
                     }}><Download className="mr-1.5 h-3.5 w-3.5" />Unduh</Button>
                 }
               </div>
