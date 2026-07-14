@@ -1,6 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY ?? "");
 
 export async function POST(req: Request) {
   const { messages, materials } = await req.json() as {
@@ -8,25 +8,29 @@ export async function POST(req: Request) {
     materials?: { title: string; topic: string }[];
   };
 
-  const materialContext = materials?.length
+  const systemInstruction = materials?.length
     ? `Kamu adalah AI Companion untuk siswa di platform Catch Up. Kamu HANYA boleh menjawab berdasarkan materi yang tersedia:\n${materials.map(m => `- ${m.title} (Topik: ${m.topic})`).join("\n")}\n\nJika pertanyaan di luar cakupan materi tersebut, katakan bahwa topik itu belum ada dalam materi yang diunggah guru.\n\nJawab dalam Bahasa Indonesia. Berikan penjelasan yang jelas dan mudah dipahami siswa SMA.`
     : `Kamu adalah AI Companion untuk siswa di platform Catch Up. Belum ada materi yang diunggah guru. Jawab dalam Bahasa Indonesia, berikan penjelasan umum yang membantu, dan anjurkan siswa untuk meminta gurunya mengunggah materi agar jawabanmu lebih spesifik.`;
+
+  const lastMessage = messages[messages.length - 1];
+  const history = messages.slice(0, -1).map(m => ({
+    role: m.role === "assistant" ? "model" as const : "user" as const,
+    parts: [{ text: m.content }],
+  }));
+
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash", systemInstruction });
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const response = await client.messages.create({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 1024,
-          system: materialContext,
-          messages,
-          stream: true,
-        });
+        const chat = model.startChat({ history });
+        const result = await chat.sendMessageStream(lastMessage.content);
 
-        for await (const event of response) {
-          if (event.type === "content_block_delta" && event.delta.type === "text_delta") {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: event.delta.text })}\n\n`));
+        for await (const chunk of result.stream) {
+          const text = chunk.text();
+          if (text) {
+            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
           }
         }
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));

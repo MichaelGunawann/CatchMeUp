@@ -1,6 +1,6 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY ?? "");
 
 export async function POST(req: Request) {
   const { materialTitle, topic, subject } = await req.json() as {
@@ -22,18 +22,14 @@ Berikan ringkasan dalam format JSON berikut (HANYA JSON, tanpa teks lain):
   "difficultyLevel": "Mudah|Sedang|Sulit"
 }`;
 
+  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+
   try {
-    const response = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
-      max_tokens: 1024,
-      messages: [{ role: "user", content: prompt }],
-    });
-
-    const text = response.content[0].type === "text" ? response.content[0].text : "{}";
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    const result = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
-
-    return Response.json(result);
+    const summary = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+    return Response.json(summary);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     return Response.json({ error: msg }, { status: 500 });
