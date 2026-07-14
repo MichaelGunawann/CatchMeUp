@@ -203,6 +203,7 @@ function TeacherApp({ page }: { page: string }) {
 // ── Teacher Dashboard ─────────────────────────────────────────────────────────
 
 function TeacherDashboard() {
+  const router = useRouter();
   const [activeTab, setActiveTab] = useState<"semua" | "at-risk" | "need-review">("semua");
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
   const [showAllStudents, setShowAllStudents] = useState(false);
@@ -555,9 +556,9 @@ function TeacherDashboard() {
               <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowUploadModal(false); setUploadFile(null); }}>Batal</Button>
               <Button variant="default" className="h-8 text-[12px]" onClick={() => {
                 setShowUploadModal(false); setUploadFile(null);
-                setUploadToast("Materi berhasil diunggah dan sedang diproses AI");
+                router.push("/teacher/materials");
               }}>
-                <Sparkles className="mr-1.5 h-3.5 w-3.5" />Unggah & Proses AI
+                <Sparkles className="mr-1.5 h-3.5 w-3.5" />Ke Pustaka Materi
               </Button>
             </div>
           </div>
