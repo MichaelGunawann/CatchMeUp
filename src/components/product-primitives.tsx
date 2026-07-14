@@ -726,7 +726,7 @@ export function GroundingNotice() {
     <div className="flex items-start gap-2 rounded-[8px] border border-primary/20 bg-primary-soft px-3 py-2.5">
       <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
       <p className="text-[11px] font-medium text-primary leading-relaxed">
-        Jawaban berdasarkan materi yang diunggah guru. Referensi halaman disertakan.
+        Jawaban berdasarkan materi yang diunggah guru.
       </p>
     </div>
   );

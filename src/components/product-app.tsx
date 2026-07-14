@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
+import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/product-shell";
 import {
   AIInsightPanel,
@@ -74,6 +75,7 @@ import {
   type Material,
   type PendingQuestion,
   type AssessmentStyleCorpus,
+  type SimulatorQuestion,
 } from "@/lib/db";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
@@ -740,6 +742,7 @@ function TeacherMaterials() {
 
 function TeacherAssessmentStyles() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [showUploadPaket, setShowUploadPaket] = useState(false);
   const selected = assessmentStyles.find(a => a.id === selectedId) as AssessmentStyleCorpus | undefined;
   const [config, setConfig] = useState({
     duration: 90, questions: 50,
@@ -777,11 +780,53 @@ function TeacherAssessmentStyles() {
         title="Konfigurasi Gaya Asesmen"
         description="Pilih paket soal untuk mengonfigurasi aturan ujian, keamanan, penilaian, dan pengaturan AI."
         actions={
-          <Button variant="default" className="h-8 text-[12px]">
+          <Button variant="default" className="h-8 text-[12px]" onClick={() => setShowUploadPaket(!showUploadPaket)}>
             <Upload className="mr-1.5 h-3.5 w-3.5" />Unggah Paket Soal
           </Button>
         }
       />
+
+      {showUploadPaket && (
+        <div className="rounded-card border-2 border-dashed border-primary/30 bg-primary-soft p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h3 className="text-[14px] font-bold text-ink">Unggah Paket Soal Baru</h3>
+            <button onClick={() => setShowUploadPaket(false)} className="text-ink-secondary hover:text-ink">
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik *</label>
+              <input type="text" placeholder="e.g. Fungsi Kuadrat, Barisan..."
+                className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tingkat Kesulitan *</label>
+              <select className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+                <option value="">Pilih kesulitan...</option>
+                {["Mudah", "Sedang", "Sulit", "Campuran"].map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </div>
+            <div className="md:col-span-2">
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">File Paket Soal *</label>
+              <div className="flex items-center gap-3 rounded-[8px] border border-dashed border-primary/40 bg-white px-4 py-4 text-center">
+                <Upload className="h-5 w-5 text-primary shrink-0" />
+                <div className="flex-1">
+                  <p className="text-[12px] text-ink-secondary">Tarik file ke sini atau</p>
+                  <button className="text-[12px] font-semibold text-primary hover:underline">Pilih File</button>
+                  <p className="text-[10px] text-ink-tertiary mt-0.5">PDF, DOCX, XLSX · Maks. 20 MB</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" className="h-8 text-[12px]" onClick={() => setShowUploadPaket(false)}>Batal</Button>
+            <Button variant="default" className="h-8 text-[12px]">
+              <Upload className="mr-1.5 h-3.5 w-3.5" />Unggah Paket
+            </Button>
+          </div>
+        </div>
+      )}
 
       <AIInsightPanel title="Analisis Tren Topik">
         <p>
@@ -912,8 +957,8 @@ function TeacherAssessmentStyles() {
                       <div className="text-[12px] font-semibold text-ink mb-1">{t.topic}</div>
                       <div className="flex items-end gap-0.5 h-8">
                         {[t.frequency2023, t.frequency2024, t.frequency2025].map((f, i) => (
-                          <div key={i} className="flex-1 flex items-end">
-                            <div className="w-full rounded-t-sm bg-primary transition-all" style={{ height: `${(f / 8) * 100}%` }} />
+                          <div key={i} className="flex-1 h-full flex items-end">
+                            <div className="w-full rounded-t-sm bg-primary transition-all" style={{ height: `${Math.max(4, (f / 8) * 100)}%` }} />
                           </div>
                         ))}
                       </div>
@@ -1296,6 +1341,16 @@ function TeacherAssessmentBuilder() {
               <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Durasi (menit)</label>
               <input type="number" defaultValue={45} className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
             </div>
+          </div>
+
+          <div>
+            <label className="block text-[11px] font-semibold text-ink-secondary mb-2">Gaya Asesmen *</label>
+            <select className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+              <option value="">Pilih gaya asesmen...</option>
+              {assessmentStyles.map(s => (
+                <option key={s.id} value={s.id}>{s.name}</option>
+              ))}
+            </select>
           </div>
 
           {/* Assessment distribution type */}
@@ -1757,10 +1812,12 @@ function TeacherResults() {
               <Button variant="outline" className="h-8 text-[12px]" onClick={() => setDetailId(null)}>Tutup</Button>
               {detail.avgScore && (
                 <Button variant="default" className="h-8 text-[12px]" onClick={() => {
-                  const csv = [
-                    "Nama,Nilai,Peringkat",
-                    ...students.slice(0, 8).map((s, i) => `${s.name},${80 + (8 - i) * 2},${i + 1}`)
-                  ].join("\n");
+                  const bom = "﻿";
+                  const rows = [
+                    ["Nama Siswa", "NIS", "Nilai", "Peringkat", "Status"],
+                    ...students.slice(0, 8).map((s, i) => [s.name, s.nis, `${80 + (8 - i) * 2}`, `${i + 1}`, s.status]),
+                  ];
+                  const csv = bom + rows.map(r => r.map(cell => `"${cell}"`).join(",")).join("\n");
                   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
                   const url = URL.createObjectURL(blob);
                   const a = document.createElement("a");
@@ -1781,6 +1838,12 @@ function TeacherResults() {
 // ── Teacher Analytics ─────────────────────────────────────────────────────────
 
 function TeacherAnalytics() {
+  const [topicPopup, setTopicPopup] = useState<string | null>(null);
+  const popupTopic = topicAccuracy.find(t => t.label === topicPopup);
+  const popupRec = topicPopup
+    ? teachingRecommendations.find(r => r.topic.toLowerCase() === topicPopup.toLowerCase())
+    : null;
+
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Analitik Kelas" title="Analitik XI IPA 2" description="Performa kelas berdasarkan data asesmen semester ini." />
@@ -1806,11 +1869,15 @@ function TeacherAnalytics() {
         <div className="flex items-center justify-between mb-5">
           <div>
             <h3 className="text-[14px] font-bold text-ink">Akurasi per Topik</h3>
-            <p className="text-[12px] text-ink-secondary mt-0.5">Rata-rata kelas</p>
+            <p className="text-[12px] text-ink-secondary mt-0.5">Rata-rata kelas · klik topik untuk melihat rekomendasi</p>
           </div>
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
-          {topicAccuracy.map(t => <TopicBar key={t.label} label={t.label} value={t.value} />)}
+          {topicAccuracy.map(t => (
+            <div key={t.label} className="cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setTopicPopup(t.label)}>
+              <TopicBar label={t.label} value={t.value} />
+            </div>
+          ))}
         </div>
       </div>
 
@@ -1822,6 +1889,48 @@ function TeacherAnalytics() {
           {students.slice(0, 6).map(s => <StudentPerformanceCard key={s.id} student={s} />)}
         </div>
       </div>
+
+      {/* Topic popup dialog */}
+      {topicPopup && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setTopicPopup(null)} />
+          <div className="relative w-full max-w-md rounded-card border border-border bg-surface shadow-xl p-6">
+            <div className="flex items-start justify-between mb-4">
+              <div>
+                <h2 className="text-[16px] font-bold text-ink">{topicPopup}</h2>
+                {popupTopic && (
+                  <p className="text-[12px] text-ink-secondary mt-0.5">
+                    Akurasi rata-rata kelas: <strong className={cn(popupTopic.value < 50 ? "text-danger" : popupTopic.value < 70 ? "text-warning" : "text-success")}>{popupTopic.value}%</strong>
+                  </p>
+                )}
+              </div>
+              <button onClick={() => setTopicPopup(null)}
+                className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            {popupRec ? (
+              <div className="space-y-3">
+                <div className="rounded-[8px] bg-background border border-border p-3">
+                  <p className="text-[12px] text-ink-secondary">{popupRec.issue}</p>
+                </div>
+                <div className="rounded-[8px] border border-primary/20 bg-primary-soft p-3">
+                  <div className="flex items-center gap-1.5 mb-1.5">
+                    <Sparkles className="h-3.5 w-3.5 text-primary" />
+                    <span className="text-[11px] font-semibold text-primary">Saran AI · {popupRec.estimatedTime}</span>
+                  </div>
+                  <p className="text-[12px] text-ink">{popupRec.suggestion}</p>
+                </div>
+              </div>
+            ) : (
+              <p className="text-[13px] text-ink-secondary">Topik ini performanya sudah baik. Tidak ada intervensi khusus yang diperlukan.</p>
+            )}
+            <div className="flex justify-end mt-4">
+              <Button variant="outline" className="h-8 text-[12px]" onClick={() => setTopicPopup(null)}>Tutup</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1949,13 +2058,14 @@ function StudentApp({ page }: { page: string }) {
 // ── Student Dashboard ─────────────────────────────────────────────────────────
 
 function StudentDashboard() {
+  const router = useRouter();
   return (
     <div className="space-y-6">
       <CatchMeUpCard
         studentName={studentProfile.name}
         weakTopics={weakTopics.slice(0, 2).map(t => t.topic)}
         nextAction="Kamu masih lemah di Diskriminan (38%) dan Rumus Vieta (42%). Latihan 15 menit hari ini bisa langsung meningkatkan pemahamanmu!"
-        onStart={() => {}}
+        onStart={() => router.push("/student/adaptive")}
       />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
@@ -2057,11 +2167,19 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   const [finished, setFinished] = useState(false);
   const [timeLeft, setTimeLeft] = useState(45 * 60);
   const [confirmSubmit, setConfirmSubmit] = useState(false);
+  const [kioskWarning, setKioskWarning] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
   const finishedRef = React.useRef(finished);
   finishedRef.current = finished;
   const answersRef = React.useRef(answers);
   answersRef.current = answers;
+  const warningShownRef = React.useRef(false);
+
+  function triggerKioskWarning() {
+    if (finishedRef.current || warningShownRef.current) return;
+    warningShownRef.current = true;
+    setKioskWarning(true);
+  }
 
   function enterFullscreen() {
     document.documentElement.requestFullscreen?.().catch(() => {});
@@ -2114,30 +2232,30 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     return () => document.removeEventListener("keydown", onKeyDown, true);
   }, [page]);
 
-  // KIOSK: Tab switch or focus loss → auto-submit
+  // KIOSK: Tab switch or focus loss → warn before submit
   React.useEffect(() => {
     if (page !== "exam") return;
     function onVisibilityChange() {
-      if (document.hidden) autoSubmit();
+      if (document.hidden) triggerKioskWarning();
     }
-    function onBlur() { autoSubmit(); }
+    function onBlur() { triggerKioskWarning(); }
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("blur", onBlur);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("blur", onBlur);
     };
-  }, [page]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [page]);
 
-  // KIOSK: Fullscreen exit → auto-submit
+  // KIOSK: Fullscreen exit → warn before submit
   React.useEffect(() => {
     if (page !== "exam") return;
     function onFsChange() {
-      if (!document.fullscreenElement) autoSubmit();
+      if (!document.fullscreenElement) triggerKioskWarning();
     }
     document.addEventListener("fullscreenchange", onFsChange);
     return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, [page]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [page]);
 
   // Online / offline detection
   React.useEffect(() => {
@@ -2372,9 +2490,22 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
         confirmVariant="success"
         onConfirm={() => {
           setConfirmSubmit(false);
+          warningShownRef.current = true;
           autoSubmit();
         }}
         onCancel={() => setConfirmSubmit(false)}
+      />
+
+      {/* Kiosk warning dialog */}
+      <ConfirmDialog
+        open={kioskWarning}
+        title="Peringatan: Kiosk Mode"
+        message="Memindahkan fokus atau menekan ESC saat ujian dianggap sebagai pelanggaran. Jika kamu keluar sekarang, asesmen akan otomatis berakhir dan disubmit. Apakah kamu yakin ingin keluar?"
+        confirmLabel="Ya, Akhiri Asesmen"
+        confirmVariant="danger"
+        cancelLabel="Kembali ke Ujian"
+        onConfirm={() => { setKioskWarning(false); autoSubmit(); }}
+        onCancel={() => { setKioskWarning(false); warningShownRef.current = false; }}
       />
     </div>
   );
@@ -2382,18 +2513,142 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
 
 // ── Student Adaptive ──────────────────────────────────────────────────────────
 
+function AdaptiveSession({ questions, difficulty, onFinish }: { questions: SimulatorQuestion[]; difficulty: string; onFinish: () => void }) {
+  const [current, setCurrent] = useState(0);
+  const [answers, setAnswers] = useState<Record<number, string>>({});
+  const [done, setDone] = useState(false);
+
+  const sessionQs = questions.slice(0, 5);
+
+  if (sessionQs.length === 0) {
+    return (
+      <div className="space-y-6">
+        <EmptyState title="Tidak ada soal tersedia"
+          description={`Tidak ada soal dengan kesulitan "${difficulty}" saat ini.`}
+          action={<Button variant="default" onClick={onFinish}>Kembali</Button>} />
+      </div>
+    );
+  }
+
+  const currentQ = sessionQs[current];
+  const isLast = current === sessionQs.length - 1;
+
+  if (done) {
+    const correct = sessionQs.filter((q, i) => answers[i] === q.correctAnswer).length;
+    const score = Math.round((correct / sessionQs.length) * 100);
+    return (
+      <div className="flex flex-col items-center gap-6 py-16 text-center">
+        <div className="flex h-20 w-20 items-center justify-center rounded-full bg-success-light">
+          <CheckCircle2 className="h-10 w-10 text-success" />
+        </div>
+        <div>
+          <h2 className="text-2xl font-bold text-ink">Latihan Selesai!</h2>
+          <p className="text-[14px] text-ink-secondary mt-1">Kesulitan: {difficulty}</p>
+        </div>
+        <ScoreCircle score={score} size={96} />
+        <p className="text-[13px] text-ink-secondary">{correct} dari {sessionQs.length} soal benar</p>
+        <Button variant="default" onClick={onFinish}>Selesai</Button>
+      </div>
+    );
+  }
+
+  const opts = [currentQ.optionA, currentQ.optionB, currentQ.optionC, currentQ.optionD, currentQ.optionE];
+
+  return (
+    <div className="space-y-5 max-w-2xl mx-auto">
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">Latihan Adaptif · {difficulty}</p>
+          <h2 className="text-[18px] font-bold text-ink">Soal {current + 1} dari {sessionQs.length}</h2>
+        </div>
+        <Button variant="ghost" className="h-8 text-[12px]" onClick={onFinish}>
+          <X className="mr-1.5 h-3.5 w-3.5" />Keluar
+        </Button>
+      </div>
+      <div className="h-1.5 rounded-full bg-border overflow-hidden">
+        <div className="h-full bg-primary transition-all" style={{ width: `${((current + 1) / sessionQs.length) * 100}%` }} />
+      </div>
+      <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
+        <div className="flex items-center gap-2 mb-3">
+          <Badge tone="neutral">Soal {current + 1}</Badge>
+          <Badge tone={currentQ.difficulty === "Mudah" ? "success" : currentQ.difficulty === "Sedang" ? "warning" : "danger"}>{currentQ.difficulty}</Badge>
+        </div>
+        <p className="text-[15px] font-medium text-ink leading-relaxed">{currentQ.question}</p>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        {["A", "B", "C", "D", "E"].map((opt, i) => {
+          const sel = answers[current] === opt;
+          return (
+            <button key={opt} onClick={() => setAnswers(prev => ({ ...prev, [current]: opt }))}
+              className={cn("flex items-center gap-3 rounded-[10px] border p-3.5 text-left transition-all",
+                sel ? "border-primary/40 bg-primary-soft" : "border-border bg-surface hover:border-primary/20 hover:bg-background"
+              )}>
+              <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-bold transition-colors",
+                sel ? "bg-primary text-white" : "bg-background border border-border text-ink-secondary"
+              )}>{opt}</span>
+              <span className="text-[13px] font-medium text-ink">{opts[i]}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex justify-between items-center">
+        <Button variant="outline" className="h-9" disabled={current === 0} onClick={() => setCurrent(c => Math.max(0, c - 1))}>
+          ← Sebelumnya
+        </Button>
+        {isLast ? (
+          <Button variant="success" className="h-9" onClick={() => setDone(true)}>
+            Selesai &amp; Lihat Nilai
+          </Button>
+        ) : (
+          <Button variant="default" className="h-9" onClick={() => setCurrent(c => c + 1)}>
+            Berikutnya →
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function StudentAdaptive() {
+  const [difficulty, setDifficulty] = useState<"Mudah" | "Sedang" | "Sulit" | "Campur">("Campur");
+  const [showSession, setShowSession] = useState(false);
+
+  const filteredQuestions = difficulty === "Campur"
+    ? simulatorQuestions
+    : simulatorQuestions.filter(q => q.difficulty === difficulty);
+
+  if (showSession) {
+    return <AdaptiveSession questions={filteredQuestions} difficulty={difficulty} onFinish={() => setShowSession(false)} />;
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Latihan Adaptif" title="Latihan Disesuaikan AI"
         description="AI memilih soal berdasarkan kelemahanmu dan menyesuaikan tingkat kesulitan secara real-time." />
+
+      <div>
+        <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Tingkat Kesulitan</label>
+        <div className="flex gap-2 flex-wrap">
+          {(["Mudah", "Sedang", "Sulit", "Campur"] as const).map(d => (
+            <button key={d} onClick={() => setDifficulty(d)}
+              className={cn(
+                "rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors border",
+                difficulty === d ? "bg-primary text-white border-primary" : "bg-background text-ink-secondary border-border hover:border-primary/30"
+              )}>
+              {d}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <CatchMeUpCard studentName={studentProfile.name}
         weakTopics={weakTopics.slice(0, 2).map(t => t.topic)}
         nextAction="Latihan hari ini fokus pada Diskriminan — 10 soal pilihan AI."
-        onStart={() => {}} />
+        onStart={() => setShowSession(true)} />
+
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {weakTopics.slice(0, 3).map(t => (
-          <div key={t.id} className="rounded-card border border-border bg-surface p-4 hover:border-primary/30 hover:shadow-soft transition-all cursor-pointer">
+          <div key={t.id} className="rounded-card border border-border bg-surface p-4 hover:border-primary/30 hover:shadow-soft transition-all">
             <div className="flex items-start justify-between gap-2 mb-3">
               <div>
                 <div className="text-[13px] font-semibold text-ink">{t.topic}</div>
@@ -2402,7 +2657,7 @@ function StudentAdaptive() {
               <MasteryBadge level={t.mastery} />
             </div>
             <TopicBar label="Akurasi" value={t.accuracyRate} />
-            <Button variant="default" className="w-full mt-3 h-7 text-[11px]">
+            <Button variant="default" className="w-full mt-3 h-7 text-[11px]" onClick={() => setShowSession(true)}>
               <Zap className="mr-1.5 h-3 w-3" />Latihan Sekarang
             </Button>
           </div>
@@ -2415,6 +2670,13 @@ function StudentAdaptive() {
 // ── Student Review ────────────────────────────────────────────────────────────
 
 function StudentReview() {
+  const [reviewDetailId, setReviewDetailId] = useState<string | null>(null);
+  const reviewResult = studentResults.find(r => r.id === reviewDetailId);
+
+  // Mock student answers: sq3 wrong (answered C, correct D), sq5 wrong (answered B, correct A)
+  const mockStudentAnswers: Record<string, string> = { sq3: "C", sq5: "B" };
+  const reviewQs = simulatorQuestions.slice(0, 8);
+
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Review" title="Riwayat Asesmen" />
@@ -2427,11 +2689,82 @@ function StudentReview() {
         </div>
         <div className="px-5 py-1">
           {studentResults.map(r => (
-            <RecentAssessmentRow key={r.id} title={r.assessmentTitle} type={r.type} date={r.date}
-              score={r.score} classAvg={r.classAvg} rank={r.rank} />
+            <div key={r.id} onClick={() => setReviewDetailId(r.id)} className="cursor-pointer">
+              <RecentAssessmentRow title={r.assessmentTitle} type={r.type} date={r.date}
+                score={r.score} classAvg={r.classAvg} rank={r.rank} />
+            </div>
           ))}
         </div>
       </div>
+
+      {/* Review detail dialog */}
+      {reviewDetailId && reviewResult && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setReviewDetailId(null)} />
+          <div className="relative w-full max-w-2xl rounded-card border border-border bg-surface shadow-xl max-h-[90vh] flex flex-col">
+            <div className="flex items-start justify-between border-b border-border px-5 py-4 shrink-0">
+              <div>
+                <h2 className="text-[15px] font-bold text-ink">{reviewResult.assessmentTitle}</h2>
+                <p className="text-[12px] text-ink-secondary">{reviewResult.type} · {reviewResult.date} · Nilai: <strong className="text-ink">{reviewResult.score}</strong></p>
+              </div>
+              <button onClick={() => setReviewDetailId(null)}
+                className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              {reviewQs.map((q, idx) => {
+                const studentAns = mockStudentAnswers[q.id] ?? q.correctAnswer;
+                const isWrong = studentAns !== q.correctAnswer;
+                const opts: Record<string, string> = { A: q.optionA, B: q.optionB, C: q.optionC, D: q.optionD, E: q.optionE };
+                return (
+                  <div key={q.id} className={cn("rounded-card border p-4", isWrong ? "border-danger/20 bg-danger-light/30" : "border-border bg-surface")}>
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-[11px] font-bold text-ink-secondary">Soal {idx + 1}</span>
+                      <Badge tone={isWrong ? "danger" : "success"}>{isWrong ? "Salah" : "Benar"}</Badge>
+                    </div>
+                    <p className="text-[13px] font-medium text-ink mb-3">{q.question}</p>
+                    <div className="grid grid-cols-1 gap-1.5">
+                      {(["A", "B", "C", "D", "E"] as const).map(opt => {
+                        const isCorrect = q.correctAnswer === opt;
+                        const isStudentAns = studentAns === opt;
+                        const isWrongAns = isStudentAns && !isCorrect;
+                        return (
+                          <div key={opt} className={cn("flex items-center gap-2 rounded-[6px] border px-3 py-2",
+                            isCorrect ? "border-success/30 bg-success-light" :
+                            isWrongAns ? "border-danger/30 bg-danger-light" :
+                            "border-border bg-background"
+                          )}>
+                            <span className={cn("flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold",
+                              isCorrect ? "bg-success text-white" :
+                              isWrongAns ? "bg-danger text-white" :
+                              "bg-border text-ink-secondary"
+                            )}>{opt}</span>
+                            <span className="text-[12px] text-ink flex-1">{opts[opt]}</span>
+                            {isWrongAns && <span className="text-[10px] text-danger font-semibold shrink-0">Jawaban kamu</span>}
+                            {isCorrect && <span className="text-[10px] text-success font-semibold shrink-0">Benar</span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {isWrong && (
+                      <div className="mt-2 rounded-[6px] bg-background border border-border p-2.5">
+                        <p className="text-[11px] text-ink">Jawaban benar: {q.correctAnswer} — {q.explanation}</p>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
+              <Button variant="outline" className="h-8 text-[12px]" onClick={() => setReviewDetailId(null)}>Tutup</Button>
+              <Button variant="default" className="h-8 text-[12px]" onClick={() => setReviewDetailId(null)}>
+                <Zap className="mr-1.5 h-3.5 w-3.5" />Retake Asesmen
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2773,15 +3106,16 @@ function ParentAssessments() {
 }
 
 function ParentRecommendations() {
+  const parentRecs = [...teachingRecommendations].sort((a, b) => b.wrongCount - a.wrongCount);
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Rekomendasi Pengajaran" title="Saran Belajar dari Bu Ratna"
         description="Rekomendasi pengajaran untuk Andi berdasarkan analisis AI dan penilaian guru." />
       <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
-        <p>Andi berkembang baik (peringkat #{studentProfile.rank} dari {students.length} siswa). Fokus minggu ini adalah <strong className="text-ink">Diskriminan</strong> dan <strong className="text-ink">Rumus Vieta</strong>.</p>
+        <p>Andi paling sering salah di <strong className="text-ink">{parentRecs[0].topic}</strong> ({parentRecs[0].wrongCount}× salah) dan <strong className="text-ink">{parentRecs[1].topic}</strong> ({parentRecs[1].wrongCount}× salah). Fokus latihan pada topik-topik ini.</p>
       </AIInsightPanel>
       <div className="space-y-4">
-        {teachingRecommendations.slice(0, 2).map(r => <RecommendationCard key={r.id} rec={r} />)}
+        {parentRecs.slice(0, 2).map(r => <RecommendationCard key={r.id} rec={r} />)}
       </div>
     </div>
   );

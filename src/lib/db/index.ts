@@ -86,6 +86,12 @@ function getStatus(score: number): StudentStatus {
   return "At Risk";
 }
 
+const rankByScore: Map<number, number> = new Map(
+  [...Array(rawScores.length).keys()]
+    .sort((a, b) => rawScores[b] - rawScores[a])
+    .map((originalIdx, sortedPos) => [originalIdx, sortedPos + 1])
+);
+
 export const students: Student[] = studentNames.map((name, i) => ({
   id: `s${i + 1}`,
   name,
@@ -97,7 +103,7 @@ export const students: Student[] = studentNames.map((name, i) => ({
   status: getStatus(rawScores[i]),
   xp: rawXP[i],
   streak: [7, 5, 12, 3, 8, 4, 6, 2, 9, 11, 5, 3, 7, 4, 2, 5, 1, 3, 6, 2, 4, 7, 1, 2, 0, 3, 1, 2, 0, 1, 0, 0][i] ?? 0,
-  rank: i + 1,
+  rank: rankByScore.get(i) ?? i + 1,
   totalAssessments: [12, 12, 12, 11, 12, 11, 12, 10, 11, 12, 11, 10, 12, 11, 12, 11, 10, 12, 11, 10, 11, 12, 10, 9, 10, 9, 8, 9, 8, 7, 6, 5][i] ?? 8,
 }));
 
@@ -289,15 +295,15 @@ export const incorrectQuestions: IncorrectQuestion[] = [
 // ── Teaching Recommendations ───────────────────────────────────────────
 export type TeachingRecommendation = {
   id: string; topic: string; issue: string;
-  affectedStudents: number; priority: Priority;
+  affectedStudents: number; wrongCount: number; priority: Priority;
   suggestion: string; estimatedTime: string;
 };
 
 export const teachingRecommendations: TeachingRecommendation[] = [
-  { id: "tr1", topic: "Diskriminan", issue: "58% siswa menjawab salah di soal diskriminan dengan konstanta negatif. Miskonsepsi pada operasi −4ac.", affectedStudents: 18, priority: "Tinggi", suggestion: "Tambahkan sesi khusus 20 mnt dengan contoh bergantian antara konstanta positif dan negatif. Gunakan warna berbeda untuk menandai tanda konstanta.", estimatedTime: "20 menit" },
-  { id: "tr2", topic: "Rumus Vieta", issue: "Siswa sering membalik tanda pada jumlah akar. Mencampuradukkan −b/a dengan b/a.", affectedStudents: 14, priority: "Tinggi", suggestion: "Buat mnemonic: 'Jumlah akar berlawanan dengan b'. Gunakan papan tulis untuk menuliskan rumus lengkap setiap kali masuk kelas.", estimatedTime: "15 menit" },
-  { id: "tr3", topic: "Transformasi Grafik", issue: "Kebingungan arah pergeseran horizontal masih tinggi (61% salah). Siswa mengira minus = ke kiri.", affectedStudents: 10, priority: "Sedang", suggestion: "Gunakan Desmos.com untuk demonstrasi interaktif langsung di kelas. Biarkan siswa menggerakkan grafik secara mandiri.", estimatedTime: "10 menit" },
-  { id: "tr4", topic: "Barisan Geometri", issue: "Siswa kesulitan membedakan barisan aritmetika dan geometri saat soal tidak eksplisit.", affectedStudents: 8, priority: "Sedang", suggestion: "Buat worksheet perbandingan berdampingan. Fokus pada identifikasi pola beda (d) vs rasio (r).", estimatedTime: "25 menit" },
+  { id: "tr1", topic: "Diskriminan", issue: "58% siswa menjawab salah di soal diskriminan dengan konstanta negatif. Miskonsepsi pada operasi −4ac.", affectedStudents: 18, wrongCount: 7, priority: "Tinggi", suggestion: "Tambahkan sesi khusus 20 mnt dengan contoh bergantian antara konstanta positif dan negatif. Gunakan warna berbeda untuk menandai tanda konstanta.", estimatedTime: "20 menit" },
+  { id: "tr2", topic: "Rumus Vieta", issue: "Siswa sering membalik tanda pada jumlah akar. Mencampuradukkan −b/a dengan b/a.", affectedStudents: 14, wrongCount: 5, priority: "Tinggi", suggestion: "Buat mnemonic: 'Jumlah akar berlawanan dengan b'. Gunakan papan tulis untuk menuliskan rumus lengkap setiap kali masuk kelas.", estimatedTime: "15 menit" },
+  { id: "tr3", topic: "Transformasi Grafik", issue: "Kebingungan arah pergeseran horizontal masih tinggi (61% salah). Siswa mengira minus = ke kiri.", affectedStudents: 10, wrongCount: 3, priority: "Sedang", suggestion: "Gunakan Desmos.com untuk demonstrasi interaktif langsung di kelas. Biarkan siswa menggerakkan grafik secara mandiri.", estimatedTime: "10 menit" },
+  { id: "tr4", topic: "Barisan Geometri", issue: "Siswa kesulitan membedakan barisan aritmetika dan geometri saat soal tidak eksplisit.", affectedStudents: 8, wrongCount: 2, priority: "Sedang", suggestion: "Buat worksheet perbandingan berdampingan. Fokus pada identifikasi pola beda (d) vs rasio (r).", estimatedTime: "25 menit" },
 ];
 
 // ── Analytics ──────────────────────────────────────────────────────────
@@ -370,7 +376,7 @@ export type ChatMessage = {
 
 export const assistantGreeting: ChatMessage = {
   id: "greeting", role: "assistant", grounded: true, timestamp: "Baru saja",
-  content: "Halo Andi! Saya AI Companion kamu. Tanyakan apapun tentang materi yang sudah gurumu upload — saya hanya menjawab berdasarkan materi tersebut dengan referensi halaman yang jelas.",
+  content: "Halo Andi! Saya AI Companion kamu. Tanyakan apapun tentang materi yang sudah gurumu upload — saya hanya menjawab berdasarkan materi yang tersedia.",
 };
 
 export const suggestedPrompts = [
@@ -382,14 +388,14 @@ export const suggestedPrompts = [
   "Apa ibu kota Prancis?",
 ];
 
-const NOT_COVERED_MESSAGE = "Topik ini tidak tercakup dalam materi yang disediakan gurumu. Coba tanya tentang materi Matematika XI yang sudah diunggah.";
+const NOT_COVERED_MESSAGE = "Topik ini belum tercakup dalam materi yang tersedia. Coba tanyakan topik lain atau minta gurumu mengunggah materi yang relevan.";
 
 const groundedReplies: { match: RegExp; content: string; sources: string[] }[] = [
-  { match: /diskriminan|discriminant/i, content: "Dari Modul Matematika hal. 18: Diskriminan D = b² − 4ac. Jika D > 0 → dua akar real berbeda. Jika D = 0 → satu akar kembar. Jika D < 0 → tidak ada akar real. Perhatikan tanda konstanta c saat menghitung −4ac.", sources: ["Modul Matematika – Fungsi Kuadrat, hal. 18"] },
-  { match: /vieta|jumlah akar|hasil kali akar/i, content: "Dari Modul Matematika hal. 20: Untuk ax² + bx + c = 0, berlaku: x₁ + x₂ = −b/a (jumlah akar) dan x₁ · x₂ = c/a (hasil kali akar). Ingat tanda negatif pada rumus jumlah akar!", sources: ["Modul Matematika – Fungsi Kuadrat, hal. 20"] },
-  { match: /kanan|kiri|bergeser|shift|transformasi|grafik/i, content: "Dari Modul Matematika hal. 12: y = (x − a)² → bergeser a satuan ke KANAN. y = (x + a)² → bergeser a satuan ke KIRI. Ingat: tanda minus dalam kurung → ke kanan.", sources: ["Modul Matematika – Fungsi Kuadrat, hal. 12"] },
-  { match: /barisan|deret|aritmetika|geometri|rasio|beda/i, content: "Dari Buku Teks Matematika XI hal. 140–165: Barisan Aritmetika: selisih antar suku (beda) tetap. Uₙ = a + (n−1)d. Barisan Geometri: rasio antar suku tetap. Uₙ = a · rⁿ⁻¹.", sources: ["Buku Teks Matematika XI (Erlangga), hal. 140", "Buku Teks Matematika XI (Erlangga), hal. 158"] },
-  { match: /akar.*(persamaan|terbentuk|membentuk)|persamaan.*akar/i, content: "Dari Modul Matematika hal. 22: Jika akar-akarnya x₁ dan x₂, persamaan kuadratnya adalah: x² − (x₁+x₂)x + (x₁·x₂) = 0. Gunakan Rumus Vieta terbalik.", sources: ["Modul Matematika – Fungsi Kuadrat, hal. 22"] },
+  { match: /diskriminan|discriminant/i, content: "Diskriminan D = b² − 4ac. Jika D > 0 → dua akar real berbeda. Jika D = 0 → satu akar kembar. Jika D < 0 → tidak ada akar real. Perhatikan tanda konstanta c saat menghitung −4ac.", sources: [] },
+  { match: /vieta|jumlah akar|hasil kali akar/i, content: "Untuk ax² + bx + c = 0, berlaku: x₁ + x₂ = −b/a (jumlah akar) dan x₁ · x₂ = c/a (hasil kali akar). Ingat tanda negatif pada rumus jumlah akar!", sources: [] },
+  { match: /kanan|kiri|bergeser|shift|transformasi|grafik/i, content: "y = (x − a)² → bergeser a satuan ke KANAN. y = (x + a)² → bergeser a satuan ke KIRI. Ingat: tanda minus dalam kurung → ke kanan.", sources: [] },
+  { match: /barisan|deret|aritmetika|geometri|rasio|beda/i, content: "Barisan Aritmetika: selisih antar suku (beda) tetap. Uₙ = a + (n−1)d. Barisan Geometri: rasio antar suku tetap. Uₙ = a · rⁿ⁻¹.", sources: [] },
+  { match: /akar.*(persamaan|terbentuk|membentuk)|persamaan.*akar/i, content: "Jika akar-akarnya x₁ dan x₂, persamaan kuadratnya adalah: x² − (x₁+x₂)x + (x₁·x₂) = 0. Gunakan Rumus Vieta terbalik.", sources: [] },
 ];
 
 export function getAssistantReply(prompt: string): { content: string; sources?: string[]; grounded: boolean } {
