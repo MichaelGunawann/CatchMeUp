@@ -11,3 +11,6 @@ yarn-error.log*
 pnpm-debug.log*
 tsconfig.tsbuildinfo
 .codex-figma-checks
+
+.vercel
+.env*
