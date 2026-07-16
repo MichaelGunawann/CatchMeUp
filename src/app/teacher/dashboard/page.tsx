@@ -69,7 +69,7 @@ export default function TeacherDashboardPage() {
       const teacher = await getCurrentTeacher();
       if (cancelled) return;
       if (!teacher) {
-        setError("No teacher record is linked to this account yet.");
+        setError("Belum ada catatan guru yang terhubung dengan akun ini.");
         setLoading(false);
         return;
       }
@@ -120,7 +120,7 @@ export default function TeacherDashboardPage() {
         setAssessments((assessmentData ?? []) as unknown as AssessmentRow[]);
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load dashboard data");
+          setError(err instanceof Error ? err.message : "Gagal memuat data dasbor");
         }
       } finally {
         if (!cancelled) setLoading(false);

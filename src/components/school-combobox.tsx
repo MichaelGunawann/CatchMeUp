@@ -85,35 +85,35 @@ export function SchoolCombobox({
         disabled={disabled}
         onChange={(e) => handleInputChange(e.target.value)}
         onFocus={() => setOpen(true)}
-        placeholder="Type to search for your school..."
+        placeholder="Ketik untuk mencari sekolah kamu..."
         autoComplete="off"
         role="combobox"
         aria-expanded={open}
         aria-autocomplete="list"
         aria-controls="school-combobox-listbox"
-        className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm disabled:cursor-not-allowed disabled:opacity-50 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        className="flex h-11 w-full rounded-button border border-border bg-surface px-3 text-sm text-ink shadow-sm transition-colors placeholder:text-ink-secondary/70 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
       />
       {open && (
         <div
           id="school-combobox-listbox"
           role="listbox"
-          className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto rounded-md border border-gray-200 bg-white shadow-lg"
+          className="absolute z-20 mt-1 w-full max-h-60 overflow-y-auto rounded-button border border-border bg-surface shadow-lg"
         >
           {loading ? (
-            <div className="px-3 py-2 text-sm text-gray-500">Searching...</div>
+            <div className="px-3 py-2 text-[13px] text-ink-secondary">Mencari...</div>
           ) : options.length === 0 ? (
-            <div className="px-3 py-2 text-sm text-gray-500">No schools found</div>
+            <div className="px-3 py-2 text-[13px] text-ink-secondary">Sekolah tidak ditemukan</div>
           ) : (
             options.map((school) => (
               <button
                 key={school.id}
                 type="button"
                 onClick={() => selectSchool(school)}
-                className="block w-full text-left px-3 py-2 text-sm hover:bg-blue-50 focus:bg-blue-50 focus:outline-none"
+                className="block w-full text-left px-3 py-2 text-[13px] hover:bg-primary-soft focus:bg-primary-soft focus:outline-none"
               >
-                <div className="font-medium text-gray-900">{school.name}</div>
+                <div className="font-medium text-ink">{school.name}</div>
                 {(school.city || school.province) && (
-                  <div className="text-xs text-gray-500">
+                  <div className="text-[11px] text-ink-secondary">
                     {[school.city, school.province].filter(Boolean).join(", ")}
                   </div>
                 )}

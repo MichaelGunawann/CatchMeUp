@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import { getCurrentProfile } from "@/lib/auth/session";
 import { Button } from "@/components/ui/button";
+import { AlertPanel, LoadingPanel } from "@/components/product-primitives";
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -36,11 +37,11 @@ export default function DashboardPage() {
             router.push("/admin/dashboard");
             break;
           default:
-            setError(`Unknown role: ${profile.role}`);
+            setError(`Peran tidak dikenali: ${profile.role}`);
             setLoading(false);
         }
       } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load profile");
+        setError(err instanceof Error ? err.message : "Gagal memuat profil");
         setLoading(false);
       }
     };
@@ -50,12 +51,15 @@ export default function DashboardPage() {
 
   if (error) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="bg-white rounded-lg shadow-md p-8 max-w-md w-full">
-          <h1 className="text-xl font-bold text-red-600 mb-4">Error</h1>
-          <p className="text-gray-600 mb-6">{error}</p>
+      <div className="min-h-dvh flex items-center justify-center bg-background px-4">
+        <div className="w-full max-w-md rounded-card border border-border bg-surface p-8 shadow-lg">
+          <div className="mb-4">
+            <AlertPanel tone="danger" title="Terjadi kesalahan">
+              {error}
+            </AlertPanel>
+          </div>
           <Button onClick={() => router.push("/login")} className="w-full">
-            Return to Login
+            Kembali ke Halaman Masuk
           </Button>
         </div>
       </div>
@@ -64,10 +68,8 @@ export default function DashboardPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <p className="text-gray-600">Loading your dashboard...</p>
-        </div>
+      <div className="min-h-dvh flex items-center justify-center bg-background">
+        <LoadingPanel message="Memuat dasbor kamu..." />
       </div>
     );
   }

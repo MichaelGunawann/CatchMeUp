@@ -59,7 +59,7 @@ export default function ParentDashboardPage() {
       const parent = await getCurrentParent();
       if (cancelled) return;
       if (!parent) {
-        setError("No parent record is linked to this account yet.");
+        setError("Belum ada catatan orang tua yang terhubung dengan akun ini.");
         setLoading(false);
         return;
       }
@@ -120,7 +120,7 @@ export default function ParentDashboardPage() {
         setChildren(childList);
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load dashboard data");
+          setError(err instanceof Error ? err.message : "Gagal memuat data dasbor");
         }
       } finally {
         if (!cancelled) setLoading(false);

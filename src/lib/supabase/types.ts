@@ -13,6 +13,7 @@ export type School = {
   npsn: string | null;
   city: string | null;
   province: string | null;
+  status: "PENDING" | "ACTIVE" | "REJECTED";
   created_at: string;
   updated_at: string;
 };

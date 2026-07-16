@@ -2,72 +2,122 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { GraduationCap, School as SchoolIcon, UsersRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { SchoolCombobox } from "@/components/school-combobox";
+import { AuthShell, AuthFieldLabel } from "@/components/auth-shell";
+import { AlertPanel } from "@/components/product-primitives";
+
+type RegisterRole = "TEACHER" | "STUDENT" | "SCHOOL";
+
+const roleOptions: { value: RegisterRole; label: string; icon: typeof GraduationCap }[] = [
+  { value: "TEACHER", label: "Guru", icon: GraduationCap },
+  { value: "STUDENT", label: "Siswa", icon: UsersRound },
+  { value: "SCHOOL", label: "Sekolah", icon: SchoolIcon },
+];
 
 /**
- * Teacher/Student self-registration.
+ * Self-registration for Guru/Siswa (submits to /api/register) and Sekolah
+ * (submits to /api/register-school) - the service-role key never touches
+ * the client. All three start in a PENDING state and require approval
+ * (School Admin for Guru/Siswa, Platform Admin for Sekolah) before they
+ * can access any protected data - enforced by RLS, not just by this UI.
  *
- * Submits to /api/register (server-side, service-role key never touches
- * the client). New accounts start status='PENDING' and require a School
- * Admin's approval before they can access any protected data - enforced
- * by RLS, not just by this UI.
- *
- * School selection must be a real schools.id from the live combobox
- * query; free text is never accepted (schoolId stays null until a real
- * option is picked, and the server re-validates it independently anyway).
+ * School selection for Guru/Siswa must be a real schools.id from the live
+ * combobox query; free text is never accepted (schoolId stays null until
+ * a real option is picked, and the server re-validates it independently
+ * anyway).
  *
  * Parents don't register here - they use an invitation link/code from
  * their school (see /register/parent).
  */
 export default function RegisterPage() {
-  const [role, setRole] = useState<"TEACHER" | "STUDENT">("TEACHER");
+  const [role, setRole] = useState<RegisterRole>("TEACHER");
+
+  // Guru / Siswa fields
   const [fullName, setFullName] = useState("");
   const [email, setEmail] = useState("");
+  const [schoolId, setSchoolId] = useState<string | null>(null);
+
+  // Sekolah fields
+  const [schoolName, setSchoolName] = useState("");
+  const [npsn, setNpsn] = useState("");
+  const [city, setCity] = useState("");
+  const [province, setProvince] = useState("");
+  const [adminFullName, setAdminFullName] = useState("");
+  const [adminEmail, setAdminEmail] = useState("");
+
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [schoolId, setSchoolId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+
+  function selectRole(next: RegisterRole) {
+    setRole(next);
+    setError(null);
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
-    if (!schoolId) {
-      setError("Please select your school from the list");
-      return;
-    }
     if (password !== confirmPassword) {
-      setError("Passwords do not match");
+      setError("Kata sandi dan konfirmasi tidak cocok");
       return;
     }
     if (password.length < 8) {
-      setError("Password must be at least 8 characters");
+      setError("Kata sandi minimal 8 karakter");
       return;
+    }
+
+    if (role === "SCHOOL") {
+      if (!schoolName.trim() || !adminFullName.trim() || !adminEmail.trim()) {
+        setError("Nama sekolah, nama admin, dan email wajib diisi");
+        return;
+      }
+    } else {
+      if (!schoolId) {
+        setError("Pilih sekolah kamu dari daftar");
+        return;
+      }
     }
 
     setLoading(true);
 
     try {
-      const response = await fetch("/api/register", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ role, fullName, email, password, schoolId }),
-      });
+      const response = await fetch(
+        role === "SCHOOL" ? "/api/register-school" : "/api/register",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(
+            role === "SCHOOL"
+              ? {
+                  schoolName,
+                  npsn: npsn || null,
+                  city: city || null,
+                  province: province || null,
+                  adminFullName,
+                  adminEmail,
+                  adminPassword: password,
+                }
+              : { role, fullName, email, password, schoolId }
+          ),
+        }
+      );
 
       const data = await response.json();
 
       if (!response.ok) {
-        setError(data.error || "Registration failed");
+        setError(data.error || "Pendaftaran gagal");
         return;
       }
 
       setSubmitted(true);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Registration failed");
+      setError(err instanceof Error ? err.message : "Pendaftaran gagal");
     } finally {
       setLoading(false);
     }
@@ -75,151 +125,246 @@ export default function RegisterPage() {
 
   if (submitted) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
-        <div className="w-full max-w-md">
-          <div className="bg-white rounded-lg shadow-md p-8 text-center">
-            <h1 className="text-2xl font-bold mb-2">Registration submitted</h1>
-            <p className="text-gray-600 mb-6">
-              Your account is pending approval from your school administrator. You&apos;ll be able to
-              sign in once it&apos;s approved.
-            </p>
-            <Link href="/login" className="text-blue-600 hover:text-blue-700 font-medium">
-              Return to login
-            </Link>
-          </div>
-        </div>
-      </div>
+      <AuthShell title="Pendaftaran Terkirim">
+        <AlertPanel tone="success" title="Berhasil dikirim">
+          {role === "SCHOOL"
+            ? "Pendaftaran sekolah kamu sedang menunggu persetujuan Admin Platform. Kamu akan bisa masuk setelah disetujui."
+            : "Akun kamu sedang menunggu persetujuan admin sekolah. Kamu akan bisa masuk setelah disetujui."}
+        </AlertPanel>
+        <Link
+          href="/login"
+          className="mt-5 block text-center text-[13px] font-semibold text-primary hover:underline"
+        >
+          Kembali ke halaman masuk
+        </Link>
+      </AuthShell>
     );
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4 py-8">
-      <div className="w-full max-w-md">
-        <div className="bg-white rounded-lg shadow-md p-8">
-          <h1 className="text-2xl font-bold text-center mb-2">Catch Me Up</h1>
-          <p className="text-center text-gray-600 mb-6">Create your account</p>
+    <AuthShell
+      title="Buat Akun"
+      subtitle="Bergabung dengan Catch Me Up"
+      maxWidthClassName="max-w-lg"
+      footer={
+        <>
+          <p>
+            Mendaftar sebagai orang tua?{" "}
+            <span className="text-ink-secondary/80">
+              Gunakan tautan undangan dari sekolah anak kamu.
+            </span>
+          </p>
+          <p>
+            Sudah punya akun?{" "}
+            <Link href="/login" className="font-semibold text-primary hover:underline">
+              Masuk di sini
+            </Link>
+          </p>
+        </>
+      }
+    >
+      {error && (
+        <div className="mb-4">
+          <AlertPanel tone="danger" title="Tidak dapat mendaftar">
+            {error}
+          </AlertPanel>
+        </div>
+      )}
 
-          {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
-              {error}
-            </div>
-          )}
+      <div className="mb-5">
+        <AuthFieldLabel htmlFor="role-group">Saya mendaftar sebagai</AuthFieldLabel>
+        <div id="role-group" role="group" className="grid grid-cols-3 gap-2">
+          {roleOptions.map(({ value, label, icon: Icon }) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => selectRole(value)}
+              disabled={loading}
+              aria-pressed={role === value}
+              className={`flex flex-col items-center gap-1.5 rounded-button border px-2 py-3 text-[12px] font-semibold transition-all disabled:cursor-not-allowed disabled:opacity-50 ${
+                role === value
+                  ? "border-primary bg-primary-soft text-primary"
+                  : "border-border bg-surface text-ink-secondary hover:border-primary/30 hover:text-ink"
+              }`}
+            >
+              <Icon className="h-4 w-4" aria-hidden="true" />
+              {label}
+            </button>
+          ))}
+        </div>
+      </div>
 
-          <form onSubmit={handleSubmit} className="space-y-4">
+      <form onSubmit={handleSubmit} className="space-y-4">
+        {role === "SCHOOL" ? (
+          <>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">I am a</label>
-              <div className="grid grid-cols-2 gap-2">
-                {(["TEACHER", "STUDENT"] as const).map((r) => (
-                  <button
-                    key={r}
-                    type="button"
-                    onClick={() => setRole(r)}
-                    disabled={loading}
-                    className={`px-3 py-2 rounded-md text-sm font-medium border transition-colors ${
-                      role === r
-                        ? "bg-blue-600 text-white border-blue-600"
-                        : "bg-white text-gray-700 border-gray-300 hover:border-blue-300"
-                    }`}
-                  >
-                    {r === "TEACHER" ? "Teacher" : "Student"}
-                  </button>
-                ))}
+              <AuthFieldLabel htmlFor="schoolName" required>
+                Nama Sekolah
+              </AuthFieldLabel>
+              <Input
+                id="schoolName"
+                type="text"
+                value={schoolName}
+                onChange={(e) => setSchoolName(e.target.value)}
+                placeholder="Contoh: SMA Negeri 1 Bandung"
+                required
+                disabled={loading}
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <AuthFieldLabel htmlFor="npsn">NPSN (opsional)</AuthFieldLabel>
+                <Input
+                  id="npsn"
+                  type="text"
+                  value={npsn}
+                  onChange={(e) => setNpsn(e.target.value)}
+                  placeholder="20xxxxxx"
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <AuthFieldLabel htmlFor="city">Kota (opsional)</AuthFieldLabel>
+                <Input
+                  id="city"
+                  type="text"
+                  value={city}
+                  onChange={(e) => setCity(e.target.value)}
+                  placeholder="Bandung"
+                  disabled={loading}
+                />
               </div>
             </div>
 
             <div>
-              <label htmlFor="fullName" className="block text-sm font-medium text-gray-700 mb-1">
-                Full Name
-              </label>
+              <AuthFieldLabel htmlFor="province">Provinsi (opsional)</AuthFieldLabel>
+              <Input
+                id="province"
+                type="text"
+                value={province}
+                onChange={(e) => setProvince(e.target.value)}
+                placeholder="Jawa Barat"
+                disabled={loading}
+              />
+            </div>
+
+            <div className="border-t border-border pt-4">
+              <p className="mb-3 text-[12px] font-bold uppercase tracking-[0.06em] text-ink-secondary">
+                Data Admin Sekolah
+              </p>
+
+              <div className="space-y-4">
+                <div>
+                  <AuthFieldLabel htmlFor="adminFullName" required>
+                    Nama Lengkap
+                  </AuthFieldLabel>
+                  <Input
+                    id="adminFullName"
+                    type="text"
+                    value={adminFullName}
+                    onChange={(e) => setAdminFullName(e.target.value)}
+                    placeholder="Nama kamu"
+                    required
+                    disabled={loading}
+                  />
+                </div>
+
+                <div>
+                  <AuthFieldLabel htmlFor="adminEmail" required>
+                    Email
+                  </AuthFieldLabel>
+                  <Input
+                    id="adminEmail"
+                    type="email"
+                    value={adminEmail}
+                    onChange={(e) => setAdminEmail(e.target.value)}
+                    placeholder="admin@sekolah.sch.id"
+                    required
+                    disabled={loading}
+                  />
+                </div>
+              </div>
+            </div>
+          </>
+        ) : (
+          <>
+            <div>
+              <AuthFieldLabel htmlFor="fullName" required>
+                Nama Lengkap
+              </AuthFieldLabel>
               <Input
                 id="fullName"
                 type="text"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
-                placeholder="Your name"
+                placeholder="Nama kamu"
                 required
                 disabled={loading}
-                className="w-full"
               />
             </div>
 
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
+              <AuthFieldLabel htmlFor="email" required>
                 Email
-              </label>
+              </AuthFieldLabel>
               <Input
                 id="email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
+                placeholder="kamu@contoh.com"
                 required
                 disabled={loading}
-                className="w-full"
               />
             </div>
 
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">School</label>
-              <SchoolCombobox
-                value={schoolId}
-                onChange={(id) => setSchoolId(id)}
-                disabled={loading}
-              />
-              <p className="text-xs text-gray-500 mt-1">
-                Select your school from the list. You must choose a real, registered school.
+              <AuthFieldLabel htmlFor="school-combobox" required>
+                Sekolah
+              </AuthFieldLabel>
+              <SchoolCombobox value={schoolId} onChange={(id) => setSchoolId(id)} disabled={loading} />
+              <p className="mt-1.5 text-[11px] text-ink-secondary">
+                Pilih sekolah kamu dari daftar. Sekolah harus sudah terdaftar dan aktif.
               </p>
             </div>
+          </>
+        )}
 
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
-                Password
-              </label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                disabled={loading}
-                className="w-full"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700 mb-1">
-                Confirm Password
-              </label>
-              <Input
-                id="confirmPassword"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                disabled={loading}
-                className="w-full"
-              />
-            </div>
-
-            <Button type="submit" disabled={loading} className="w-full">
-              {loading ? "Creating account..." : "Register"}
-            </Button>
-          </form>
-
-          <p className="text-center text-sm text-gray-600 mt-4">
-            Registering as a parent?{" "}
-            <span className="text-gray-500">Use the invitation link from your child&apos;s school.</span>
-          </p>
-          <p className="text-center text-sm text-gray-600 mt-2">
-            Already have an account?{" "}
-            <Link href="/login" className="text-blue-600 hover:text-blue-700">
-              Sign in here
-            </Link>
-          </p>
+        <div>
+          <AuthFieldLabel htmlFor="password" required>
+            Kata Sandi
+          </AuthFieldLabel>
+          <Input
+            id="password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="••••••••"
+            required
+            disabled={loading}
+          />
         </div>
-      </div>
-    </div>
+
+        <div>
+          <AuthFieldLabel htmlFor="confirmPassword" required>
+            Konfirmasi Kata Sandi
+          </AuthFieldLabel>
+          <Input
+            id="confirmPassword"
+            type="password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            placeholder="••••••••"
+            required
+            disabled={loading}
+          />
+        </div>
+
+        <Button type="submit" disabled={loading} className="w-full">
+          {loading ? "Memproses..." : "Daftar"}
+        </Button>
+      </form>
+    </AuthShell>
   );
 }

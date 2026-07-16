@@ -6,6 +6,8 @@ import Link from "next/link";
 import { getCurrentProfile, signInWithPassword } from "@/lib/auth/session";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { AuthShell, AuthFieldLabel } from "@/components/auth-shell";
+import { AlertPanel, LoadingPanel } from "@/components/product-primitives";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -44,10 +46,10 @@ export default function LoginPage() {
       if (session) {
         router.push("/dashboard");
       } else {
-        setError("Invalid email or password");
+        setError("Email atau kata sandi salah");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      setError(err instanceof Error ? err.message : "Gagal masuk. Silakan coba lagi.");
     } finally {
       setLoading(false);
     }
@@ -55,75 +57,70 @@ export default function LoginPage() {
 
   if (checkingSession) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <p className="text-gray-600 text-sm">Checking session...</p>
+      <div className="min-h-dvh flex items-center justify-center bg-background">
+        <LoadingPanel message="Memeriksa sesi..." />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
-      <div className="w-full max-w-md">
-        <div className="bg-white rounded-lg shadow-md p-8">
-          <h1 className="text-2xl font-bold text-center mb-2">Catch Me Up</h1>
-          <p className="text-center text-gray-600 mb-6">Sign in to your account</p>
-
-          {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
-              {error}
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
-                Email
-              </label>
-              <Input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@example.com"
-                required
-                disabled={loading}
-                className="w-full"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
-                Password
-              </label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                disabled={loading}
-                className="w-full"
-              />
-            </div>
-
-            <Button
-              type="submit"
-              disabled={loading}
-              className="w-full"
-            >
-              {loading ? "Signing in..." : "Sign In"}
-            </Button>
-          </form>
-
-          <p className="text-center text-sm text-gray-600 mt-4">
-            Don&apos;t have an account?{" "}
-            <Link href="/register" className="text-blue-600 hover:text-blue-700">
-              Register here
-            </Link>
-          </p>
+    <AuthShell
+      title="Catch Me Up"
+      subtitle="Masuk ke akun kamu"
+      footer={
+        <p>
+          Belum punya akun?{" "}
+          <Link href="/register" className="font-semibold text-primary hover:underline">
+            Daftar di sini
+          </Link>
+        </p>
+      }
+    >
+      {error && (
+        <div className="mb-4">
+          <AlertPanel tone="danger" title="Tidak dapat masuk">
+            {error}
+          </AlertPanel>
         </div>
-      </div>
-    </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <AuthFieldLabel htmlFor="email" required>
+            Email
+          </AuthFieldLabel>
+          <Input
+            id="email"
+            type="email"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            placeholder="kamu@contoh.com"
+            required
+            disabled={loading}
+            autoComplete="email"
+          />
+        </div>
+
+        <div>
+          <AuthFieldLabel htmlFor="password" required>
+            Kata Sandi
+          </AuthFieldLabel>
+          <Input
+            id="password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="••••••••"
+            required
+            disabled={loading}
+            autoComplete="current-password"
+          />
+        </div>
+
+        <Button type="submit" disabled={loading} className="w-full">
+          {loading ? "Sedang masuk..." : "Masuk"}
+        </Button>
+      </form>
+    </AuthShell>
   );
 }

@@ -4,15 +4,15 @@ import { Suspense, useState, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { AuthShell, AuthFieldLabel } from "@/components/auth-shell";
+import { AlertPanel, LoadingPanel } from "@/components/product-primitives";
 
 export default function ParentRegisterPage() {
   return (
     <Suspense
       fallback={
-        <div className="min-h-screen flex items-center justify-center bg-gray-50">
-          <div className="text-center">
-            <p className="text-gray-600">Loading...</p>
-          </div>
+        <div className="min-h-dvh flex items-center justify-center bg-background">
+          <LoadingPanel message="Memuat..." />
         </div>
       }
     >
@@ -36,7 +36,7 @@ function ParentRegisterForm() {
   useEffect(() => {
     // Validate that code exists and is properly formed
     if (!code) {
-      setError("Invitation code is missing from URL");
+      setError("Kode undangan tidak ditemukan di URL");
       setValidatingCode(false);
       return;
     }
@@ -50,17 +50,17 @@ function ParentRegisterForm() {
     setError(null);
 
     if (!code) {
-      setError("Invitation code is missing");
+      setError("Kode undangan tidak ditemukan");
       return;
     }
 
     if (password !== confirmPassword) {
-      setError("Passwords do not match");
+      setError("Kata sandi dan konfirmasi tidak cocok");
       return;
     }
 
     if (password.length < 6) {
-      setError("Password must be at least 6 characters");
+      setError("Kata sandi minimal 6 karakter");
       return;
     }
 
@@ -80,14 +80,14 @@ function ParentRegisterForm() {
       const data = await response.json();
 
       if (!response.ok) {
-        setError(data.error || "Registration failed");
+        setError(data.error || "Pendaftaran gagal");
         return;
       }
 
-      // Success - redirect to login or dashboard
+      // Success - redirect to login
       router.push("/login?registered=true&role=parent");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Registration failed");
+      setError(err instanceof Error ? err.message : "Pendaftaran gagal");
     } finally {
       setLoading(false);
     }
@@ -95,86 +95,72 @@ function ParentRegisterForm() {
 
   if (validatingCode) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-gray-50">
-        <div className="text-center">
-          <p className="text-gray-600">Validating invitation...</p>
-        </div>
+      <div className="min-h-dvh flex items-center justify-center bg-background">
+        <LoadingPanel message="Memvalidasi undangan..." />
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 px-4">
-      <div className="w-full max-w-md">
-        <div className="bg-white rounded-lg shadow-md p-8">
-          <h1 className="text-2xl font-bold text-center mb-2">Parent Registration</h1>
-          <p className="text-center text-gray-600 mb-6">Complete your registration to access student information</p>
-
-          {error && (
-            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
-              {error}
-            </div>
-          )}
-
-          <form onSubmit={handleSubmit} className="space-y-4">
-            <div>
-              <label htmlFor="fullName" className="block text-sm font-medium text-gray-700 mb-1">
-                Full Name
-              </label>
-              <Input
-                id="fullName"
-                type="text"
-                value={fullName}
-                onChange={(e) => setFullName(e.target.value)}
-                placeholder="Your name"
-                required
-                disabled={loading}
-                className="w-full"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
-                Password
-              </label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                disabled={loading}
-                className="w-full"
-              />
-            </div>
-
-            <div>
-              <label htmlFor="confirmPassword" className="block text-sm font-medium text-gray-700 mb-1">
-                Confirm Password
-              </label>
-              <Input
-                id="confirmPassword"
-                type="password"
-                value={confirmPassword}
-                onChange={(e) => setConfirmPassword(e.target.value)}
-                placeholder="••••••••"
-                required
-                disabled={loading}
-                className="w-full"
-              />
-            </div>
-
-            <Button
-              type="submit"
-              disabled={loading}
-              className="w-full"
-            >
-              {loading ? "Registering..." : "Complete Registration"}
-            </Button>
-          </form>
+    <AuthShell title="Pendaftaran Orang Tua" subtitle="Selesaikan pendaftaran untuk mengakses informasi anak kamu">
+      {error && (
+        <div className="mb-4">
+          <AlertPanel tone="danger" title="Tidak dapat mendaftar">
+            {error}
+          </AlertPanel>
         </div>
-      </div>
-    </div>
+      )}
+
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div>
+          <AuthFieldLabel htmlFor="fullName" required>
+            Nama Lengkap
+          </AuthFieldLabel>
+          <Input
+            id="fullName"
+            type="text"
+            value={fullName}
+            onChange={(e) => setFullName(e.target.value)}
+            placeholder="Nama kamu"
+            required
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <AuthFieldLabel htmlFor="password" required>
+            Kata Sandi
+          </AuthFieldLabel>
+          <Input
+            id="password"
+            type="password"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            placeholder="••••••••"
+            required
+            disabled={loading}
+          />
+        </div>
+
+        <div>
+          <AuthFieldLabel htmlFor="confirmPassword" required>
+            Konfirmasi Kata Sandi
+          </AuthFieldLabel>
+          <Input
+            id="confirmPassword"
+            type="password"
+            value={confirmPassword}
+            onChange={(e) => setConfirmPassword(e.target.value)}
+            placeholder="••••••••"
+            required
+            disabled={loading}
+          />
+        </div>
+
+        <Button type="submit" disabled={loading} className="w-full">
+          {loading ? "Mendaftar..." : "Selesaikan Pendaftaran"}
+        </Button>
+      </form>
+    </AuthShell>
   );
 }

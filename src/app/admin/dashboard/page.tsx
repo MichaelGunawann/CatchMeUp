@@ -45,6 +45,7 @@ export default function AdminDashboardPage() {
   const [usedInvites, setUsedInvites] = useState(0);
   const [pendingTeachers, setPendingTeachers] = useState<PendingTeacherRow[]>([]);
   const [pendingStudents, setPendingStudents] = useState<PendingStudentRow[]>([]);
+  const [pendingSchools, setPendingSchools] = useState<School[]>([]);
   const [classOptions, setClassOptions] = useState<ClassOption[]>([]);
   const [selectedClassByStudent, setSelectedClassByStudent] = useState<Record<string, string>>({});
   const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
@@ -69,24 +70,39 @@ export default function AdminDashboardPage() {
         return;
       }
 
-      // PLATFORM_ADMIN is a real, schema-supported role (user_profiles.role
-      // CHECK constraint), but the current schema has no platform-admin
-      // data model (no `platform_admins` table, no RLS policy grants this
-      // role special visibility through the anon-key client used here -
-      // that access model is server-side/service-role only). Show it its
-      // own explicit, clearly-labeled placeholder instead of running the
-      // school_admins-specific queries below, which do not apply to it.
+      // PLATFORM_ADMIN reviews school registration requests
+      // (supabase/migrations/006_school_registration.sql grants this role
+      // a read-only RLS SELECT policy on `schools` covering every status;
+      // the approval mutation itself never goes through RLS - see
+      // /api/platform-admin/approve-school).
       if (profile.role === "PLATFORM_ADMIN") {
         setIsPlatformAdmin(true);
         setAdminName(profile.full_name);
-        setLoading(false);
+
+        try {
+          const { data: pendingSchoolRows, error: pendingSchoolError } = await supabase
+            .from("schools")
+            .select("*")
+            .eq("status", "PENDING")
+            .order("created_at", { ascending: true });
+
+          if (pendingSchoolError) throw pendingSchoolError;
+          if (cancelled) return;
+          setPendingSchools((pendingSchoolRows ?? []) as School[]);
+        } catch (err) {
+          if (!cancelled) {
+            setError(err instanceof Error ? err.message : "Gagal memuat data dasbor");
+          }
+        } finally {
+          if (!cancelled) setLoading(false);
+        }
         return;
       }
 
       const adminSchools = await getCurrentSchoolAdminSchools();
       if (cancelled) return;
       if (adminSchools.length === 0) {
-        setError("No school administrator record is linked to this account yet.");
+        setError("Belum ada catatan admin sekolah yang terhubung dengan akun ini.");
         setLoading(false);
         return;
       }
@@ -152,7 +168,7 @@ export default function AdminDashboardPage() {
         setPendingStudents((pendingStudentRows ?? []) as unknown as PendingStudentRow[]);
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load dashboard data");
+          setError(err instanceof Error ? err.message : "Gagal memuat data dasbor");
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -165,9 +181,18 @@ export default function AdminDashboardPage() {
     };
   }, [router]);
 
-  const totalClasses = schools.reduce((sum, s) => sum + s.classCount, 0);
-  const totalTeachers = schools.reduce((sum, s) => sum + s.teacherCount, 0);
-  const totalStudents = schools.reduce((sum, s) => sum + s.studentCount, 0);
+  // A School Admin may manage a mix of ACTIVE and still-PENDING/REJECTED
+  // schools (schema/RLS grants them visibility into their own schools
+  // regardless of status - see 006_school_registration.sql - so pending
+  // registrations can show their own status instead of looking like a
+  // 404). Stats/breakdown only make sense for ACTIVE schools; the
+  // non-active ones get their own status banner below.
+  const activeSchools = schools.filter((s) => s.status === "ACTIVE");
+  const nonActiveSchools = schools.filter((s) => s.status !== "ACTIVE");
+
+  const totalClasses = activeSchools.reduce((sum, s) => sum + s.classCount, 0);
+  const totalTeachers = activeSchools.reduce((sum, s) => sum + s.teacherCount, 0);
+  const totalStudents = activeSchools.reduce((sum, s) => sum + s.studentCount, 0);
 
   async function handleDecision(
     role: "TEACHER" | "STUDENT",
@@ -180,7 +205,7 @@ export default function AdminDashboardPage() {
       const {
         data: { session },
       } = await supabase.auth.getSession();
-      if (!session) throw new Error("Session expired, please sign in again");
+      if (!session) throw new Error("Sesi berakhir, silakan masuk kembali");
 
       const classId = role === "STUDENT" ? selectedClassByStudent[recordId] : undefined;
 
@@ -195,7 +220,7 @@ export default function AdminDashboardPage() {
 
       const data = await response.json();
       if (!response.ok) {
-        throw new Error(data.error || "Failed to update registration");
+        throw new Error(data.error || "Gagal memperbarui pendaftaran");
       }
 
       if (role === "TEACHER") {
@@ -204,7 +229,38 @@ export default function AdminDashboardPage() {
         setPendingStudents((prev) => prev.filter((s) => s.id !== recordId));
       }
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : "Failed to update registration");
+      setActionError(err instanceof Error ? err.message : "Gagal memperbarui pendaftaran");
+    } finally {
+      setActionLoadingId(null);
+    }
+  }
+
+  async function handleSchoolDecision(schoolId: string, decision: "ACTIVE" | "REJECTED") {
+    setActionError(null);
+    setActionLoadingId(schoolId);
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session) throw new Error("Sesi berakhir, silakan masuk kembali");
+
+      const response = await fetch("/api/platform-admin/approve-school", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ schoolId, decision }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Gagal memperbarui pendaftaran sekolah");
+      }
+
+      setPendingSchools((prev) => prev.filter((s) => s.id !== schoolId));
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Gagal memperbarui pendaftaran sekolah");
     } finally {
       setActionLoadingId(null);
     }
@@ -233,17 +289,84 @@ export default function AdminDashboardPage() {
         {loading ? (
           <LoadingPanel message="Memuat dasbor..." />
         ) : isPlatformAdmin ? (
-          <EmptyState
-            icon={SchoolIcon}
-            title="Dasbor Platform Admin belum tersedia"
-            description="PLATFORM_ADMIN adalah peran yang didukung skema (user_profiles.role), tetapi belum memiliki model data atau kebijakan RLS khusus di aplikasi ini. Provisioning tingkat platform saat ini dilakukan langsung melalui server/service role, bukan melalui dasbor ini."
-          />
+          <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
+            <h2 className="text-[13px] font-bold text-ink mb-4 flex items-center gap-2">
+              <SchoolIcon className="h-3.5 w-3.5" />
+              Pendaftaran Sekolah Menunggu Persetujuan
+            </h2>
+
+            {actionError && (
+              <div className="mb-3">
+                <AlertPanel tone="danger" title="Gagal memproses">
+                  {actionError}
+                </AlertPanel>
+              </div>
+            )}
+
+            {pendingSchools.length === 0 ? (
+              <EmptyState
+                icon={SchoolIcon}
+                title="Tidak ada pendaftaran sekolah yang menunggu"
+                description="Pendaftaran sekolah baru akan muncul di sini untuk disetujui atau ditolak."
+              />
+            ) : (
+              <div className="divide-y divide-border">
+                {pendingSchools.map((s) => (
+                  <div key={s.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[13px] font-semibold text-ink truncate">{s.name}</div>
+                      <div className="text-[11px] text-ink-secondary mt-0.5">
+                        {[s.city, s.province].filter(Boolean).join(", ") || "-"}
+                        {s.npsn ? ` · NPSN ${s.npsn}` : ""}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 gap-2">
+                      <Button
+                        variant="success"
+                        className="h-7 text-[11px] px-2.5"
+                        disabled={actionLoadingId === s.id}
+                        onClick={() => handleSchoolDecision(s.id, "ACTIVE")}
+                      >
+                        Setujui
+                      </Button>
+                      <Button
+                        variant="danger"
+                        className="h-7 text-[11px] px-2.5"
+                        disabled={actionLoadingId === s.id}
+                        onClick={() => handleSchoolDecision(s.id, "REJECTED")}
+                      >
+                        Tolak
+                      </Button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         ) : !error ? (
           <>
+            {nonActiveSchools.length > 0 && (
+              <div className="space-y-3">
+                {nonActiveSchools.map((s) =>
+                  s.status === "PENDING" ? (
+                    <AlertPanel key={s.id} tone="warning" title={`${s.name} · menunggu persetujuan admin platform`}>
+                      Pendaftaran sekolah ini sudah terkirim tapi belum disetujui. Kamu belum bisa mengelola
+                      guru, siswa, atau kelas untuk sekolah ini sampai disetujui.
+                    </AlertPanel>
+                  ) : (
+                    <AlertPanel key={s.id} tone="danger" title={`${s.name} · pendaftaran ditolak`}>
+                      Pendaftaran sekolah ini ditolak oleh admin platform. Hubungi dukungan jika menurutmu
+                      ini keliru.
+                    </AlertPanel>
+                  )
+                )}
+              </div>
+            )}
+
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <StatCard
                 label="Sekolah Dikelola"
-                value={String(schools.length)}
+                value={String(activeSchools.length)}
                 detail="Sekolah aktif"
                 tone="primary"
                 icon={SchoolIcon}
@@ -273,15 +396,15 @@ export default function AdminDashboardPage() {
 
             <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
               <h2 className="text-[13px] font-bold text-ink mb-4">Rincian per Sekolah</h2>
-              {schools.length === 0 ? (
+              {activeSchools.length === 0 ? (
                 <EmptyState
                   icon={SchoolIcon}
-                  title="Belum mengelola sekolah"
-                  description="Sekolah yang kamu kelola akan muncul di sini."
+                  title="Belum mengelola sekolah aktif"
+                  description="Sekolah yang kamu kelola akan muncul di sini setelah disetujui."
                 />
               ) : (
                 <div className="divide-y divide-border">
-                  {schools.map((s) => (
+                  {activeSchools.map((s) => (
                     <div key={s.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
                       <div className="flex-1 min-w-0">
                         <div className="text-[13px] font-semibold text-ink truncate">{s.name}</div>

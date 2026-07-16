@@ -67,7 +67,7 @@ export default function StudentDashboardPage() {
       const student = await getCurrentStudent();
       if (cancelled) return;
       if (!student) {
-        setError("No student record is linked to this account yet.");
+        setError("Belum ada catatan siswa yang terhubung dengan akun ini.");
         setLoading(false);
         return;
       }
@@ -136,7 +136,7 @@ export default function StudentDashboardPage() {
         }
       } catch (err) {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load dashboard data");
+          setError(err instanceof Error ? err.message : "Gagal memuat data dasbor");
         }
       } finally {
         if (!cancelled) setLoading(false);
