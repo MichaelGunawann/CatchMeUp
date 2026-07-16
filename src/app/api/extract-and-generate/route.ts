@@ -112,10 +112,15 @@ Pastikan:
 - sourcePage harus angka halaman di materi (estimasi atau asli jika terlihat)`;
 
   try {
+    // Scaled to the actual question count instead of a flat 4096 - see
+    // generate-questions/route.ts for why (Groq's daily-token rate limiter
+    // checks requested max_tokens against remaining quota, not just actual
+    // usage, so an oversized fixed value rejects small requests needlessly).
+    const maxTokens = Math.min(8192, count * 350 + 500);
     const completion = await getGroq().chat.completions.create({
       model: "llama-3.3-70b-versatile",
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 4096,
+      max_tokens: maxTokens,
     });
 
     const text = completion.choices[0].message.content ?? "[]";
