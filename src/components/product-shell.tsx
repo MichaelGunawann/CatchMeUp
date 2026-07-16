@@ -1,8 +1,8 @@
 "use client";
 
-import React from "react";
+import React, { useRef, useEffect, useState } from "react";
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import {
   Bell,
   ChevronDown,
@@ -18,17 +18,59 @@ import {
   parentNotifications,
   adminNotifications,
 } from "@/lib/db";
-import { NotificationItem } from "@/components/product-primitives";
+import { AlertPanel, NotificationItem } from "@/components/product-primitives";
 import { cn } from "@/lib/utils";
+import { getCurrentProfile, signOut } from "@/lib/auth/session";
 
 export type Role = "teacher" | "student" | "parent" | "admin";
 
-const roleMeta: Record<Role, { label: string; user: string; initials: string; helper: string; color: string }> = {
-  teacher: { label: "Konsol Guru", user: "Bu Ratna Dewi", initials: "RD", helper: "XI IPA 2 · Matematika", color: "bg-primary" },
-  student: { label: "Ruang Belajar", user: "Andi Pratama", initials: "AP", helper: "XI IPA 2 · SMAN 1 Bandung", color: "bg-success" },
-  parent: { label: "Portal Orang Tua", user: "Bpk. Hari Pratama", initials: "HP", helper: "Orang tua Andi Pratama", color: "bg-warning" },
-  admin: { label: "Admin Platform", user: "Admin", initials: "AD", helper: "SMA Negeri 1 Bandung", color: "bg-ink-secondary" }
+// Static, role-level chrome (label/color are not tied to any specific
+// account). Per-user identity (name/initials) is resolved from the real
+// signed-in Supabase session below — never hardcoded to a specific person.
+const roleMeta: Record<Role, { label: string; color: string }> = {
+  teacher: { label: "Konsol Guru", color: "bg-primary" },
+  student: { label: "Ruang Belajar", color: "bg-success" },
+  parent: { label: "Portal Orang Tua", color: "bg-warning" },
+  admin: { label: "Admin Platform", color: "bg-ink-secondary" },
 };
+
+function initialsFromName(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return "?";
+  if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+  return (parts[0][0] + parts[1][0]).toUpperCase();
+}
+
+/**
+ * Resolves the real signed-in user's display identity from Supabase.
+ * Falls back to a neutral "Guest" identity (never a specific fake named
+ * person) when no session exists, e.g. for anonymous visitors browsing the
+ * legacy demo screens, which remain reachable without login.
+ */
+function useCurrentIdentity() {
+  const [identity, setIdentity] = useState<{ name: string; initials: string } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getCurrentProfile()
+      .then((profile) => {
+        if (cancelled) return;
+        if (profile) {
+          setIdentity({ name: profile.full_name, initials: initialsFromName(profile.full_name) });
+        } else {
+          setIdentity(null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setIdentity(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return identity;
+}
 
 const roleNotifications = {
   teacher: teacherNotifications,
@@ -53,14 +95,56 @@ function CatchUpLogo({ className }: { className?: string }) {
 export function AppShell({
   role,
   nav,
-  children
+  children,
+  demoData = false,
 }: {
   role: Role;
   nav: NavItem[];
   children: React.ReactNode;
+  /**
+   * Set to true for screens still backed by the legacy mock data layer
+   * (src/lib/db) rather than real Supabase-backed queries, so real users
+   * are never shown fabricated numbers/records without any indication
+   * they aren't their actual account data.
+   */
+  demoData?: boolean;
 }) {
   const pathname = usePathname();
+  const router = useRouter();
   const meta = roleMeta[role];
+  const identity = useCurrentIdentity();
+  const displayName = identity?.name ?? "Tamu";
+  const displayInitials = identity?.initials ?? "?";
+
+  async function handleLogout() {
+    try {
+      await signOut();
+    } catch {
+      // Even if sign-out fails (e.g. no active session for an anonymous
+      // demo visitor), still send the user to the login page.
+    }
+    router.push("/login");
+  }
+
+  // Preserve sidebar nav scroll position across navigation
+  const navRef = useRef<HTMLElement>(null);
+  const savedNavScroll = useRef(0);
+
+  // Save scroll before navigation
+  function saveNavScroll() {
+    if (navRef.current) savedNavScroll.current = navRef.current.scrollTop;
+  }
+
+  // Restore scroll after pathname changes (after React reconciles)
+  useEffect(() => {
+    const nav = navRef.current;
+    if (!nav) return;
+    // Use rAF to run after paint so browser doesn't override it
+    const id = requestAnimationFrame(() => {
+      nav.scrollTop = savedNavScroll.current;
+    });
+    return () => cancelAnimationFrame(id);
+  }, [pathname]);
 
   return (
     <div className="flex min-h-screen bg-background text-ink">
@@ -75,7 +159,7 @@ export function AppShell({
         </div>
 
         {/* Nav */}
-        <nav className="min-h-0 flex-1 overflow-y-auto px-3 pb-4" aria-label="Navigasi utama">
+        <nav ref={navRef} className="min-h-0 flex-1 overflow-y-auto px-3 pb-4" aria-label="Navigasi utama">
           {nav.map((item, index) => {
             const prevItem = nav[index - 1];
             const showGroupHeader = item.group && item.group !== prevItem?.group;
@@ -94,6 +178,8 @@ export function AppShell({
                 {!showGroupHeader && index === 0 && <div className="pt-3" />}
                 <Link
                   href={item.href}
+                  scroll={false}
+                  onMouseDown={saveNavScroll}
                   aria-current={active ? "page" : undefined}
                   className={cn(
                     "group flex h-9 items-center gap-2.5 rounded-[6px] px-2.5 text-[13px] font-medium transition-all duration-150",
@@ -136,18 +222,18 @@ export function AppShell({
                   "flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-[11px] font-bold text-white",
                   meta.color
                 )}>
-                  {meta.initials}
+                  {displayInitials}
                 </div>
                 <div className="min-w-0 flex-1 text-left">
-                  <div className="truncate text-[12px] font-semibold text-ink">{meta.user}</div>
-                  <div className="truncate text-[10px] text-ink-tertiary">{meta.helper.split("·")[0].trim()}</div>
+                  <div className="truncate text-[12px] font-semibold text-ink">{displayName}</div>
+                  <div className="truncate text-[10px] text-ink-tertiary">{meta.label}</div>
                 </div>
                 <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ink-tertiary" />
               </button>
             )}
           >
             <div className="px-3 py-2.5">
-              <div className="text-[12px] font-semibold text-ink">{meta.user}</div>
+              <div className="text-[12px] font-semibold text-ink">{displayName}</div>
               <div className="text-[11px] text-ink-secondary">{meta.label}</div>
             </div>
             <div className="my-1 h-px bg-border" />
@@ -162,14 +248,15 @@ export function AppShell({
                 </Link>
               ))}
             <div className="my-1 h-px bg-border" />
-            <Link
-              href={`/${role}/login`}
-              className="flex items-center gap-2 rounded-[4px] px-3 py-2 text-[12px] text-ink-secondary transition hover:bg-background hover:text-ink"
+            <button
+              type="button"
+              onClick={handleLogout}
+              className="flex w-full items-center gap-2 rounded-[4px] px-3 py-2 text-[12px] text-ink-secondary transition hover:bg-background hover:text-ink"
               role="menuitem"
             >
               <LogOut className="h-3.5 w-3.5" />
               Keluar
-            </Link>
+            </button>
           </Dropdown>
         </div>
       </aside>
@@ -208,16 +295,16 @@ export function AppShell({
                       "flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white",
                       meta.color
                     )}>
-                      {meta.initials}
+                      {displayInitials}
                     </div>
-                    <span className="hidden text-[13px] font-semibold text-ink sm:block">{meta.user.split(" ").slice(0, 2).join(" ")}</span>
+                    <span className="hidden text-[13px] font-semibold text-ink sm:block">{displayName.split(" ").slice(0, 2).join(" ")}</span>
                     <ChevronDown className="h-3.5 w-3.5 text-ink-tertiary" />
                   </button>
                 )}
               >
                 <div className="px-3 py-2.5">
-                  <div className="text-[13px] font-semibold text-ink">{meta.user}</div>
-                  <div className="text-[11px] text-ink-secondary">{meta.helper}</div>
+                  <div className="text-[13px] font-semibold text-ink">{displayName}</div>
+                  <div className="text-[11px] text-ink-secondary">{meta.label}</div>
                 </div>
                 <div className="my-1 h-px bg-border" />
                 {(["teacher", "student", "parent", "admin"] as Role[])
@@ -227,23 +314,36 @@ export function AppShell({
                       className="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-secondary transition hover:bg-background hover:text-ink"
                       role="menuitem">
                       <div className={cn("h-2 w-2 rounded-full shrink-0", roleMeta[r].color)} />
-                      {roleMeta[r].user.split(" ").slice(0, 2).join(" ")}
+                      {roleMeta[r].label}
                     </Link>
                   ))}
                 <div className="my-1 h-px bg-border" />
-                <Link href={`/${role}/login`}
-                  className="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-secondary transition hover:bg-background hover:text-ink"
-                  role="menuitem">
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  className="flex w-full items-center gap-2 px-3 py-2 text-[12px] text-ink-secondary transition hover:bg-background hover:text-ink"
+                  role="menuitem"
+                >
                   <LogOut className="h-3.5 w-3.5" />
                   Keluar
-                </Link>
+                </button>
               </Dropdown>
             </div>
           </div>
         </header>
 
         {/* Page content */}
-        <main className="flex-1 mx-auto w-full max-w-[90rem] px-6 py-7">{children}</main>
+        <main className="flex-1 mx-auto w-full max-w-[90rem] px-6 py-7">
+          {demoData && (
+            <div className="mb-6">
+              <AlertPanel tone="warning" title="Data demo">
+                Halaman ini masih menggunakan data contoh (bukan data akun asli kamu) dan belum terhubung ke
+                database. Jangan jadikan angka atau catatan di halaman ini sebagai acuan nyata.
+              </AlertPanel>
+            </div>
+          )}
+          {children}
+        </main>
       </div>
     </div>
   );

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/product-shell";
 import {
@@ -42,14 +42,15 @@ import {
   assessmentStyles,
   assessments,
   assistantGreeting,
+  classIdByName,
   classStats,
   currentSemester,
   currentTeacher,
+  getClassStats,
   incorrectQuestions,
   leaderboard,
   materials,
   pastPaperTopics,
-  pendingQuestions,
   questionBank,
   school,
   scoreTrend,
@@ -77,6 +78,8 @@ import {
   type PendingQuestion,
   type AssessmentStyleCorpus,
   type SimulatorQuestion,
+  type QuestionBankEntry,
+  type Assessment,
 } from "@/lib/db";
 import { cn } from "@/lib/utils";
 import Link from "next/link";
@@ -84,14 +87,17 @@ import {
   AlertCircle,
   BookOpen,
   CheckCircle2,
+  ChevronDown,
   ChevronRight,
   Clock,
   Database,
   Download,
   Eye,
   FilePlus2,
+  FileText,
   Filter,
   HelpCircle,
+  Lightbulb,
   MessageCircle,
   Pencil,
   Plus,
@@ -179,6 +185,35 @@ export function ProductApp({ path }: { path: string[] }) {
 // TEACHER
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ── Class Selector Banner ─────────────────────────────────────────────────────
+
+function ClassSelectorBanner() {
+  const [activeClass] = useActiveClass();
+
+  return (
+    <div className="flex items-center gap-2 flex-wrap mb-6 rounded-[10px] border border-border bg-surface px-4 py-2.5 shadow-sm">
+      <span className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-tertiary shrink-0 mr-1">Kelas:</span>
+      {currentTeacher.classes.map(cls => (
+        <button
+          key={cls}
+          onClick={() => changeActiveClass(cls)}
+          className={cn(
+            "px-3 py-1 rounded-full text-[12px] font-semibold border transition-all",
+            activeClass === cls
+              ? "bg-primary text-white border-primary shadow-sm"
+              : "bg-background text-ink-secondary border-border hover:border-primary/40 hover:text-ink"
+          )}
+        >
+          {cls}
+        </button>
+      ))}
+      <span className="ml-auto text-[11px] text-ink-tertiary hidden sm:block">{currentSemester}</span>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 function TeacherApp({ page }: { page: string }) {
   const screens: Record<string, React.ReactNode> = {
     dashboard: <TeacherDashboard />,
@@ -194,9 +229,201 @@ function TeacherApp({ page }: { page: string }) {
     "ai-config": <TeacherAIConfig />,
   };
   return (
-    <AppShell role="teacher" nav={teacherNav}>
+    <AppShell role="teacher" nav={teacherNav} demoData>
+      <ClassSelectorBanner />
       {screens[page] ?? <TeacherDashboard />}
     </AppShell>
+  );
+}
+
+// ── Shared Upload Material Modal ──────────────────────────────────────────────
+
+function UploadMaterialModal({ onClose }: { onClose: () => void }) {
+  const [dragOver, setDragOver] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
+  const fileInputRef = React.useRef<HTMLInputElement>(null);
+
+  async function handleUpload() {
+    if (!file) return;
+    setUploading(true);
+
+    initMatStore();
+    initReviewStore();
+
+    const title = file.name.replace(/\.[^/.]+$/, "");
+    const matId = `mat-upload-${Date.now()}`;
+    const newMat: Material = {
+      id: matId,
+      title,
+      type: "Modul Ajar",
+      subject: currentTeacher.subject,
+      classId: getActiveClassId(),
+      className: getActiveClassId(),
+      uploadedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+      pages: 0,
+      status: "Aktif",
+      aiProcessed: false,
+      questionsGenerated: 0,
+    };
+
+    // Save to persistent store immediately
+    const updatedMats = [newMat, ..._matStore.uploadedMaterials];
+    _matStore.uploadedMaterials = updatedMats;
+    _matStore.materialFiles = { ..._matStore.materialFiles, [matId]: file };
+    lsSet("catchup_mats", updatedMats);
+
+    setToast({ message: "Mengunggah materi dan memulai analisis AI...", tone: "primary" });
+
+    // Extract questions from file
+    let rawQuestions: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> = [];
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      fd.append("count", "5");
+      fd.append("materialTitle", title);
+      fd.append("subject", currentTeacher.subject);
+      const res = await fetch("/api/extract-and-generate", { method: "POST", body: fd });
+      const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
+      rawQuestions = data.questions ?? [];
+    } catch { /* will fall back to empty */ }
+
+    if (!rawQuestions.length) {
+      // Fallback: generate from metadata
+      try {
+        const res = await fetch("/api/generate-questions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ materialTitle: title, topic: title, subject: currentTeacher.subject, count: 5, difficulty: "Sedang" }),
+        });
+        const data = await res.json() as { questions?: typeof rawQuestions };
+        rawQuestions = data.questions ?? [];
+      } catch { /* ignore */ }
+    }
+
+    if (rawQuestions.length > 0) {
+      const generated: typeof questionBank = rawQuestions.map((q, i) => ({
+        id: `ai-${matId}-${i}`,
+        question: q.question,
+        topic: q.topic,
+        subtopic: q.topic,
+        bloom: "Menerapkan" as const,
+        difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
+        styleType: "TKA" as const,
+        source: title,
+        usageCount: 0,
+        successRate: 0,
+        status: "Disetujui" as const,
+        isLocked: false,
+        options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
+        correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
+        explanation: q.explanation,
+      }));
+
+      // Save questions to mat store
+      const updatedMatQs = { ..._matStore.materialQuestions, [matId]: generated };
+      _matStore.materialQuestions = updatedMatQs;
+      lsSet("catchup_matqs", updatedMatQs);
+
+      // Push to review queue
+      const existingReviewIds = new Set(_reviewStore.questions.map(q => q.id));
+      const newForReview = generated.filter(q => !existingReviewIds.has(q.id)).map(q => toPendingQuestion(q));
+      if (newForReview.length > 0) {
+        const updatedReview = [..._reviewStore.questions, ...newForReview];
+        _reviewStore.questions = updatedReview;
+        lsSet("catchup_review", updatedReview);
+      }
+
+      // Update material as processed
+      const finalMats = _matStore.uploadedMaterials.map(m =>
+        m.id === matId ? { ...m, aiProcessed: true, questionsGenerated: generated.length } : m
+      );
+      _matStore.uploadedMaterials = finalMats;
+      lsSet("catchup_mats", finalMats);
+      lsSet("catchup_pids", [...(_matStore.processedIds ?? new Set()), matId]);
+
+      setToast({ message: `${generated.length} soal berhasil diekstrak dari "${title}"`, tone: "success" });
+      setTimeout(() => onClose(), 1500);
+    } else {
+      setToast({ message: "Materi disimpan. Tidak ada soal yang diekstrak.", tone: "primary" });
+      setTimeout(() => onClose(), 1500);
+    }
+
+    setUploading(false);
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => !uploading && onClose()} />
+      <div className="relative w-full max-w-lg rounded-card border border-border bg-surface shadow-xl flex flex-col max-h-[90vh]">
+        <div className="flex items-center justify-between border-b border-border px-5 py-3.5 shrink-0">
+          <h2 className="text-[14px] font-bold text-ink">Unggah Materi</h2>
+          {!uploading && (
+            <button onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+
+        <div className="overflow-y-auto p-5 space-y-4">
+          {/* Drop zone */}
+          <div
+            onDragOver={e => { e.preventDefault(); setDragOver(true); }}
+            onDragLeave={() => setDragOver(false)}
+            onDrop={e => { e.preventDefault(); setDragOver(false); setFile(e.dataTransfer.files[0] ?? null); }}
+            onClick={() => fileInputRef.current?.click()}
+            className={cn(
+              "flex flex-col items-center gap-3 rounded-[10px] border-2 border-dashed p-8 text-center cursor-pointer transition-colors",
+              dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/40 bg-background"
+            )}
+          >
+            <input ref={fileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx" className="hidden"
+              onChange={e => setFile(e.target.files?.[0] ?? null)} />
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-surface">
+              <Upload className="h-5 w-5 text-primary" />
+            </div>
+            <div>
+              <p className="text-[13px] font-semibold text-ink">Tarik & lepas file di sini</p>
+              <p className="text-[11px] text-ink-secondary mt-0.5">PDF, PPT, DOCX · Maks. 50 MB</p>
+            </div>
+          </div>
+
+          {file && (
+            <div className="flex items-center gap-2 rounded-[8px] border border-success/30 bg-success/5 px-3 py-2">
+              <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+              <div className="flex-1 min-w-0">
+                <div className="text-[12px] font-semibold text-ink truncate">{file.name}</div>
+                <div className="text-[10px] text-ink-secondary">{(file.size / 1024).toFixed(0)} KB</div>
+              </div>
+              <button onClick={e => { e.stopPropagation(); setFile(null); }} className="text-ink-tertiary hover:text-danger shrink-0">
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
+
+          {toast && (
+            <div className={cn(
+              "flex items-center gap-2 rounded-[8px] px-3 py-2 text-[12px]",
+              toast.tone === "success" ? "bg-success/10 text-success" : "bg-primary/10 text-primary"
+            )}>
+              {uploading && <span className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin shrink-0" />}
+              {toast.message}
+            </div>
+          )}
+        </div>
+
+        <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
+          <Button variant="outline" className="h-8 text-[12px]" onClick={onClose} disabled={uploading}>Batal</Button>
+          <Button variant="default" className="h-8 text-[12px]" disabled={!file || uploading} onClick={handleUpload}>
+            {uploading
+              ? <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />Memproses...</>
+              : <><Sparkles className="mr-1.5 h-3.5 w-3.5" />Unggah & Proses AI</>
+            }
+          </Button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -204,19 +431,31 @@ function TeacherApp({ page }: { page: string }) {
 
 function TeacherDashboard() {
   const router = useRouter();
+  const [activeClass] = useActiveClass();
   const [activeTab, setActiveTab] = useState<"semua" | "at-risk" | "need-review">("semua");
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
   const [showAllStudents, setShowAllStudents] = useState(false);
   const [upcomingDetailId, setUpcomingDetailId] = useState<string | null>(null);
+  const [reviewCount, setReviewCount] = useState(0);
   const [showUploadModal, setShowUploadModal] = useState(false);
-  const [uploadDragOver, setUploadDragOver] = useState(false);
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploadToast, setUploadToast] = useState<string | null>(null);
-  const dashboardFileInputRef = React.useRef<HTMLInputElement>(null);
-  const selectedStudent = students.find(s => s.id === selectedStudentId);
-  const upcomingDetail = assessments.find(a => a.id === upcomingDetailId);
 
-  const allFiltered = students.filter(s => {
+  const activeClassId = classIdByName[activeClass] ?? "cls1";
+  const activeStats = activeClass ? getClassStats(activeClassId) : classStats;
+  const classStudents = students.filter(s => s.classId === activeClassId);
+  const [savedAssessments, setSavedAssessments] = useState<SavedAssessment[]>([]);
+
+  const selectedStudent = classStudents.find(s => s.id === selectedStudentId);
+  const upcomingAssessments = savedAssessments.filter(a =>
+    (!a.classId || a.classId === activeClassId) && a.status === "Terjadwal"
+  );
+  const upcomingDetail = savedAssessments.find(a => a.id === upcomingDetailId);
+
+  useEffect(() => {
+    initReviewStore(); setReviewCount(_reviewStore.questions.length);
+    initAssessStore(); setSavedAssessments([..._assessStore.list]);
+  }, []);
+
+  const allFiltered = classStudents.filter(s => {
     if (activeTab === "at-risk") return s.status === "At Risk";
     if (activeTab === "need-review") return s.status === "Need Review";
     return true;
@@ -235,7 +474,7 @@ function TeacherDashboard() {
             Selamat pagi, {currentTeacher.name.split(" ").slice(0, 2).join(" ")}! 👋
           </h1>
           <p className="text-[13px] text-ink-secondary mt-1">
-            {currentTeacher.classes[0]} · {currentTeacher.subject} · {classStats.total} siswa
+            {activeClass || currentTeacher.classes[0]} · {currentTeacher.subject} · {activeStats.total} siswa
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -252,10 +491,10 @@ function TeacherDashboard() {
 
       {/* Status KPI hero */}
       <StatusKPIRow
-        onTrack={classStats.onTrack}
-        needReview={classStats.needReview}
-        atRisk={classStats.atRisk}
-        total={classStats.total}
+        onTrack={activeStats.onTrack}
+        needReview={activeStats.needReview}
+        atRisk={activeStats.atRisk}
+        total={activeStats.total}
       />
 
       {/* Quick stats */}
@@ -283,9 +522,9 @@ function TeacherDashboard() {
                     activeTab === tab ? "bg-primary/10 text-primary" : "text-ink-secondary hover:text-ink"
                   )}
                 >
-                  {tab === "semua" ? `Semua (${classStats.total})` :
-                   tab === "at-risk" ? `Perhatian (${classStats.atRisk})` :
-                   `Review (${classStats.needReview})`}
+                  {tab === "semua" ? `Semua (${activeStats.total})` :
+                   tab === "at-risk" ? `Perhatian (${activeStats.atRisk})` :
+                   `Review (${activeStats.needReview})`}
                 </button>
               ))}
             </div>
@@ -317,50 +556,35 @@ function TeacherDashboard() {
         <div className="space-y-4">
           <AIInsightPanel title="Wawasan AI">
             <p className="mb-3">
-              <strong className="text-ink">{classStats.atRisk} siswa</strong> membutuhkan perhatian segera.
-              Topik <strong className="text-ink">Diskriminan</strong> memiliki akurasi rata-rata hanya{" "}
-              <strong className="text-danger">38%</strong> — terendah semester ini.
+              <strong className="text-ink">{activeStats.atRisk} siswa</strong> membutuhkan perhatian segera berdasarkan data nilai saat ini.
             </p>
-            <p>Remedial 20 menit difokuskan pada tanda konstanta negatif direkomendasikan sebelum UAS.</p>
+            <p>Buat asesmen, unggah materi, dan AI akan menghasilkan rekomendasi pengajaran yang lebih spesifik.</p>
             <div className="mt-3">
               <Link href="/teacher/recommendations" className="text-[12px] font-semibold text-primary hover:underline">
-                Lihat semua rekomendasi →
+                Lihat rekomendasi AI →
               </Link>
             </div>
           </AIInsightPanel>
 
-          <div className="rounded-card border border-border bg-surface shadow-sm">
-            <div className="border-b border-border px-4 py-3">
-              <h3 className="text-[13px] font-bold text-ink">Miskonsepsi Utama</h3>
-            </div>
-            <div className="px-4 py-1">
-              {teachingRecommendations.slice(0, 3).map(r => (
-                <MisconceptionRow
-                  key={r.id}
-                  topic={r.topic}
-                  issue={r.issue}
-                  affectedStudents={r.affectedStudents}
-                  priority={r.priority}
-                />
-              ))}
-            </div>
-          </div>
-
           <div className="rounded-card border border-border bg-surface shadow-sm p-4">
             <h3 className="text-[13px] font-bold text-ink mb-3">Asesmen Mendatang</h3>
-            <div className="space-y-2.5">
-              {assessments.filter(a => a.status === "Terjadwal").slice(0, 2).map(a => (
-                <div key={a.id} onClick={() => setUpcomingDetailId(a.id)} className="cursor-pointer">
-                  <UpcomingCard title={a.title} type={a.type} date={a.scheduledFor} duration={a.duration} questions={a.totalQuestions} />
-                </div>
-              ))}
-            </div>
+            {upcomingAssessments.length === 0 ? (
+              <p className="text-[12px] text-ink-tertiary py-1">Belum ada asesmen terjadwal. Buat asesmen baru via menu Buat Asesmen.</p>
+            ) : (
+              <div className="space-y-2.5">
+                {upcomingAssessments.slice(0, 2).map(a => (
+                  <div key={a.id} onClick={() => setUpcomingDetailId(a.id)} className="cursor-pointer">
+                    <UpcomingCard title={a.title} type={a.type} date={a.scheduledFor} duration={a.duration} questions={a.totalQuestions} />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {pendingQuestions.filter(q => q.status === "Perlu Ditinjau").length > 0 && (
-        <AlertPanel tone="primary" title={`${pendingQuestions.filter(q => q.status === "Perlu Ditinjau").length} soal AI menunggu tinjauan`}>
+      {reviewCount > 0 && (
+        <AlertPanel tone="primary" title={`${reviewCount} soal AI menunggu tinjauan`}>
           AI mengekstrak soal baru dari materi yang diunggah. Tinjau dan setujui sebelum diterbitkan.{" "}
           <Link href="/teacher/question-review" className="font-semibold underline">Tinjau sekarang →</Link>
         </AlertPanel>
@@ -391,7 +615,7 @@ function TeacherDashboard() {
                 {[
                   { label: "Rata-rata", value: `${selectedStudent.avgScore ?? "—"}` },
                   { label: "Status", value: selectedStudent.status },
-                  { label: "Asesmen", value: `${studentResults.length}` },
+                  { label: "Asesmen", value: `${selectedStudent.totalAssessments}` },
                 ].map(k => (
                   <div key={k.label} className="rounded-[10px] border border-border bg-background p-3 text-center">
                     <div className="text-[18px] font-bold text-ink">{k.value}</div>
@@ -401,44 +625,23 @@ function TeacherDashboard() {
               </div>
               <div>
                 <h3 className="text-[12px] font-bold text-ink mb-2">Riwayat Asesmen Terakhir</h3>
+                {savedAssessments.filter(a => !a.classId || a.classId === activeClassId).length === 0 ? (
+                  <p className="text-[12px] text-ink-tertiary py-2">Belum ada asesmen untuk kelas ini.</p>
+                ) : (
                 <div className="space-y-2">
-                  {studentResults.slice(0, 4).map(r => (
+                  {savedAssessments.filter(a => !a.classId || a.classId === activeClassId).slice(0, 4).map(r => (
                     <div key={r.id} className="flex items-center justify-between rounded-[8px] border border-border bg-background px-3 py-2">
                       <div>
-                        <div className="text-[12px] font-medium text-ink">{r.assessmentTitle}</div>
-                        <div className="text-[10px] text-ink-secondary">{r.date}</div>
+                        <div className="text-[12px] font-medium text-ink">{r.title}</div>
+                        <div className="text-[10px] text-ink-secondary">{r.scheduledFor}</div>
                       </div>
                       <div className={cn("text-[15px] font-bold tabular-nums",
-                        r.score >= 80 ? "text-success" : r.score >= 65 ? "text-primary" : "text-warning"
-                      )}>{r.score}</div>
+                        (r.avgScore ?? 0) >= 80 ? "text-success" : (r.avgScore ?? 0) >= 65 ? "text-primary" : "text-warning"
+                      )}>{r.avgScore ?? "—"}</div>
                     </div>
                   ))}
                 </div>
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <h3 className="text-[12px] font-bold text-ink mb-2">Topik Kuat</h3>
-                  <div className="space-y-1.5">
-                    {subjectMastery.filter(s => s.value >= 70).slice(0, 3).map(s => (
-                      <div key={s.label} className="flex items-center justify-between text-[11px]">
-                        <span className="text-ink-secondary truncate flex-1">{s.label}</span>
-                        <span className="font-semibold text-success ml-2">{s.value}%</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <h3 className="text-[12px] font-bold text-ink mb-2">Topik Lemah</h3>
-                  <div className="space-y-1.5">
-                    {weakTopics.slice(0, 3).map(t => (
-                      <div key={t.id} className="flex items-center justify-between text-[11px]">
-                        <span className="text-ink-secondary truncate flex-1">{t.topic}</span>
-                        <span className="font-semibold text-danger ml-2">{t.accuracyRate}%</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
+                )}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
               <Button variant="outline" className="h-8 text-[12px]" onClick={() => setSelectedStudentId(null)}>Tutup</Button>
@@ -446,6 +649,7 @@ function TeacherDashboard() {
             </div>
           </div>
         </div>
+      </div>
       )}
 
       {/* ── Upcoming Assessment Detail Dialog ── */}
@@ -494,110 +698,275 @@ function TeacherDashboard() {
         </div>
       )}
 
-      {/* ── Quick Upload Modal ── */}
-      {showUploadModal && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => { setShowUploadModal(false); setUploadFile(null); }} />
-          <div className="relative w-full max-w-lg rounded-card border border-border bg-surface shadow-xl">
-            <div className="flex items-center justify-between border-b border-border px-5 py-4 shrink-0">
-              <h2 className="text-[15px] font-bold text-ink">Unggah Materi Baru</h2>
-              <button onClick={() => { setShowUploadModal(false); setUploadFile(null); }}
-                className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <div className="p-5 space-y-4">
-              <input ref={dashboardFileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx" className="hidden"
-                onChange={e => setUploadFile(e.target.files?.[0] ?? null)} />
-              <div
-                className={cn("flex flex-col items-center gap-3 rounded-[10px] border-2 border-dashed p-6 text-center transition-colors",
-                  uploadDragOver ? "border-primary bg-primary/5" : "border-primary/30 bg-primary-soft")}
-                onDragOver={e => { e.preventDefault(); setUploadDragOver(true); }}
-                onDragLeave={() => setUploadDragOver(false)}
-                onDrop={e => { e.preventDefault(); setUploadDragOver(false); setUploadFile(e.dataTransfer.files[0] ?? null); }}>
-                <div className={cn("flex h-12 w-12 items-center justify-center rounded-xl border-2 border-dashed transition-colors",
-                  uploadDragOver ? "border-primary bg-primary/10" : "border-primary/30 bg-white")}>
-                  <Upload className="h-6 w-6 text-primary" />
-                </div>
-                <div>
-                  <p className="text-[13px] font-semibold text-ink">Tarik & lepas file di sini</p>
-                  <p className="text-[11px] text-ink-secondary mt-0.5">PDF, PPT, DOCX · Maks. 50 MB</p>
-                </div>
-                <Button variant="outline" className="h-7 text-[11px]" onClick={() => dashboardFileInputRef.current?.click()}>
-                  Pilih File
-                </Button>
-              </div>
-              {uploadFile && (
-                <div className="flex items-center gap-2 rounded-[8px] border border-success/30 bg-success-light px-3 py-2">
-                  <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-[12px] font-semibold text-ink truncate">{uploadFile.name}</div>
-                    <div className="text-[10px] text-ink-secondary">{(uploadFile.size / 1024).toFixed(0)} KB</div>
-                  </div>
-                  <button onClick={() => setUploadFile(null)} className="text-ink-tertiary hover:text-danger shrink-0">
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              )}
-              <div className="grid grid-cols-2 gap-3">
-                {[
-                  { label: "Mata Pelajaran *", ph: currentTeacher.subject },
-                  { label: "Kelas *", ph: currentTeacher.classes[0] },
-                ].map(f => (
-                  <div key={f.label}>
-                    <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">{f.label}</label>
-                    <input type="text" defaultValue={f.ph}
-                      className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5">
-              <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowUploadModal(false); setUploadFile(null); }}>Batal</Button>
-              <Button variant="default" className="h-8 text-[12px]" onClick={() => {
-                setShowUploadModal(false); setUploadFile(null);
-                router.push("/teacher/materials");
-              }}>
-                <Sparkles className="mr-1.5 h-3.5 w-3.5" />Ke Pustaka Materi
-              </Button>
-            </div>
-          </div>
-        </div>
-      )}
+      {showUploadModal && <UploadMaterialModal onClose={() => setShowUploadModal(false)} />}
 
-      {uploadToast && <AppToast message={uploadToast} tone="success" onDismiss={() => setUploadToast(null)} />}
     </div>
   );
+}
+
+// ── localStorage helpers (client-side only) ───────────────────────────────────
+function lsGet<T>(key: string): T | null {
+  if (typeof window === "undefined") return null;
+  try { const v = localStorage.getItem(key); return v ? (JSON.parse(v) as T) : null; } catch { return null; }
+}
+function lsSet(key: string, value: unknown) {
+  if (typeof window === "undefined") return;
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
+// ── Active class store ────────────────────────────────────────────────────────
+let _activeClassId = "";
+const _classListeners = new Set<(id: string) => void>();
+
+function getActiveClassId(): string {
+  if (!_activeClassId) {
+    _activeClassId = lsGet<string>("catchup_active_class") ?? currentTeacher.classes[0] ?? "";
+  }
+  return _activeClassId;
+}
+
+function changeActiveClass(id: string) {
+  _activeClassId = id;
+  lsSet("catchup_active_class", id);
+  _classListeners.forEach(fn => fn(id));
+}
+
+function useActiveClass(): [string, typeof changeActiveClass] {
+  const [cls, setCls] = useState<string>("");
+  useEffect(() => {
+    setCls(getActiveClassId());
+    _classListeners.add(setCls);
+    return () => { _classListeners.delete(setCls); };
+  }, []);
+  return [cls, changeActiveClass];
+}
+
+// ── Persistent bank store — approved questions ────────────────────────────────
+let _bankStoreInit = false;
+const _bankStore: { questions: typeof questionBank } = { questions: [] };
+function initBankStore() {
+  if (_bankStoreInit) return;
+  _bankStoreInit = true;
+  const saved = lsGet<typeof questionBank>("catchup_bank");
+  if (saved?.length) _bankStore.questions = saved;
+}
+
+// ── Persistent review store — AI questions pending teacher approval ────────────
+let _reviewStoreInit = false;
+const _reviewStore: { questions: PendingQuestion[] } = { questions: [] };
+function initReviewStore() {
+  if (_reviewStoreInit) return;
+  _reviewStoreInit = true;
+  const saved = lsGet<PendingQuestion[]>("catchup_review");
+  if (saved?.length) _reviewStore.questions = saved;
+}
+
+// Convert QuestionBankEntry → PendingQuestion (for review queue)
+function toPendingQuestion(q: typeof questionBank[number]): PendingQuestion {
+  return {
+    id: q.id,
+    question: q.question,
+    optionA: q.options.A,
+    optionB: q.options.B,
+    optionC: q.options.C,
+    optionD: q.options.D,
+    correctAnswer: q.correctAnswer as unknown as "A" | "B" | "C" | "D",
+    explanation: q.explanation,
+    topic: q.topic,
+    difficulty: q.difficulty,
+    sourceRef: q.source,
+    status: "Perlu Ditinjau",
+  };
+}
+// Convert PendingQuestion → QuestionBankEntry (when approved)
+function toQuestionBankEntry(q: PendingQuestion): typeof questionBank[number] {
+  return {
+    id: q.id,
+    question: q.question,
+    topic: q.topic,
+    subtopic: q.topic,
+    bloom: "Menerapkan" as const,
+    difficulty: q.difficulty,
+    styleType: "TKA" as const,
+    source: q.sourceRef,
+    usageCount: 0,
+    successRate: 0,
+    status: "Disetujui" as const,
+    isLocked: false,
+    options: { A: q.optionA, B: q.optionB, C: q.optionC, D: q.optionD },
+    correctAnswer: q.correctAnswer,
+    explanation: q.explanation,
+  };
+}
+
+// ── Persistent assessment store ────────────────────────────────────────────────
+type SavedAssessment = Assessment & {
+  questions: typeof questionBank;
+  openAt?: string;
+  closeAt?: string;
+};
+let _assessStoreInit = false;
+const _assessStore: { list: SavedAssessment[] } = { list: [] };
+function initAssessStore() {
+  if (_assessStoreInit) return;
+  _assessStoreInit = true;
+  const saved = lsGet<SavedAssessment[]>("catchup_assessments");
+  if (saved?.length) _assessStore.list = saved;
+}
+
+// ── Completed results store (student answers + scores) ─────────────────────────
+type CompletedResult = {
+  id: string;
+  assessmentId: string;
+  assessmentTitle: string;
+  type: string;
+  date: string;
+  score: number;
+  totalQuestions: number;
+  correctCount: number;
+  answers: Record<string, string>;
+};
+let _resultStoreInit = false;
+const _resultStore: { list: CompletedResult[] } = { list: [] };
+function initResultStore() {
+  if (_resultStoreInit) return;
+  _resultStoreInit = true;
+  const saved = lsGet<CompletedResult[]>("catchup_results");
+  if (saved?.length) _resultStore.list = saved;
+}
+function saveResult(r: CompletedResult) {
+  initResultStore();
+  const updated = [r, ..._resultStore.list.filter(x => x.id !== r.id)];
+  _resultStore.list = updated;
+  lsSet("catchup_results", updated);
+}
+
+// ── Incorrect questions store (tagged from completed results) ──────────────────
+type StoredIncorrectQ = {
+  id: string;
+  assessmentId: string;
+  assessmentTitle: string;
+  topic: string;
+  question: string;
+  yourAnswer: string;
+  correctAnswer: string;
+  explanation: string;
+  date: string;
+  options: Record<string, string>;
+};
+let _incorrectStoreInit = false;
+const _incorrectStore: { questions: StoredIncorrectQ[] } = { questions: [] };
+function initIncorrectStore() {
+  if (_incorrectStoreInit) return;
+  _incorrectStoreInit = true;
+  const saved = lsGet<StoredIncorrectQ[]>("catchup_incorrect");
+  if (saved?.length) _incorrectStore.questions = saved;
+}
+function saveIncorrectQuestions(qs: StoredIncorrectQ[]) {
+  initIncorrectStore();
+  const existingIds = new Set(_incorrectStore.questions.map(q => q.id));
+  const fresh = qs.filter(q => !existingIds.has(q.id));
+  const updated = [...fresh, ..._incorrectStore.questions];
+  _incorrectStore.questions = updated;
+  lsSet("catchup_incorrect", updated);
+}
+function deleteIncorrectQuestion(id: string) {
+  initIncorrectStore();
+  const updated = _incorrectStore.questions.filter(q => q.id !== id);
+  _incorrectStore.questions = updated;
+  lsSet("catchup_incorrect", updated);
+}
+
+// ── Persistent materials store — survives navigation + reload ─────────────────
+let _matStoreInit = false;
+const _matStore: {
+  uploadedMaterials: Material[];
+  materialFiles: Record<string, File>;
+  materialQuestions: Record<string, typeof questionBank>;
+  processedIds: Set<string>;
+} = {
+  uploadedMaterials: [],
+  materialFiles: {},
+  materialQuestions: {},
+  processedIds: new Set(),
+};
+function initMatStore() {
+  if (_matStoreInit) return;
+  _matStoreInit = true;
+  const mats = lsGet<Material[]>("catchup_mats");
+  if (mats?.length) _matStore.uploadedMaterials = mats;
+  const qs = lsGet<Record<string, typeof questionBank>>("catchup_matqs");
+  if (qs) _matStore.materialQuestions = qs;
+  const pids = lsGet<string[]>("catchup_pids");
+  if (pids?.length) _matStore.processedIds = new Set(pids);
 }
 
 // ── Teacher Materials ─────────────────────────────────────────────────────────
 
 function TeacherMaterials() {
+  const [activeClass] = useActiveClass();
+  const [showAllClasses, setShowAllClasses] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadedMaterials, setUploadedMaterials] = useState<Material[]>([]);
+  const [uploadedMaterials, setUploadedMaterials] = useState<Material[]>(() => { initMatStore(); return _matStore.uploadedMaterials; });
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [selectedMaterial, setSelectedMaterial] = useState<Material | null>(null);
   const [confirmProcessId, setConfirmProcessId] = useState<string | null>(null);
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
-  const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
+  const [processedIds, setProcessedIds] = useState<Set<string>>(() => { initMatStore(); return new Set(_matStore.processedIds); });
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
   const [editMeta, setEditMeta] = useState(false);
-  const [materialFiles, setMaterialFiles] = useState<Record<string, File>>({});
-  const [materialQuestions, setMaterialQuestions] = useState<Record<string, typeof questionBank>>({});
+  const [materialFiles, setMaterialFiles] = useState<Record<string, File>>(() => _matStore.materialFiles);
+  const [materialQuestions, setMaterialQuestions] = useState<Record<string, typeof questionBank>>(() => { initMatStore(); return _matStore.materialQuestions; });
   const [generatingMore, setGeneratingMore] = useState<string | null>(null);
 
-  const allMaterials = [...uploadedMaterials, ...materials];
+  // Sync state → persistent store + localStorage on every change
+  useEffect(() => {
+    _matStore.uploadedMaterials = uploadedMaterials;
+    lsSet("catchup_mats", uploadedMaterials);
+  }, [uploadedMaterials]);
+  useEffect(() => { _matStore.materialFiles = materialFiles; }, [materialFiles]);
+  useEffect(() => {
+    _matStore.materialQuestions = materialQuestions;
+    lsSet("catchup_matqs", materialQuestions);
+  }, [materialQuestions]);
+  useEffect(() => {
+    _matStore.processedIds = new Set(processedIds);
+    lsSet("catchup_pids", [...processedIds]);
+  }, [processedIds]);
+
+  // Cancel pending upload form when teacher switches class
+  const prevClassRef = React.useRef<string | null>(null);
+  useEffect(() => {
+    if (prevClassRef.current !== null && prevClassRef.current !== activeClass && activeClass) {
+      if (showUpload) {
+        setShowUpload(false);
+        setUploadedFile(null);
+        setToast({ message: "Form upload dibatalkan karena kamu berpindah kelas.", tone: "primary" });
+      }
+    }
+    prevClassRef.current = activeClass;
+  }, [activeClass, showUpload]);
+
+  const allMaterialsRaw = [...uploadedMaterials, ...materials];
+  const allMaterials = showAllClasses || !activeClass
+    ? allMaterialsRaw
+    : allMaterialsRaw.filter(m => !m.classId || m.classId === activeClass);
 
   function handleProcessAI(id: string) {
     setConfirmProcessId(id);
   }
 
-  async function generateQuestionsFromMaterial(id: string, append = false) {
-    const mat = allMaterials.find(m => m.id === id);
-    const file = materialFiles[id];
+  async function generateQuestionsFromMaterial(
+    id: string,
+    append = false,
+    fileOverride?: File,
+    matOverride?: { title: string; subject: string },
+  ): Promise<number> {
+    const mat = matOverride ?? allMaterials.find(m => m.id === id);
+    const file = fileOverride ?? materialFiles[id];
 
     let rawQuestions: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> = [];
 
@@ -613,12 +982,12 @@ function TeacherMaterials() {
         const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
         if (data.error && !data.questions?.length) {
           setToast({ message: data.error, tone: "primary" });
-          return;
+          return 0;
         }
         rawQuestions = data.questions ?? [];
       } catch {
         setToast({ message: "Gagal menghubungi AI. Periksa koneksi dan API key.", tone: "primary" });
-        return;
+        return 0;
       }
     } else {
       // Fallback for demo materials: generate from metadata
@@ -638,13 +1007,13 @@ function TeacherMaterials() {
         rawQuestions = data.questions ?? [];
       } catch {
         setToast({ message: "Gagal menghubungi AI. Periksa koneksi dan API key.", tone: "primary" });
-        return;
+        return 0;
       }
     }
 
     if (!rawQuestions.length) {
       setToast({ message: "AI tidak menghasilkan soal. Coba lagi.", tone: "primary" });
-      return;
+      return 0;
     }
 
     const existingCount = materialQuestions[id]?.length ?? 0;
@@ -666,20 +1035,47 @@ function TeacherMaterials() {
       explanation: q.explanation,
     }));
 
-    setMaterialQuestions(prev => ({
-      ...prev,
-      [id]: append ? [...(prev[id] ?? []), ...generated] : generated,
-    }));
+    setMaterialQuestions(prev => {
+      const next = { ...prev, [id]: append ? [...(prev[id] ?? []), ...generated] : generated };
+      _matStore.materialQuestions = next;
+      lsSet("catchup_matqs", next);
+      return next;
+    });
+
+    // Push to review queue (teacher must approve before entering bank)
+    initReviewStore();
+    const existingReviewIds = new Set(_reviewStore.questions.map(q => q.id));
+    const newForReview = generated
+      .filter(q => !existingReviewIds.has(q.id))
+      .map(q => toPendingQuestion(q));
+    if (newForReview.length > 0) {
+      const updatedReview = [..._reviewStore.questions, ...newForReview];
+      _reviewStore.questions = updatedReview;
+      lsSet("catchup_review", updatedReview);
+    }
+
     const total = (append ? existingCount : 0) + generated.length;
     setToast({ message: `${generated.length} soal baru dari materi ini ditambahkan (total: ${total}).`, tone: "success" });
+    return total;
   }
 
   async function startAIProcess(id: string) {
     setConfirmProcessId(null);
     setProcessingIds(prev => new Set([...prev, id]));
-    await generateQuestionsFromMaterial(id, false);
+    const count = await generateQuestionsFromMaterial(id, false);
     setProcessingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
-    setProcessedIds(prev => new Set([...prev, id]));
+    setProcessedIds(prev => {
+      const next = new Set([...prev, id]);
+      _matStore.processedIds = new Set(next);
+      return next;
+    });
+    if (count > 0) {
+      setUploadedMaterials(prev => {
+        const next = prev.map(m => m.id === id ? { ...m, aiProcessed: true, questionsGenerated: count } : m);
+        _matStore.uploadedMaterials = next;
+        return next;
+      });
+    }
   }
 
   const m = selectedMaterial;
@@ -733,11 +1129,15 @@ function TeacherMaterials() {
               </button>
             </div>
           )}
-          <div className="mt-6 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-primary/10 pt-6">
+          <div className="mt-4 flex items-center gap-2 rounded-[8px] border border-primary/20 bg-primary-soft px-3 py-2">
+            <span className="text-[11px] font-semibold text-primary">Materi untuk kelas:</span>
+            <span className="text-[12px] font-bold text-primary">{activeClass || currentTeacher.classes[0]}</span>
+            <span className="text-[10px] text-primary/60 ml-1">(sesuai kelas aktif di atas)</span>
+          </div>
+          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-primary/10 pt-4">
             {[
               { label: "Tipe Materi *", ph: "Buku Teks, PPT, RPP, Modul Ajar..." },
               { label: "Mata Pelajaran *", ph: currentTeacher.subject },
-              { label: "Kelas/Tingkat *", ph: currentTeacher.classes[0] },
               { label: "Bab/Topik *", ph: "Fungsi Kuadrat" },
               { label: "Tahun Ajaran *", ph: "2025/2026" },
               { label: "Penerbit (opsional)", ph: "Erlangga, Grafindo, dst." },
@@ -748,7 +1148,7 @@ function TeacherMaterials() {
                   className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
               </div>
             ))}
-            <div className="col-span-2">
+            <div>
               <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Sumber *</label>
               <input type="text" placeholder="Buku wajib / materi guru / internal"
                 className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
@@ -759,47 +1159,89 @@ function TeacherMaterials() {
             <Button variant="default" className="h-8 text-[12px]" disabled={uploading}
               onClick={async () => {
                 setUploading(true);
-                const fileName = uploadedFile?.name ?? "Materi Baru";
+                const capturedFile = uploadedFile;
+                const fileName = capturedFile?.name ?? "Materi Baru";
                 const title = fileName.replace(/\.[^/.]+$/, "");
+                const matId = `mat-upload-${Date.now()}`;
                 const newMat: Material = {
-                  id: `mat-upload-${Date.now()}`,
+                  id: matId,
                   title,
                   type: "Modul Ajar",
                   subject: currentTeacher.subject,
+                  classId: getActiveClassId(),
+                  className: getActiveClassId(),
                   uploadedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
                   pages: 0,
                   status: "Diproses",
                   aiProcessed: false,
                   questionsGenerated: 0,
                 };
-                setUploadedMaterials(prev => [newMat, ...prev]);
-                if (uploadedFile) setMaterialFiles(prev => ({ ...prev, [newMat.id]: uploadedFile }));
+                setUploadedMaterials(prev => {
+                  const next = [newMat, ...prev];
+                  _matStore.uploadedMaterials = next;
+                  return next;
+                });
 
-                // Call real AI summarizer
+                // Store file immediately in both state and persistent store
+                if (capturedFile) {
+                  setMaterialFiles(prev => ({ ...prev, [matId]: capturedFile }));
+                  _matStore.materialFiles = { ..._matStore.materialFiles, [matId]: capturedFile };
+                  // Also persist as data URL so it survives page refresh and cross-tab access
+                  const reader = new FileReader();
+                  reader.onload = () => {
+                    if (typeof reader.result === "string") lsSet(`catchup_file_${matId}`, reader.result);
+                  };
+                  reader.readAsDataURL(capturedFile);
+                }
+
+                // Close upload panel immediately so user sees the list
+                setShowUpload(false);
+                setUploadedFile(null);
+                setToast({ message: "Mengunggah materi dan memulai analisis AI...", tone: "primary" });
+
+                // Step 1: Quick summarize for metadata
                 try {
                   const res = await fetch("/api/summarize", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ materialTitle: title, topic: title, subject: currentTeacher.subject }),
                   });
-                  const data = await res.json() as { estimatedStudyTime?: string; error?: string };
-                  if (!data.error) {
-                    setUploadedMaterials(prev => prev.map(m =>
-                      m.id === newMat.id ? { ...m, status: "Aktif" as Material["status"], aiProcessed: true, questionsGenerated: 15 } : m
-                    ));
-                    setToast({ message: "Materi diproses AI — 15 soal siap diekstrak", tone: "success" });
+                  const data = await res.json() as { error?: string };
+                  if (data.error) {
+                    setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, status: "Aktif" as Material["status"] } : m));
                   } else {
-                    setUploadedMaterials(prev => prev.map(m => m.id === newMat.id ? { ...m, status: "Aktif" as Material["status"] } : m));
-                    setToast({ message: "Materi diunggah (API offline — isi API key di .env.local)", tone: "primary" });
+                    setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, status: "Aktif" as Material["status"] } : m));
                   }
                 } catch {
-                  setUploadedMaterials(prev => prev.map(m => m.id === newMat.id ? { ...m, status: "Aktif" as Material["status"] } : m));
-                  setToast({ message: "Materi diunggah (API offline)", tone: "primary" });
+                  setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, status: "Aktif" as Material["status"] } : m));
+                }
+
+                // Step 2: Generate real questions from file content
+                setProcessingIds(prev => new Set([...prev, matId]));
+                setToast({ message: "AI sedang membaca isi materi dan membuat soal...", tone: "primary" });
+                const count = await generateQuestionsFromMaterial(
+                  matId, false,
+                  capturedFile ?? undefined,
+                  { title, subject: currentTeacher.subject },
+                );
+                setProcessingIds(prev => { const next = new Set(prev); next.delete(matId); return next; });
+                setProcessedIds(prev => {
+                  const next = new Set([...prev, matId]);
+                  _matStore.processedIds = new Set(next);
+                  return next;
+                });
+                setUploadedMaterials(prev => {
+                  const next = prev.map(m =>
+                    m.id === matId ? { ...m, aiProcessed: true, questionsGenerated: count } : m
+                  );
+                  _matStore.uploadedMaterials = next;
+                  return next;
+                });
+                if (count > 0) {
+                  setToast({ message: `${count} soal berhasil diekstrak dari materi "${title}"`, tone: "success" });
                 }
 
                 setUploading(false);
-                setShowUpload(false);
-                setUploadedFile(null);
               }}>
               {uploading ? (
                 <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />Mengunggah...</>
@@ -821,21 +1263,44 @@ function TeacherMaterials() {
       </div>
 
       <div className="rounded-card border border-border bg-surface shadow-sm">
-        <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
-          <h2 className="text-[14px] font-bold text-ink">Daftar Materi ({allMaterials.length})</h2>
-          <button className="flex items-center gap-1.5 rounded-[6px] border border-border bg-background px-3 py-1.5 text-[11px] font-semibold text-ink-secondary hover:text-ink transition-colors">
-            <Filter className="h-3 w-3" />Filter
+        <div className="flex items-center justify-between border-b border-border px-5 py-3.5 gap-3 flex-wrap">
+          <h2 className="text-[14px] font-bold text-ink">
+            Daftar Materi — {activeClass || "…"} ({allMaterials.length})
+          </h2>
+          <button
+            onClick={() => setShowAllClasses(v => !v)}
+            className={cn(
+              "flex items-center gap-1.5 rounded-[6px] border px-3 py-1.5 text-[11px] font-semibold transition-colors",
+              showAllClasses
+                ? "border-primary bg-primary/10 text-primary"
+                : "border-border bg-background text-ink-secondary hover:text-ink"
+            )}>
+            <Filter className="h-3 w-3" />
+            {showAllClasses ? "Semua Kelas" : "Filter Kelas Ini"}
           </button>
         </div>
         <div className="p-4 space-y-3">
+          {allMaterials.length === 0 && (
+            <div className="py-8 text-center text-[13px] text-ink-secondary">
+              Belum ada materi untuk kelas <span className="font-semibold text-ink">{activeClass}</span>.
+              Unggah materi di atas untuk memulai.
+            </div>
+          )}
           {allMaterials.map(mat => (
-            <MaterialCard key={mat.id} title={mat.title} type={mat.type} subject={mat.subject ?? ""} pages={mat.pages}
-              uploadedAt={mat.uploadedAt} status={mat.status}
-              aiProcessed={mat.aiProcessed || processedIds.has(mat.id)}
-              questionsGenerated={mat.questionsGenerated}
-              isProcessing={processingIds.has(mat.id)}
-              onClick={() => setSelectedMaterial(mat)}
-              onProcessAI={() => handleProcessAI(mat.id)} />
+            <div key={mat.id} className="relative">
+              <MaterialCard title={mat.title} type={mat.type} subject={mat.subject ?? ""} pages={mat.pages}
+                uploadedAt={mat.uploadedAt} status={mat.status}
+                aiProcessed={mat.aiProcessed || processedIds.has(mat.id)}
+                questionsGenerated={mat.questionsGenerated}
+                isProcessing={processingIds.has(mat.id)}
+                onClick={() => setSelectedMaterial(mat)}
+                onProcessAI={() => handleProcessAI(mat.id)} />
+              {mat.className && (
+                <span className="absolute top-3 right-12 rounded-full bg-ink/5 border border-border px-2 py-0.5 text-[10px] font-semibold text-ink-secondary">
+                  {mat.className}
+                </span>
+              )}
+            </div>
           ))}
         </div>
       </div>
@@ -930,11 +1395,8 @@ function TeacherMaterials() {
               {/* Soal Diekstrak section */}
               {isDialogProcessed && (() => {
                 const aiQs = materialQuestions[m.id];
-                const displayQs = aiQs ?? questionBank.filter(q => {
-                  const sub = (m.subject ?? "").toLowerCase().replace(/ xi| x/g, "").trim();
-                  return q.topic.toLowerCase().includes(sub) || sub.includes(q.topic.toLowerCase());
-                });
-                const totalCount = aiQs ? aiQs.length : (m.questionsGenerated || displayQs.length);
+                const displayQs = aiQs ?? [];
+                const totalCount = aiQs ? aiQs.length : (m.questionsGenerated || 0);
                 const isAiGenerated = !!aiQs;
                 const isGenerating = generatingMore === m.id;
                 return (
@@ -989,9 +1451,16 @@ function TeacherMaterials() {
                         const a = document.createElement("a");
                         a.href = url; a.download = file.name; a.click();
                         URL.revokeObjectURL(url);
-                      } else {
-                        setToast({ message: "File asli tidak tersedia — materi ini adalah data demo.", tone: "primary" });
+                        return;
                       }
+                      const dataUrl = lsGet<string>(`catchup_file_${m.id}`);
+                      if (dataUrl) {
+                        const a = document.createElement("a");
+                        a.href = dataUrl; a.download = m.title;
+                        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                        return;
+                      }
+                      setToast({ message: "File tidak tersedia. Unggah ulang materi ini agar bisa diunduh.", tone: "primary" });
                     }}><Download className="mr-1.5 h-3.5 w-3.5" />Unduh</Button>
                 }
               </div>
@@ -1286,13 +1755,84 @@ function TeacherAssessmentStyles() {
 
 // ── Teacher Question Bank ─────────────────────────────────────────────────────
 
+const EMPTY_MANUAL_Q = { text: "", optA: "", optB: "", optC: "", optD: "", correct: "A", difficulty: "Sedang", topic: "", explanation: "" };
+
+function saveManualQToBank(
+  q: typeof EMPTY_MANUAL_Q,
+  setBankQs: React.Dispatch<React.SetStateAction<typeof questionBank>>,
+  classId = "",
+): boolean {
+  if (!q.text.trim() || !q.optA.trim() || !q.optB.trim() || !q.optC.trim() || !q.optD.trim() || !q.topic.trim()) return false;
+  initBankStore();
+  const entry: typeof questionBank[number] = {
+    id: `manual-${Date.now()}`,
+    question: q.text.trim(),
+    topic: q.topic.trim(),
+    subtopic: q.topic.trim(),
+    bloom: "Menerapkan" as const,
+    difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
+    styleType: "TKA" as const,
+    source: "Manual Guru",
+    usageCount: 0,
+    successRate: 0,
+    status: "Disetujui" as const,
+    isLocked: false,
+    options: { A: q.optA.trim(), B: q.optB.trim(), C: q.optC.trim(), D: q.optD.trim() },
+    correctAnswer: (["A","B","C","D"].includes(q.correct) ? q.correct : "A") as "A"|"B"|"C"|"D",
+    explanation: q.explanation.trim(),
+    classId: classId || undefined,
+  };
+  const updated = [..._bankStore.questions, entry];
+  _bankStore.questions = updated;
+  lsSet("catchup_bank", updated);
+  setBankQs([...updated]);
+  return true;
+}
+
 function TeacherQuestionBank() {
+  const [activeClass] = useActiveClass();
   const [search, setSearch] = useState("");
   const [showManualAdd, setShowManualAdd] = useState(false);
+  const [manualQ, setManualQ] = useState({ ...EMPTY_MANUAL_Q });
+  const [manualError, setManualError] = useState("");
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
-  const filtered = questionBank.filter(q =>
-    search === "" || q.question.toLowerCase().includes(search.toLowerCase()) || q.topic.toLowerCase().includes(search.toLowerCase())
-  );
+  const [bankQs, setBankQs] = useState<typeof questionBank>([]);
+  const [reviewCount, setReviewCount] = useState(0);
+  const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
+  const [selectedStyles, setSelectedStyles] = useState<Set<string>>(new Set());
+  const [selectedDifficulty, setSelectedDifficulty] = useState<string | null>(null);
+
+  useEffect(() => {
+    initBankStore();
+    initReviewStore();
+    setBankQs([..._bankStore.questions]);
+    setReviewCount(_reviewStore.questions.length);
+  }, []);
+
+  // Filter by active class (show untagged questions too for backwards compat)
+  const classFilteredQs = bankQs.filter(q => !q.classId || q.classId === activeClass);
+
+  const topicOptions = [...new Set(classFilteredQs.map(q => q.topic))].filter(Boolean).sort();
+  const styleOptions = [...new Set(classFilteredQs.map(q => q.styleType))].filter(Boolean).sort();
+  const hasActiveFilters = selectedTopics.size > 0 || selectedStyles.size > 0 || selectedDifficulty !== null;
+
+  function toggleTopic(t: string) {
+    setSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; });
+  }
+  function toggleStyle(s: string) {
+    setSelectedStyles(prev => { const n = new Set(prev); n.has(s) ? n.delete(s) : n.add(s); return n; });
+  }
+  function clearFilters() {
+    setSelectedTopics(new Set()); setSelectedStyles(new Set()); setSelectedDifficulty(null); setSearch("");
+  }
+
+  const filtered = classFilteredQs.filter(q => {
+    if (search && !q.question.toLowerCase().includes(search.toLowerCase()) && !q.topic.toLowerCase().includes(search.toLowerCase())) return false;
+    if (selectedTopics.size > 0 && !selectedTopics.has(q.topic)) return false;
+    if (selectedStyles.size > 0 && !selectedStyles.has(q.styleType)) return false;
+    if (selectedDifficulty && q.difficulty !== selectedDifficulty) return false;
+    return true;
+  });
 
   return (
     <div className="space-y-6">
@@ -1309,10 +1849,10 @@ function TeacherQuestionBank() {
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { label: "Total soal", value: `${questionBank.length}`, detail: "Semua status", tone: "neutral" as const },
-          { label: "Disetujui", value: `${questionBank.filter(q => q.status === "Disetujui").length}`, detail: "Siap digunakan", tone: "success" as const },
-          { label: "Perlu tinjauan", value: `${pendingQuestions.filter(q => q.status === "Perlu Ditinjau").length}`, detail: "Menunggu guru", tone: "warning" as const },
-          { label: "Rata-rata SR", value: `${Math.round(questionBank.reduce((s, q) => s + q.successRate, 0) / questionBank.length)}%`, detail: "Tingkat sukses", tone: "primary" as const },
+          { label: "Total soal", value: `${bankQs.length}`, detail: "Semua status", tone: "neutral" as const },
+          { label: "Disetujui", value: `${bankQs.filter(q => q.status === "Disetujui").length}`, detail: "Siap digunakan", tone: "success" as const },
+          { label: "Perlu tinjauan", value: `${reviewCount}`, detail: "Menunggu guru", tone: "warning" as const },
+          { label: "Rata-rata SR", value: bankQs.length ? `${Math.round(bankQs.reduce((s, q) => s + q.successRate, 0) / bankQs.length)}%` : "—", detail: "Tingkat sukses", tone: "primary" as const },
         ].map(s => <StatCard key={s.label} {...s} />)}
       </div>
 
@@ -1328,9 +1868,98 @@ function TeacherQuestionBank() {
         {search && <button aria-label="Hapus pencarian" onClick={() => setSearch("")}><X className="h-4 w-4 text-ink-tertiary hover:text-ink" /></button>}
       </div>
 
+      {/* ── Filter chips (only shown when there are questions to filter) ── */}
+      {bankQs.length > 0 && (
+        <div className="rounded-[10px] border border-border bg-surface p-4 space-y-3 shadow-sm">
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold uppercase tracking-wider text-ink-tertiary">Filter Soal</span>
+            {hasActiveFilters && (
+              <button onClick={clearFilters}
+                className="flex items-center gap-1 text-[11px] font-semibold text-danger hover:underline">
+                <X className="h-3 w-3" />Reset
+              </button>
+            )}
+          </div>
+
+          {/* Topic filter */}
+          {topicOptions.length > 0 && (
+            <div>
+              <div className="text-[10px] font-semibold text-ink-tertiary mb-1.5">BAB / TOPIK</div>
+              <div className="flex flex-wrap gap-1.5">
+                {topicOptions.map(t => (
+                  <button key={t} onClick={() => toggleTopic(t)}
+                    className={cn(
+                      "px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all",
+                      selectedTopics.has(t)
+                        ? "bg-primary text-white border-primary shadow-sm"
+                        : "bg-background text-ink-secondary border-border hover:border-primary/40 hover:text-ink"
+                    )}>
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Style filter */}
+          {styleOptions.length > 0 && (
+            <div>
+              <div className="text-[10px] font-semibold text-ink-tertiary mb-1.5">GAYA SOAL</div>
+              <div className="flex flex-wrap gap-1.5">
+                {styleOptions.map(s => (
+                  <button key={s} onClick={() => toggleStyle(s)}
+                    className={cn(
+                      "px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all",
+                      selectedStyles.has(s)
+                        ? "bg-ink text-white border-ink shadow-sm"
+                        : "bg-background text-ink-secondary border-border hover:border-ink/30 hover:text-ink"
+                    )}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Difficulty filter */}
+          <div>
+            <div className="text-[10px] font-semibold text-ink-tertiary mb-1.5">TINGKAT KESULITAN</div>
+            <div className="flex gap-1.5">
+              {(["Mudah", "Sedang", "Sulit"] as const).map(d => (
+                <button key={d} onClick={() => setSelectedDifficulty(prev => prev === d ? null : d)}
+                  className={cn(
+                    "px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all",
+                    selectedDifficulty === d
+                      ? d === "Mudah" ? "bg-success text-white border-success shadow-sm"
+                        : d === "Sedang" ? "bg-warning text-white border-warning shadow-sm"
+                        : "bg-danger text-white border-danger shadow-sm"
+                      : "bg-background text-ink-secondary border-border hover:border-ink/30 hover:text-ink"
+                  )}>
+                  {d}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {hasActiveFilters && (
+            <div className="text-[11px] text-ink-secondary pt-1 border-t border-border">
+              Menampilkan <span className="font-semibold text-ink">{filtered.length}</span> dari <span className="font-semibold text-ink">{classFilteredQs.length}</span> soal
+            </div>
+          )}
+        </div>
+      )}
+
       <div className="space-y-3">
         {filtered.map(q => <QuestionBankRow key={q.id} entry={q} />)}
-        {filtered.length === 0 && <EmptyState icon={Database} title="Tidak ada soal ditemukan" description="Coba kata kunci lain." />}
+        {filtered.length === 0 && (
+          <EmptyState
+            icon={Database}
+            title={bankQs.length === 0 ? "Bank soal masih kosong" : "Tidak ada soal ditemukan"}
+            description={bankQs.length === 0
+              ? "Unggah materi di halaman Manajemen Materi lalu proses dengan AI — soal akan otomatis masuk ke sini setelah disetujui."
+              : "Tidak ada soal yang cocok dengan filter ini. Coba ubah atau reset filter."}
+          />
+        )}
       </div>
 
       {/* Manual Add Dialog */}
@@ -1340,7 +1969,7 @@ function TeacherQuestionBank() {
           <div className="relative w-full max-w-2xl rounded-card border border-border bg-surface shadow-xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between border-b border-border px-5 py-3.5 shrink-0">
               <h2 className="text-[14px] font-bold text-ink">Tambah Soal Manual</h2>
-              <button onClick={() => setShowManualAdd(false)}
+              <button onClick={() => { setShowManualAdd(false); setManualQ({ ...EMPTY_MANUAL_Q }); setManualError(""); }}
                 className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
                 <X className="h-4 w-4" />
               </button>
@@ -1349,44 +1978,56 @@ function TeacherQuestionBank() {
               <div>
                 <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pertanyaan *</label>
                 <textarea rows={3} placeholder="Tuliskan pertanyaan di sini..."
+                  value={manualQ.text} onChange={e => setManualQ(p => ({ ...p, text: e.target.value }))}
                   className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] resize-none focus:border-primary focus:outline-none" />
               </div>
-              {["A", "B", "C", "D"].map(opt => (
+              {(["A", "B", "C", "D"] as const).map(opt => (
                 <div key={opt}>
                   <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pilihan {opt} *</label>
                   <input type="text" placeholder={`Jawaban pilihan ${opt}`}
+                    value={manualQ[`opt${opt}` as "optA"|"optB"|"optC"|"optD"]}
+                    onChange={e => setManualQ(p => ({ ...p, [`opt${opt}`]: e.target.value }))}
                     className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
                 </div>
               ))}
               <div className="grid grid-cols-3 gap-4">
                 <div>
                   <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kunci Jawaban *</label>
-                  <select className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+                  <select value={manualQ.correct} onChange={e => setManualQ(p => ({ ...p, correct: e.target.value }))}
+                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
                     {["A", "B", "C", "D"].map(o => <option key={o} value={o}>{o}</option>)}
                   </select>
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kesulitan *</label>
-                  <select className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+                  <select value={manualQ.difficulty} onChange={e => setManualQ(p => ({ ...p, difficulty: e.target.value }))}
+                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
                     {["Mudah", "Sedang", "Sulit"].map(d => <option key={d} value={d}>{d}</option>)}
                   </select>
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik *</label>
                   <input type="text" placeholder="Fungsi Kuadrat"
+                    value={manualQ.topic} onChange={e => setManualQ(p => ({ ...p, topic: e.target.value }))}
                     className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
                 </div>
               </div>
               <div>
                 <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pembahasan (opsional)</label>
                 <textarea rows={2} placeholder="Jelaskan jawaban benar..."
+                  value={manualQ.explanation} onChange={e => setManualQ(p => ({ ...p, explanation: e.target.value }))}
                   className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] resize-none focus:border-primary focus:outline-none" />
               </div>
+              {manualError && <p className="text-[12px] text-danger">{manualError}</p>}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
-              <Button variant="outline" size="sm" onClick={() => setShowManualAdd(false)}>Batal</Button>
+              <Button variant="outline" size="sm" onClick={() => { setShowManualAdd(false); setManualQ({ ...EMPTY_MANUAL_Q }); setManualError(""); }}>Batal</Button>
               <Button variant="default" size="sm" onClick={() => {
+                const ok = saveManualQToBank(manualQ, setBankQs, activeClass);
+                if (!ok) { setManualError("Lengkapi semua field bertanda * sebelum menyimpan."); return; }
                 setShowManualAdd(false);
+                setManualQ({ ...EMPTY_MANUAL_Q });
+                setManualError("");
                 setToast({ message: "Soal berhasil ditambahkan ke bank soal", tone: "success" });
               }}>Simpan Soal</Button>
             </div>
@@ -1402,14 +2043,41 @@ function TeacherQuestionBank() {
 // ── Teacher Question Review ───────────────────────────────────────────────────
 
 function TeacherQuestionReview() {
-  const [reviewed, setReviewed] = useState<Set<string>>(new Set());
+  const router = useRouter();
+  const [pendingQs, setPendingQs] = useState<PendingQuestion[]>([]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmApproveAll, setConfirmApproveAll] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" | "danger" } | null>(null);
   const [edits, setEdits] = useState<Record<string, Partial<PendingQuestion>>>({});
 
-  const pending = pendingQuestions.filter(q => !reviewed.has(q.id));
-  const editingQ = pendingQuestions.find(q => q.id === editingId);
+  useEffect(() => { initReviewStore(); setPendingQs([..._reviewStore.questions]); }, []);
+
+  function approveQuestion(q: PendingQuestion) {
+    const merged: PendingQuestion = { ...q, ...edits[q.id] };
+    // Remove from review store
+    const updatedReview = _reviewStore.questions.filter(r => r.id !== q.id);
+    _reviewStore.questions = updatedReview;
+    lsSet("catchup_review", updatedReview);
+    setPendingQs([...updatedReview]);
+    // Add to bank store
+    initBankStore();
+    const entry = toQuestionBankEntry(merged);
+    const updatedBank = [..._bankStore.questions, entry];
+    _bankStore.questions = updatedBank;
+    lsSet("catchup_bank", updatedBank);
+    setToast({ message: "Soal disetujui dan masuk ke bank soal", tone: "success" });
+  }
+
+  function rejectQuestion(id: string) {
+    const updatedReview = _reviewStore.questions.filter(r => r.id !== id);
+    _reviewStore.questions = updatedReview;
+    lsSet("catchup_review", updatedReview);
+    setPendingQs([...updatedReview]);
+    setToast({ message: "Soal ditolak dan dihapus dari antrian", tone: "danger" });
+  }
+
+  const pending = pendingQs;
+  const editingQ = pendingQs.find(q => q.id === editingId);
   const editData = editingId ? { ...editingQ, ...edits[editingId] } : null;
 
   function patchEdit(key: string, val: string) {
@@ -1446,8 +2114,8 @@ function TeacherQuestionReview() {
           <div className="grid gap-5 lg:grid-cols-2">
             {pending.map(q => (
               <QuestionReviewCard key={q.id} question={{ ...q, ...edits[q.id] } as PendingQuestion}
-                onApprove={() => { setReviewed(prev => new Set([...prev, q.id])); setToast({ message: "Soal disetujui", tone: "success" }); }}
-                onReject={() => { setReviewed(prev => new Set([...prev, q.id])); setToast({ message: "Soal ditolak", tone: "danger" }); }}
+                onApprove={() => approveQuestion({ ...q, ...edits[q.id] } as PendingQuestion)}
+                onReject={() => rejectQuestion(q.id)}
                 onEdit={() => setEditingId(q.id)} />
             ))}
           </div>
@@ -1455,7 +2123,11 @@ function TeacherQuestionReview() {
       ) : (
         <EmptyState icon={CheckCircle2} title="Semua soal sudah ditinjau"
           description="Tidak ada soal menunggu persetujuan. Unggah materi baru untuk soal lebih banyak."
-          action={<Button variant="default" className="text-[13px]"><Upload className="mr-2 h-4 w-4" />Unggah Materi</Button>} />
+          action={
+            <Button variant="default" className="text-[13px]" onClick={() => router.push("/teacher/materials")}>
+              <Upload className="mr-2 h-4 w-4" />Unggah Materi
+            </Button>
+          } />
       )}
 
       {/* Edit question dialog */}
@@ -1543,8 +2215,17 @@ function TeacherQuestionReview() {
         confirmVariant="success"
         onConfirm={() => {
           setConfirmApproveAll(false);
-          setReviewed(new Set(pendingQuestions.map(q => q.id)));
-          setToast({ message: `${pending.length} soal disetujui dan masuk ke bank soal`, tone: "success" });
+          // Move all pending to bank
+          initBankStore();
+          const merged = pending.map(q => ({ ...q, ...edits[q.id] } as PendingQuestion));
+          const newEntries = merged.map(toQuestionBankEntry);
+          const updatedBank = [..._bankStore.questions, ...newEntries];
+          _bankStore.questions = updatedBank;
+          lsSet("catchup_bank", updatedBank);
+          _reviewStore.questions = [];
+          lsSet("catchup_review", []);
+          setPendingQs([]);
+          setToast({ message: `${merged.length} soal disetujui dan masuk ke bank soal`, tone: "success" });
         }}
         onCancel={() => setConfirmApproveAll(false)}
       />
@@ -1562,16 +2243,61 @@ function TeacherAssessmentBuilder() {
   const [confirmPublish, setConfirmPublish] = useState(false);
   const [confirmSaveDraft, setConfirmSaveDraft] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" | "danger" } | null>(null);
+  // Step 1 form fields
+  const [formTitle, setFormTitle] = useState("");
+  const [formType, setFormType] = useState("");
+  const [formSubject, setFormSubject] = useState(currentTeacher.subject);
+  const [formClass, setFormClass] = useState(currentTeacher.classes[0] ?? "");
+  const [formQuestionCount, setFormQuestionCount] = useState(20);
+  const [formDuration, setFormDuration] = useState(45);
+  // Step 3 schedule
+  const [formScheduledFor, setFormScheduledFor] = useState("");
+  const [formOpenAt, setFormOpenAt] = useState("");
+  const [formCloseAt, setFormCloseAt] = useState("");
+  // Step 2 validation error
+  const [step2Error, setStep2Error] = useState("");
+
+  // Autofill defaults per style
+  const styleDefaults: Record<string, { questions: number; duration: number }> = {
+    as1: { questions: 45, duration: 90 },
+    as2: { questions: 45, duration: 90 },
+    as3: { questions: 40, duration: 75 },
+    as4: { questions: 45, duration: 90 },
+    as5: { questions: 50, duration: 120 },
+    as6: { questions: 40, duration: 90 },
+    as7: { questions: 10, duration: 20 },
+  };
   const [selectedMaterials, setSelectedMaterials] = useState<Set<string>>(new Set());
   const [aiGenerating, setAiGenerating] = useState(false);
   const [aiGenerated, setAiGenerated] = useState(false);
   const [aiGeneratedQuestions, setAiGeneratedQuestions] = useState<typeof questionBank>([]);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState<typeof questionBank[number] | null>(null);
+  const [activeClass] = useActiveClass();
+  const [materials, setMaterials] = useState<Material[]>([]);
+  const [bankQs, setBankQs] = useState<typeof questionBank>([]);
+  const router = useRouter();
+  useEffect(() => {
+    initMatStore();
+    setMaterials([..._matStore.uploadedMaterials]);
+    initBankStore();
+    setBankQs([..._bankStore.questions]);
+  }, []);
+
+  // Re-filter materials when active class changes
+  useEffect(() => {
+    if (activeClass) {
+      setMaterials(_matStore.uploadedMaterials.filter(m => !m.classId || m.classId === activeClass));
+    }
+  }, [activeClass]);
   const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(new Set());
   const [assessmentType, setAssessmentType] = useState<"uniform" | "adaptive">("uniform");
   const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
   const [showAddQuestion, setShowAddQuestion] = useState(false);
   const [confirmAddToBank, setConfirmAddToBank] = useState(false);
   const [selectedStyle, setSelectedStyle] = useState<string>("");
+  const styleIsLocked = !!selectedStyle && !!styleDefaults[selectedStyle];
   const [newQ, setNewQ] = useState({ text: "", optA: "", optB: "", optC: "", optD: "", correct: "A", difficulty: "Sedang", topic: "", explanation: "" });
   const selectedStyleData = assessmentStyles.find(s => s.id === selectedStyle);
 
@@ -1592,8 +2318,15 @@ function TeacherAssessmentBuilder() {
 
     const matList = materials.filter(m => selectedMaterials.has(m.id));
     const allGenerated: typeof questionBank = [];
+    const totalCount = formQuestionCount;
+    const perMat = Math.max(1, Math.ceil(totalCount / matList.length));
 
-    for (const mat of matList) {
+    for (let matIdx = 0; matIdx < matList.length; matIdx++) {
+      const mat = matList[matIdx];
+      // Last material gets remainder to hit exact total
+      const remaining = totalCount - allGenerated.length;
+      const count = matIdx === matList.length - 1 ? remaining : Math.min(perMat, remaining);
+      if (count <= 0) break;
       try {
         const res = await fetch("/api/generate-questions", {
           method: "POST",
@@ -1602,7 +2335,7 @@ function TeacherAssessmentBuilder() {
             materialTitle: mat.title,
             topic: mat.subject ?? mat.title,
             subject: mat.subject ?? "Umum",
-            count: 5,
+            count,
             difficulty: "Sedang",
           }),
         });
@@ -1630,17 +2363,17 @@ function TeacherAssessmentBuilder() {
     }
 
     if (allGenerated.length === 0) {
-      // Fallback to existing question bank when API is unavailable
-      allGenerated.push(...questionBank.slice(0, 6));
-      setToast({ message: "API belum tersambung — menampilkan soal dari bank lokal", tone: "primary" });
+      setToast({ message: "Gagal generate soal. Periksa koneksi dan API key di .env.local.", tone: "primary" });
     }
 
     setAiGeneratedQuestions(allGenerated);
+    setSelectedQuestions(new Set(allGenerated.map(q => q.id)));
     setAiGenerating(false);
     setAiGenerated(true);
   }
 
   function toggleQuestion(id: string) {
+    setStep2Error("");
     setSelectedQuestions(prev => {
       const next = new Set(prev);
       if (next.has(id)) next.delete(id); else next.add(id);
@@ -1672,32 +2405,77 @@ function TeacherAssessmentBuilder() {
 
       {step === 1 && (
         <div className="rounded-card border border-border bg-surface shadow-sm p-6 space-y-5 max-w-2xl">
-          {[
-            { label: "Judul Asesmen *", ph: "Kuis Fungsi Kuadrat – Pertemuan 8" },
-            { label: "Tipe Asesmen *", ph: "Kuis Guru, UTS, UAS, Tes Diagnostik..." },
-            { label: "Mata Pelajaran *", ph: "Matematika XI" },
-            { label: "Kelas *", ph: "XI IPA 2" },
-          ].map(f => (
-            <div key={f.label}>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">{f.label}</label>
-              <input type="text" placeholder={f.ph}
-                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
-            </div>
-          ))}
+          <div>
+            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Judul Asesmen *</label>
+            <input type="text" placeholder="Kuis Fungsi Kuadrat – Pertemuan 8"
+              value={formTitle} onChange={e => setFormTitle(e.target.value)}
+              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tipe Asesmen *</label>
+            <select value={formType} onChange={e => setFormType(e.target.value)}
+              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+              <option value="">Pilih tipe...</option>
+              {["Kuis Guru","UTS","UAS","Tes Diagnostik","Tryout","PR"].map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+          </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Jumlah Soal</label>
-              <input type="number" defaultValue={20} className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Mata Pelajaran *</label>
+              <input type="text" placeholder="Matematika XI"
+                value={formSubject} onChange={e => setFormSubject(e.target.value)}
+                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
             </div>
             <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Durasi (menit)</label>
-              <input type="number" defaultValue={45} className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kelas *</label>
+              <input type="text" placeholder="XI IPA 2"
+                value={formClass} onChange={e => setFormClass(e.target.value)}
+                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">
+                Jumlah Soal {styleIsLocked && <span className="text-ink-tertiary font-normal">(otomatis dari gaya asesmen)</span>}
+              </label>
+              <input type="number" min={1}
+                value={formQuestionCount}
+                readOnly={styleIsLocked}
+                onChange={e => !styleIsLocked && setFormQuestionCount(Number(e.target.value))}
+                className={cn(
+                  "w-full rounded-[8px] border bg-background px-3 py-2 text-[13px] focus:outline-none",
+                  styleIsLocked
+                    ? "border-border text-ink-secondary bg-ink/[0.03] cursor-not-allowed"
+                    : "border-border focus:border-primary"
+                )} />
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">
+                Durasi (menit) {styleIsLocked && <span className="text-ink-tertiary font-normal">(otomatis dari gaya asesmen)</span>}
+              </label>
+              <input type="number" min={1}
+                value={formDuration}
+                readOnly={styleIsLocked}
+                onChange={e => !styleIsLocked && setFormDuration(Number(e.target.value))}
+                className={cn(
+                  "w-full rounded-[8px] border bg-background px-3 py-2 text-[13px] focus:outline-none",
+                  styleIsLocked
+                    ? "border-border text-ink-secondary bg-ink/[0.03] cursor-not-allowed"
+                    : "border-border focus:border-primary"
+                )} />
             </div>
           </div>
 
           <div>
             <label className="block text-[11px] font-semibold text-ink-secondary mb-2">Gaya Asesmen *</label>
-            <select value={selectedStyle} onChange={e => setSelectedStyle(e.target.value)}
+            <select value={selectedStyle} onChange={e => {
+              const id = e.target.value;
+              setSelectedStyle(id);
+              if (id && styleDefaults[id]) {
+                setFormQuestionCount(styleDefaults[id].questions);
+                setFormDuration(styleDefaults[id].duration);
+              }
+            }}
               className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
               <option value="">Pilih gaya asesmen...</option>
               {assessmentStyles.map(s => (
@@ -1780,7 +2558,7 @@ function TeacherAssessmentBuilder() {
               <div className="p-4 space-y-2">
                 {materials.length === 0 && (
                   <div className="rounded-[8px] border border-dashed border-border bg-background p-6 text-center">
-                    <p className="text-[12px] text-ink-secondary">Belum ada materi — unggah materi di <span className="font-semibold text-primary">Pustaka Materi</span> terlebih dahulu.</p>
+                    <p className="text-[12px] text-ink-secondary">Belum ada materi — unggah materi di <button onClick={() => router.push("/teacher/materials")} className="font-semibold text-primary underline underline-offset-2 hover:opacity-80">Pustaka Materi</button> terlebih dahulu.</p>
                   </div>
                 )}
                 {materials.map(mat => {
@@ -1821,7 +2599,7 @@ function TeacherAssessmentBuilder() {
                 <span className="text-[11px] text-ink-secondary">
                   {selectedMaterials.size === 0
                     ? "Pilih minimal 1 materi untuk generate soal"
-                    : `${selectedMaterials.size} materi dipilih · estimasi ~${selectedMaterials.size * 15} soal`}
+                    : `${selectedMaterials.size} materi dipilih · akan generate ${formQuestionCount} soal`}
                 </span>
                 <Button variant="default" className="h-8 text-[12px]"
                   disabled={selectedMaterials.size === 0 || aiGenerating}
@@ -1845,28 +2623,134 @@ function TeacherAssessmentBuilder() {
                   </div>
                   <Badge tone="primary">{selectedQuestions.size} dipilih</Badge>
                 </div>
-                <div className="p-4 space-y-2">
-                  {aiGeneratedQuestions.map(q => (
-                    <div key={q.id} onClick={() => toggleQuestion(q.id)}
-                      className={cn(
-                        "flex items-start gap-3 rounded-[8px] border p-3 cursor-pointer transition-all",
-                        selectedQuestions.has(q.id) ? "border-primary/40 bg-primary-soft" : "border-border bg-background hover:border-primary/20"
+                <div className="p-4 space-y-3">
+                  {aiGeneratedQuestions.map((q, idx) => {
+                    const isExpanded = expandedId === q.id;
+                    const isEditing = editingId === q.id;
+                    const draft = isEditing ? editDraft : null;
+
+                    return (
+                      <div key={q.id} className={cn(
+                        "rounded-[10px] border transition-all",
+                        selectedQuestions.has(q.id) ? "border-primary/40 bg-primary-soft" : "border-border bg-background"
                       )}>
-                      <div className={cn(
-                        "flex h-4 w-4 mt-0.5 shrink-0 items-center justify-center rounded border-2 transition-colors",
-                        selectedQuestions.has(q.id) ? "border-primary bg-primary" : "border-border"
-                      )}>
-                        {selectedQuestions.has(q.id) && <CheckCircle2 className="h-2.5 w-2.5 text-white" />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[12px] font-medium text-ink line-clamp-2">{q.question}</div>
-                        <div className="flex items-center gap-2 mt-1">
-                          <Badge tone="neutral">{q.topic}</Badge>
-                          <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+                        {/* Header row */}
+                        <div className="flex items-start gap-3 p-3">
+                          {/* Checkbox */}
+                          <button onClick={() => toggleQuestion(q.id)}
+                            className={cn(
+                              "flex h-5 w-5 mt-0.5 shrink-0 items-center justify-center rounded border-2 transition-colors",
+                              selectedQuestions.has(q.id) ? "border-primary bg-primary" : "border-border hover:border-primary/50"
+                            )}>
+                            {selectedQuestions.has(q.id) && <CheckCircle2 className="h-3 w-3 text-white" />}
+                          </button>
+
+                          {/* Question number + text */}
+                          <div className="flex-1 min-w-0">
+                            <div className="text-[11px] font-bold text-ink-tertiary mb-0.5">Soal {idx + 1}</div>
+                            <div className="text-[13px] font-medium text-ink leading-snug">{q.question}</div>
+                            <div className="flex items-center gap-2 mt-1.5 flex-wrap">
+                              <Badge tone="primary">{q.topic}</Badge>
+                              <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+                            </div>
+                          </div>
+
+                          {/* Actions */}
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              title="Edit soal"
+                              onClick={() => {
+                                if (isEditing) { setEditingId(null); setEditDraft(null); }
+                                else { setEditingId(q.id); setEditDraft({ ...q }); setExpandedId(q.id); }
+                              }}
+                              className={cn(
+                                "flex h-7 w-7 items-center justify-center rounded-[6px] border transition-colors",
+                                isEditing ? "border-primary bg-primary text-white" : "border-border bg-background text-ink-secondary hover:border-primary/40 hover:text-primary"
+                              )}>
+                              <Pencil className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              title={isExpanded ? "Sembunyikan" : "Lihat pilihan jawaban"}
+                              onClick={() => { setExpandedId(isExpanded ? null : q.id); if (isEditing) { setEditingId(null); setEditDraft(null); } }}
+                              className="flex h-7 w-7 items-center justify-center rounded-[6px] border border-border bg-background text-ink-secondary hover:border-primary/40 hover:text-primary transition-colors">
+                              <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", isExpanded ? "rotate-180" : "")} />
+                            </button>
+                          </div>
                         </div>
+
+                        {/* Expanded: options + answer */}
+                        {isExpanded && !isEditing && (
+                          <div className="border-t border-border px-4 pb-4 pt-3 space-y-2">
+                            {(["A","B","C","D"] as const).map(opt => (
+                              <div key={opt} className={cn(
+                                "flex items-start gap-2.5 rounded-[8px] border px-3 py-2",
+                                q.correctAnswer === opt
+                                  ? "border-success/40 bg-success/5"
+                                  : "border-border bg-background"
+                              )}>
+                                <span className={cn(
+                                  "flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold mt-0.5",
+                                  q.correctAnswer === opt ? "bg-success text-white" : "bg-border/60 text-ink-secondary"
+                                )}>{opt}</span>
+                                <span className="text-[12px] text-ink leading-snug flex-1">{q.options[opt]}</span>
+                                {q.correctAnswer === opt && (
+                                  <span className="text-[10px] font-semibold text-success shrink-0 mt-0.5">✓ Benar</span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Edit mode */}
+                        {isEditing && draft && (
+                          <div className="border-t border-border px-4 pb-4 pt-3 space-y-3">
+                            <div>
+                              <label className="block text-[10px] font-bold uppercase tracking-wide text-ink-tertiary mb-1">Pertanyaan</label>
+                              <textarea rows={2} value={draft.question}
+                                onChange={e => setEditDraft(p => p ? { ...p, question: e.target.value } : p)}
+                                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[12px] resize-none focus:border-primary focus:outline-none" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              {(["A","B","C","D"] as const).map(opt => (
+                                <div key={opt}>
+                                  <label className="block text-[10px] font-bold uppercase tracking-wide text-ink-tertiary mb-1">Opsi {opt}</label>
+                                  <input type="text" value={draft.options[opt]}
+                                    onChange={e => setEditDraft(p => p ? { ...p, options: { ...p.options, [opt]: e.target.value } } : p)}
+                                    className="w-full rounded-[8px] border border-border bg-background px-3 py-1.5 text-[12px] focus:border-primary focus:outline-none" />
+                                </div>
+                              ))}
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-[10px] font-bold uppercase tracking-wide text-ink-tertiary mb-1">Jawaban Benar</label>
+                                <select value={draft.correctAnswer}
+                                  onChange={e => setEditDraft(p => p ? { ...p, correctAnswer: e.target.value as "A"|"B"|"C"|"D" } : p)}
+                                  className="w-full rounded-[8px] border border-border bg-background px-3 py-1.5 text-[12px] focus:border-primary focus:outline-none">
+                                  {["A","B","C","D"].map(o => <option key={o} value={o}>{o}</option>)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="block text-[10px] font-bold uppercase tracking-wide text-ink-tertiary mb-1">Topik</label>
+                                <input type="text" value={draft.topic}
+                                  onChange={e => setEditDraft(p => p ? { ...p, topic: e.target.value } : p)}
+                                  className="w-full rounded-[8px] border border-border bg-background px-3 py-1.5 text-[12px] focus:border-primary focus:outline-none" />
+                              </div>
+                            </div>
+                            <div className="flex justify-end gap-2 pt-1">
+                              <Button variant="outline" className="h-7 text-[11px]" onClick={() => { setEditingId(null); setEditDraft(null); }}>Batal</Button>
+                              <Button variant="default" className="h-7 text-[11px]" onClick={() => {
+                                if (!draft) return;
+                                setAiGeneratedQuestions(prev => prev.map(pq => pq.id === draft.id ? draft : pq));
+                                setEditingId(null);
+                                setEditDraft(null);
+                                setExpandedId(draft.id);
+                              }}>Simpan</Button>
+                            </div>
+                          </div>
+                        )}
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             )}
@@ -1877,14 +2761,17 @@ function TeacherAssessmentBuilder() {
               <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
                 <div>
                   <h3 className="text-[14px] font-bold text-ink">Bank Soal</h3>
-                  <p className="text-[11px] text-ink-secondary mt-0.5">{selectedQuestions.size} soal dipilih dari {questionBank.length} tersedia</p>
+                  <p className="text-[11px] text-ink-secondary mt-0.5">{selectedQuestions.size} soal dipilih dari {bankQs.length} tersedia</p>
                 </div>
                 <Button variant="outline" className="h-8 text-[12px]" onClick={() => setShowAddQuestion(true)}>
                   <Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Soal Baru
                 </Button>
               </div>
               <div className="p-4 space-y-2">
-                {questionBank.map(q => (
+                {bankQs.length === 0 && (
+                  <EmptyState icon={Database} title="Bank soal kosong" description="Upload materi dulu dan proses dengan AI — soal akan otomatis masuk ke bank." />
+                )}
+                {bankQs.map(q => (
                   <div key={q.id} onClick={() => toggleQuestion(q.id)}
                     className={cn(
                       "flex items-start gap-3 rounded-[8px] border p-3 cursor-pointer transition-all",
@@ -1908,12 +2795,12 @@ function TeacherAssessmentBuilder() {
               </div>
               <div className="border-t border-border px-5 py-3 flex items-center justify-between">
                 <button onClick={() => {
-                  const allIds = new Set(questionBank.map(q => q.id));
-                  setSelectedQuestions(prev => prev.size === questionBank.length ? new Set() : allIds);
+                  const allIds = new Set(bankQs.map(q => q.id));
+                  setSelectedQuestions(prev => prev.size === bankQs.length ? new Set() : allIds);
                 }} className="text-[11px] text-primary font-semibold hover:underline">
-                  {selectedQuestions.size === questionBank.length ? "Batal semua" : "Pilih semua"}
+                  {selectedQuestions.size === bankQs.length ? "Batal semua" : "Pilih semua"}
                 </button>
-                <span className="text-[11px] text-ink-secondary">{selectedQuestions.size} / {questionBank.length} dipilih</span>
+                <span className="text-[11px] text-ink-secondary">{selectedQuestions.size} / {bankQs.length} dipilih</span>
               </div>
             </div>
           )}
@@ -1937,6 +2824,8 @@ function TeacherAssessmentBuilder() {
                   <div key={opt}>
                     <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Opsi {opt}</label>
                     <input type="text" placeholder={`Pilihan ${opt}`}
+                      value={newQ[`opt${opt}` as "optA"|"optB"|"optC"|"optD"]}
+                      onChange={e => setNewQ(p => ({ ...p, [`opt${opt}`]: e.target.value }))}
                       className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
                   </div>
                 ))}
@@ -1959,10 +2848,11 @@ function TeacherAssessmentBuilder() {
                 <div>
                   <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik</label>
                   <input type="text" placeholder="e.g. Gerak Lurus Beraturan"
+                    value={newQ.topic} onChange={e => setNewQ(p => ({ ...p, topic: e.target.value }))}
                     className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
                 </div>
                 <div className="flex justify-end gap-2 pt-2">
-                  <Button variant="outline" className="h-8 text-[12px]" onClick={() => setShowAddQuestion(false)}>Batal</Button>
+                  <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowAddQuestion(false); setNewQ({ ...EMPTY_MANUAL_Q }); }}>Batal</Button>
                   <Button variant="default" className="h-8 text-[12px]" onClick={() => { setShowAddQuestion(false); setConfirmAddToBank(true); }}>
                     Simpan ke Bank Soal
                   </Button>
@@ -1978,17 +2868,31 @@ function TeacherAssessmentBuilder() {
             confirmLabel="Ya, Tambahkan"
             confirmVariant="default"
             onConfirm={() => {
+              saveManualQToBank(newQ, setBankQs, activeClass);
               setConfirmAddToBank(false);
+              setNewQ({ ...EMPTY_MANUAL_Q });
               setToast({ message: "Soal berhasil ditambahkan ke bank soal", tone: "success" });
             }}
             onCancel={() => setConfirmAddToBank(false)}
           />
 
+          {step2Error && (
+            <p className="text-[12px] text-danger bg-danger/5 border border-danger/20 rounded-[8px] px-3 py-2">{step2Error}</p>
+          )}
           <div className="flex justify-between">
             <Button variant="outline" className="h-8 text-[12px]" onClick={() => setStep(1)}>← Kembali</Button>
             <Button variant="default" className="h-8 text-[12px]"
               disabled={questionSource === "ai" ? (!aiGenerated || selectedQuestions.size === 0) : selectedQuestions.size === 0}
-              onClick={() => setStep(3)}>
+              onClick={() => {
+                if (selectedQuestions.size !== formQuestionCount) {
+                  setStep2Error(
+                    `Harus pilih tepat ${formQuestionCount} soal sesuai gaya asesmen. Saat ini: ${selectedQuestions.size} soal dipilih.`
+                  );
+                  return;
+                }
+                setStep2Error("");
+                setStep(3);
+              }}>
               Lanjut dengan {selectedQuestions.size} soal →
             </Button>
           </div>
@@ -1998,8 +2902,26 @@ function TeacherAssessmentBuilder() {
       {step === 3 && (
         <div className="rounded-card border border-border bg-surface shadow-sm p-6 space-y-5 max-w-2xl">
           <div>
-            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tanggal & Waktu *</label>
-            <input type="datetime-local" className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tanggal Asesmen *</label>
+            <input type="datetime-local"
+              value={formScheduledFor} onChange={e => setFormScheduledFor(e.target.value)}
+              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Mulai Dibuka</label>
+              <input type="datetime-local"
+                value={formOpenAt} onChange={e => setFormOpenAt(e.target.value)}
+                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+              <p className="text-[10px] text-ink-tertiary mt-1">Kapan siswa bisa mulai mengerjakan</p>
+            </div>
+            <div>
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Ditutup Pada</label>
+              <input type="datetime-local"
+                value={formCloseAt} onChange={e => setFormCloseAt(e.target.value)}
+                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+              <p className="text-[10px] text-ink-tertiary mt-1">Setelah waktu ini asesmen tidak bisa dikerjakan</p>
+            </div>
           </div>
           <AlertPanel tone="primary" title="Siap dipublikasikan">
             Setelah dipublikasikan, siswa menerima notifikasi dan dapat mengakses asesmen sesuai jadwal.
@@ -2023,9 +2945,35 @@ function TeacherAssessmentBuilder() {
         confirmLabel="Publikasikan"
         confirmVariant="default"
         onConfirm={() => {
+          const srcQs = questionSource === "ai" ? aiGeneratedQuestions : bankQs;
+          const chosen = srcQs.filter(q => selectedQuestions.has(q.id));
+          const scheduledLabel = formScheduledFor
+            ? new Date(formScheduledFor).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })
+            : new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+          const newAssessment: SavedAssessment = {
+            id: `assess-${Date.now()}`,
+            title: formTitle || "Asesmen Tanpa Judul",
+            type: (formType || "Kuis Guru") as Assessment["type"],
+            subject: formSubject,
+            classId: formClass,
+            totalQuestions: chosen.length || formQuestionCount,
+            duration: formDuration,
+            scheduledFor: scheduledLabel,
+            openAt: formOpenAt || undefined,
+            closeAt: formCloseAt || undefined,
+            status: "Terjadwal",
+            createdAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+            questions: chosen,
+          };
+          initAssessStore();
+          const updated = [newAssessment, ..._assessStore.list];
+          _assessStore.list = updated;
+          lsSet("catchup_assessments", updated);
           setConfirmPublish(false);
-          setToast({ message: "Asesmen berhasil dipublikasikan", tone: "success" });
+          setToast({ message: `Asesmen "${newAssessment.title}" berhasil dipublikasikan`, tone: "success" });
           setStep(1);
+          setFormTitle(""); setFormType(""); setFormScheduledFor(""); setFormOpenAt(""); setFormCloseAt("");
+          setSelectedQuestions(new Set()); setAiGeneratedQuestions([]); setAiGenerated(false);
         }}
         onCancel={() => setConfirmPublish(false)}
       />
@@ -2037,8 +2985,27 @@ function TeacherAssessmentBuilder() {
         confirmLabel="Simpan Draf"
         confirmVariant="default"
         onConfirm={() => {
+          const srcQs = questionSource === "ai" ? aiGeneratedQuestions : bankQs;
+          const chosen = srcQs.filter(q => selectedQuestions.has(q.id));
+          const newAssessment: SavedAssessment = {
+            id: `assess-draft-${Date.now()}`,
+            title: formTitle || "Draf Asesmen",
+            type: (formType || "Kuis Guru") as Assessment["type"],
+            subject: formSubject,
+            classId: formClass,
+            totalQuestions: chosen.length || formQuestionCount,
+            duration: formDuration,
+            scheduledFor: "—",
+            status: "Terjadwal",
+            createdAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+            questions: chosen,
+          };
+          initAssessStore();
+          const updated = [newAssessment, ..._assessStore.list];
+          _assessStore.list = updated;
+          lsSet("catchup_assessments", updated);
           setConfirmSaveDraft(false);
-          setToast({ message: "Draf tersimpan", tone: "primary" });
+          setToast({ message: `Draf "${newAssessment.title}" tersimpan`, tone: "primary" });
         }}
         onCancel={() => setConfirmSaveDraft(false)}
       />
@@ -2050,24 +3017,97 @@ function TeacherAssessmentBuilder() {
 
 // ── Teacher Results ───────────────────────────────────────────────────────────
 
-function TeacherResults() {
-  const [detailId, setDetailId] = useState<string | null>(null);
-  const detail = assessments.find(a => a.id === detailId);
+// Deterministic simulated answer distribution based on question id + difficulty
+function simulateDist(qId: string, correct: string, difficulty: string): Record<string, number> {
+  const opts = ["A","B","C","D"] as const;
+  const h = Math.abs(qId.split("").reduce((a,c) => ((a<<5)-a+c.charCodeAt(0))|0, 0));
+  const correctPct = difficulty === "Mudah" ? 70 : difficulty === "Sedang" ? 52 : 36;
+  const remaining = 100 - correctPct;
+  const wrongOpts = opts.filter(o => o !== correct);
+  const majorityIdx = h % wrongOpts.length;
+  const majorityPct = Math.round(remaining * 0.58);
+  const rest = remaining - majorityPct;
+  const dist: Record<string, number> = { A:0,B:0,C:0,D:0 };
+  dist[correct] = correctPct;
+  wrongOpts.forEach((o, i) => { dist[o] = i === majorityIdx ? majorityPct : Math.round(rest / (wrongOpts.length - 1)); });
+  const total = Object.values(dist).reduce((a,b)=>a+b,0);
+  dist[correct] += 100 - total;
+  return dist;
+}
 
+function simulateStudentAnswer(studentId: string, qId: string, correctAnswer: "A"|"B"|"C"|"D", avgScore: number): "A"|"B"|"C"|"D" {
+  const h = Math.abs((studentId + qId).split("").reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0));
+  const wrongProb = Math.max(0, Math.min(0.85, (1 - avgScore / 100) * 1.4));
+  const isWrong = (h % 1000) / 1000 < wrongProb;
+  if (!isWrong) return correctAnswer;
+  const opts = (["A","B","C","D"] as const).filter(o => o !== correctAnswer);
+  return opts[h % 3];
+}
+
+function TeacherResults() {
+  const [activeClass] = useActiveClass();
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [detailTab, setDetailTab] = useState<"soal" | "siswa">("soal");
+  const [allAssessmentsRaw, setAllAssessmentsRaw] = useState<SavedAssessment[]>([]);
+  const [aiAnalysis, setAiAnalysis] = useState<{ overallAnalysis: string; questionAnalyses: Array<{index:number;misconception:string;suggestion:string}> } | null>(null);
+  const [aiLoading, setAiLoading] = useState(false);
+
+  const activeClassId = classIdByName[activeClass] ?? "cls1";
+  const allAssessments = allAssessmentsRaw.filter(a => !a.classId || a.classId === activeClassId);
+  const classStudents = students.filter(s => s.classId === activeClassId);
+
+  useEffect(() => {
+    initAssessStore();
+    const hardcoded: SavedAssessment[] = assessments.map(a => ({ ...a, questions: [] }));
+    const userIds = new Set(_assessStore.list.map(a => a.id));
+    setAllAssessmentsRaw([..._assessStore.list, ...hardcoded.filter(a => !userIds.has(a.id))]);
+  }, []);
+
+  // Reset analysis and tab when dialog closes or changes
+  useEffect(() => { setAiAnalysis(null); setAiLoading(false); setDetailTab("soal"); }, [detailId]);
+
+  async function loadAIAnalysis(det: SavedAssessment) {
+    if (!det.questions?.length) return;
+    setAiLoading(true);
+    const payload = det.questions.map(q => {
+      const dist = simulateDist(q.id, q.correctAnswer, q.difficulty);
+      const wrongOpts = (["A","B","C","D"] as const).filter(o => o !== q.correctAnswer);
+      const majority = wrongOpts.reduce((a,b) => dist[a] > dist[b] ? a : b);
+      return {
+        question: q.question, topic: q.topic,
+        correctAnswer: q.correctAnswer, correctOption: q.options[q.correctAnswer],
+        majorityWrongAnswer: majority, majorityWrongOption: q.options[majority],
+        majorityWrongPct: dist[majority],
+      };
+    }).filter(q => q.majorityWrongPct > 25);
+
+    try {
+      const res = await fetch("/api/analyze-assessment", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ assessmentTitle: det.title, questions: payload }),
+      });
+      const data = await res.json() as typeof aiAnalysis & { error?: string };
+      if (!data?.error) setAiAnalysis(data);
+    } catch { /* ignore */ }
+    setAiLoading(false);
+  }
+
+  const detail = allAssessments.find(a => a.id === detailId);
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Hasil Asesmen" title="Riwayat Asesmen" />
+      <PageHeader eyebrow="Asesmen" title="List Asesmen" />
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {[
-          { label: "Asesmen selesai", value: `${assessments.filter(a => a.status === "Selesai").length}`, detail: "Semester ini", tone: "primary" as const },
+          { label: "Asesmen selesai", value: `${allAssessments.filter(a => a.status === "Selesai").length}`, detail: "Semester ini", tone: "primary" as const },
           { label: "Rata-rata terbaik", value: "82", detail: "Kuis Fungsi Kuadrat", tone: "success" as const },
           { label: "Partisipasi rata-rata", value: "97%", detail: "Dari total siswa", tone: "neutral" as const },
         ].map(s => <StatCard key={s.label} {...s} />)}
       </div>
 
       <div className="space-y-3">
-        {assessments.map(a => (
+        {allAssessments.map(a => (
           <div key={a.id} onClick={() => setDetailId(a.id)}
             className="flex items-center gap-4 rounded-card border border-border bg-surface p-4 hover:border-primary/30 hover:shadow-soft transition-all cursor-pointer">
             <div className={cn(
@@ -2117,7 +3157,7 @@ function TeacherResults() {
               {/* KPI row */}
               <div className="grid grid-cols-3 gap-4">
                 {[
-                  { label: "Peserta", value: `${detail.participants ?? "—"}`, icon: <Users className="h-4 w-4 text-primary" /> },
+                  { label: "Peserta", value: `${detail.participants ?? students.length}`, icon: <Users className="h-4 w-4 text-primary" /> },
                   { label: "Rata-rata", value: detail.avgScore ? `${detail.avgScore}` : "—", icon: <CheckCircle2 className="h-4 w-4 text-success" /> },
                   { label: "Status", value: detail.status, icon: <Eye className="h-4 w-4 text-ink-secondary" /> },
                 ].map(k => (
@@ -2128,57 +3168,225 @@ function TeacherResults() {
                 ))}
               </div>
 
-              {detail.avgScore && (
-                <>
-                  {/* Score distribution */}
-                  <div className="rounded-[10px] border border-border bg-background p-4">
-                    <h3 className="text-[12px] font-bold text-ink mb-3">Distribusi Nilai</h3>
-                    <SimpleChart data={scoreDistribution} labels={scoreDistributionLabels} type="bar" height={100} />
-                  </div>
-
-                  {/* Top performers */}
-                  <div>
-                    <h3 className="text-[12px] font-bold text-ink mb-2">Performa Siswa Terbaik</h3>
-                    <div className="space-y-2">
-                      {students.slice(0, 4).map((s, i) => (
-                        <div key={s.id} className="flex items-center gap-3 rounded-[8px] border border-border bg-background px-3 py-2">
-                          <div className={cn("flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold text-white",
-                            i === 0 ? "bg-warning" : i === 1 ? "bg-ink-secondary" : "bg-background border border-border text-ink"
-                          )}>{i + 1}</div>
-                          <div className="flex-1 text-[12px] font-medium text-ink">{s.name}</div>
-                          <div className="text-[13px] font-bold text-success tabular-nums">{85 + (4 - i) * 3}</div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </>
-              )}
-
               {detail.status === "Terjadwal" && (
                 <AlertPanel tone="primary" title="Asesmen belum dimulai">
                   Asesmen akan tersedia sesuai jadwal pada {detail.scheduledFor}.
                 </AlertPanel>
               )}
+
+              {/* Tab switcher — only shown when there are questions */}
+              {detail.questions && detail.questions.length > 0 && (
+                <div className="flex gap-1 p-1 bg-background rounded-[8px] border border-border">
+                  {([
+                    { key: "soal" as const, label: "Analisis Soal" },
+                    { key: "siswa" as const, label: "Jawaban Siswa" },
+                  ]).map(t => (
+                    <button key={t.key} onClick={() => setDetailTab(t.key)}
+                      className={cn(
+                        "flex-1 rounded-[6px] py-1.5 text-[12px] font-semibold transition-all",
+                        detailTab === t.key
+                          ? "bg-surface shadow-sm text-ink"
+                          : "text-ink-secondary hover:text-ink"
+                      )}>
+                      {t.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              {/* TAB: Analisis Soal */}
+              {detailTab === "soal" && detail.questions && detail.questions.length > 0 && (
+                <div>
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-[13px] font-bold text-ink">Soal & Distribusi Jawaban ({detail.questions.length})</h3>
+                    {!aiAnalysis && !aiLoading && (
+                      <Button variant="outline" className="h-7 text-[11px]" onClick={() => loadAIAnalysis(detail)}>
+                        <Sparkles className="mr-1 h-3 w-3" />Analisis AI
+                      </Button>
+                    )}
+                    {aiLoading && (
+                      <div className="flex items-center gap-1.5 text-[11px] text-primary">
+                        <span className="h-3 w-3 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                        AI menganalisis...
+                      </div>
+                    )}
+                  </div>
+
+                  {aiAnalysis?.overallAnalysis && (
+                    <AIInsightPanel title="Analisis AI">
+                      <p>{aiAnalysis.overallAnalysis}</p>
+                    </AIInsightPanel>
+                  )}
+
+                  <div className="space-y-3 mt-3">
+                    {detail.questions.map((q, i) => {
+                      const dist = simulateDist(q.id, q.correctAnswer, q.difficulty);
+                      const wrongOpts = (["A","B","C","D"] as const).filter(o => o !== q.correctAnswer);
+                      const majorityWrong = wrongOpts.reduce((a,b) => dist[a] > dist[b] ? a : b);
+                      const qAnalysis = aiAnalysis?.questionAnalyses?.find(a => a.index === i + 1);
+
+                      return (
+                        <div key={q.id} className="rounded-[10px] border border-border bg-background p-4 space-y-3">
+                          <div className="flex items-start gap-2">
+                            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[10px] font-bold text-primary mt-0.5">{i+1}</span>
+                            <p className="text-[12px] font-medium text-ink leading-snug">{q.question}</p>
+                          </div>
+
+                          <div className="space-y-1.5 ml-7">
+                            {(["A","B","C","D"] as const).map(opt => {
+                              const pct = dist[opt];
+                              const isCorrect = opt === q.correctAnswer;
+                              const isMajorityWrong = opt === majorityWrong && !isCorrect;
+                              return (
+                                <div key={opt}>
+                                  <div className="flex items-center gap-2 mb-0.5">
+                                    <span className={cn(
+                                      "flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-[9px] font-bold",
+                                      isCorrect ? "bg-success text-white" : isMajorityWrong ? "bg-danger text-white" : "bg-border/50 text-ink-secondary"
+                                    )}>{opt}</span>
+                                    <span className={cn("text-[11px] flex-1 leading-snug",
+                                      isCorrect ? "text-success font-semibold" : isMajorityWrong ? "text-danger" : "text-ink-secondary"
+                                    )}>{q.options[opt]}</span>
+                                    <span className={cn("text-[11px] font-bold tabular-nums shrink-0",
+                                      isCorrect ? "text-success" : isMajorityWrong ? "text-danger" : "text-ink-tertiary"
+                                    )}>{pct}%</span>
+                                  </div>
+                                  <div className="ml-6 h-1.5 rounded-full bg-border/40 overflow-hidden">
+                                    <div className={cn("h-full rounded-full transition-all",
+                                      isCorrect ? "bg-success" : isMajorityWrong ? "bg-danger" : "bg-border"
+                                    )} style={{ width: `${pct}%` }} />
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+
+                          <div className="ml-7 flex flex-wrap gap-1.5">
+                            <Badge tone="primary">{q.topic}</Badge>
+                            <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+                            {dist[majorityWrong] > 30 && <Badge tone="danger">Mayoritas pilih {majorityWrong} ({dist[majorityWrong]}%)</Badge>}
+                          </div>
+
+                          {qAnalysis && (
+                            <div className="ml-7 rounded-[8px] border border-primary/20 bg-primary-soft p-3 space-y-1.5">
+                              <div className="flex items-center gap-1.5">
+                                <Sparkles className="h-3 w-3 text-primary shrink-0" />
+                                <span className="text-[10px] font-bold text-primary uppercase tracking-wide">Analisis Miskonsepsi</span>
+                              </div>
+                              <p className="text-[11px] text-ink leading-relaxed">{qAnalysis.misconception}</p>
+                              <p className="text-[11px] text-ink-secondary leading-relaxed"><strong className="text-ink">Saran:</strong> {qAnalysis.suggestion}</p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB: Jawaban Siswa */}
+              {detailTab === "siswa" && detail.questions && detail.questions.length > 0 && (
+                <div>
+                  <p className="text-[11px] text-ink-secondary mb-3">
+                    Jawaban setiap siswa per soal. <span className="text-success font-semibold">Hijau = benar</span>, <span className="text-danger font-semibold">merah = salah</span>.
+                  </p>
+                  {classStudents.length === 0 ? (
+                    <p className="text-[12px] text-ink-tertiary">Tidak ada data siswa untuk kelas ini.</p>
+                  ) : (
+                    <div className="overflow-x-auto rounded-[10px] border border-border">
+                      <table className="w-full text-[11px] border-collapse">
+                        <thead>
+                          <tr className="bg-background border-b border-border">
+                            <th className="text-left px-3 py-2 font-semibold text-ink sticky left-0 bg-background z-10 min-w-[120px]">Siswa</th>
+                            {(detail.questions as QuestionBankEntry[]).map((q, i) => (
+                              <th key={q.id} className="px-2 py-2 font-semibold text-ink-secondary text-center min-w-[36px]" title={q.question}>
+                                Q{i+1}
+                              </th>
+                            ))}
+                            <th className="px-3 py-2 font-semibold text-ink text-center min-w-[48px]">Nilai</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {classStudents.map(s => {
+                            const qs = detail.questions as QuestionBankEntry[];
+                            const answers: ("A"|"B"|"C"|"D")[] = qs.map(q =>
+                              simulateStudentAnswer(s.id, q.id, q.correctAnswer as "A"|"B"|"C"|"D", s.avgScore)
+                            );
+                            const correctCount = answers.filter((ans, qi) => ans === qs[qi].correctAnswer).length;
+                            const score = Math.round((correctCount / qs.length) * 100);
+                            return (
+                              <tr key={s.id} className="border-b border-border/50 hover:bg-background/60">
+                                <td className="px-3 py-1.5 font-medium text-ink sticky left-0 bg-surface">{s.name}</td>
+                                {qs.map((q, qi) => {
+                                  const ans = answers[qi];
+                                  const isCorrect = ans === q.correctAnswer;
+                                  return (
+                                    <td key={q.id} className="px-2 py-1.5 text-center">
+                                      <span className={cn(
+                                        "inline-flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold",
+                                        isCorrect ? "bg-success/15 text-success" : "bg-danger/15 text-danger"
+                                      )}>{ans}</span>
+                                    </td>
+                                  );
+                                })}
+                                <td className="px-3 py-1.5 text-center font-bold tabular-nums">
+                                  <span className={cn(score >= 80 ? "text-success" : score >= 65 ? "text-primary" : "text-warning")}>{score}</span>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Seed assessments without question data: show student score list */}
+              {(!detail.questions || detail.questions.length === 0) && detail.avgScore && (
+                <div>
+                  <h3 className="text-[12px] font-bold text-ink mb-2">Nilai Siswa</h3>
+                  <div className="space-y-1.5">
+                    {students.map((s, i) => {
+                      const score = Math.min(100, Math.max(30, detail.avgScore! + (((i * 7 + 3) % 31) - 15)));
+                      return (
+                        <div key={s.id} className="flex items-center gap-3 rounded-[8px] border border-border bg-background px-3 py-2">
+                          <div className="flex-1 text-[12px] font-medium text-ink">{s.name}</div>
+                          <div className={cn("text-[13px] font-bold tabular-nums",
+                            score >= 80 ? "text-success" : score >= 65 ? "text-primary" : "text-warning"
+                          )}>{score}</div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-6 py-4 shrink-0">
               <Button variant="outline" className="h-8 text-[12px]" onClick={() => setDetailId(null)}>Tutup</Button>
-              {detail.avgScore && (
-                <Button variant="default" className="h-8 text-[12px]" onClick={() => {
-                  const bom = "﻿";
-                  const rows = [
-                    ["Nama Siswa", "NIS", "Nilai", "Peringkat", "Status"],
-                    ...students.slice(0, 8).map((s, i) => [s.name, s.nis, `${80 + (8 - i) * 2}`, `${i + 1}`, s.status]),
-                  ];
-                  const csv = bom + rows.map(r => r.map(cell => `"${cell}"`).join(",")).join("\n");
-                  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-                  const url = URL.createObjectURL(blob);
-                  const a = document.createElement("a");
-                  a.href = url; a.download = `${detail.title}.csv`; a.click();
-                  URL.revokeObjectURL(url);
-                }}>
-                  <Download className="mr-1.5 h-3.5 w-3.5" />Ekspor Hasil
-                </Button>
-              )}
+              <Button variant="default" className="h-8 text-[12px]" onClick={() => {
+                const bom = "﻿";
+                const scoreList = detail.questions?.length
+                  ? students.map((s, i) => {
+                      const base = detail.avgScore ?? 70;
+                      const score = Math.min(100, Math.max(30, base + (((i * 7 + 3) % 31) - 15)));
+                      return [s.name, score.toString()];
+                    })
+                  : students.map((s, i) => {
+                      const base = detail.avgScore ?? 70;
+                      const score = Math.min(100, Math.max(30, base + (((i * 7 + 3) % 31) - 15)));
+                      return [s.name, score.toString()];
+                    });
+                const rows = [["Nama Siswa", "Nilai"], ...scoreList];
+                const csv = bom + rows.map(r => r.map(cell => `"${cell}"`).join(",")).join("\n");
+                const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url; a.download = `${detail.title}.csv`; a.click();
+                URL.revokeObjectURL(url);
+              }}>
+                <Download className="mr-1.5 h-3.5 w-3.5" />Ekspor Nilai
+              </Button>
             </div>
           </div>
         </div>
@@ -2190,7 +3398,14 @@ function TeacherResults() {
 // ── Teacher Analytics ─────────────────────────────────────────────────────────
 
 function TeacherAnalytics() {
+  const [activeClass] = useActiveClass();
   const [topicPopup, setTopicPopup] = useState<string | null>(null);
+  const [showAllStudents, setShowAllStudents] = useState(false);
+
+  const activeClassId = classIdByName[activeClass] ?? "cls1";
+  const activeStats = activeClass ? getClassStats(activeClassId) : classStats;
+  const classStudents = students.filter(s => s.classId === activeClassId);
+
   const popupTopic = topicAccuracy.find(t => t.label === topicPopup);
   const popupRec = topicPopup
     ? teachingRecommendations.find(r => r.topic.toLowerCase() === topicPopup.toLowerCase())
@@ -2198,7 +3413,7 @@ function TeacherAnalytics() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Analitik Kelas" title={`Analitik ${currentTeacher.classes[0]}`} description="Performa kelas berdasarkan data asesmen semester ini." />
+      <PageHeader eyebrow="Analitik Kelas" title={`Analitik ${activeClass || currentTeacher.classes[0]}`} description={`Performa ${activeStats.total} siswa berdasarkan data asesmen semester ini.`} />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {teacherAnalyticsStats.map(s => <StatCard key={s.label} {...s} />)}
@@ -2208,12 +3423,24 @@ function TeacherAnalytics() {
         <div className="col-span-1 lg:col-span-2 rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Tren Nilai Kelas</h3>
           <p className="text-[12px] text-ink-secondary mb-4">Rata-rata per asesmen</p>
-          <SimpleChart data={[72, 68, 74, 76, 80, 82, 76]} labels={["Sep", "Okt", "Okt", "Nov", "Nov", "Nov", "UTS"]} height={120} />
+          {scoreTrend.length === 0 ? (
+            <div className="flex items-center justify-center h-[120px] rounded-[8px] border border-dashed border-border">
+              <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah asesmen diselesaikan</p>
+            </div>
+          ) : (
+            <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={120} />
+          )}
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Distribusi Nilai</h3>
-          <p className="text-[12px] text-ink-secondary mb-4">UTS Matematika XI</p>
-          <SimpleChart data={scoreDistribution} labels={scoreDistributionLabels} type="bar" height={100} />
+          <p className="text-[12px] text-ink-secondary mb-4">Berdasarkan asesmen terakhir</p>
+          {scoreDistribution.length === 0 ? (
+            <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
+              <p className="text-[12px] text-ink-tertiary">Belum ada data asesmen</p>
+            </div>
+          ) : (
+            <SimpleChart data={scoreDistribution} labels={scoreDistributionLabels} type="bar" height={100} />
+          )}
         </div>
       </div>
 
@@ -2221,25 +3448,40 @@ function TeacherAnalytics() {
         <div className="flex items-center justify-between mb-5">
           <div>
             <h3 className="text-[14px] font-bold text-ink">Akurasi per Topik</h3>
-            <p className="text-[12px] text-ink-secondary mt-0.5">Rata-rata kelas · klik topik untuk melihat rekomendasi</p>
+            <p className="text-[12px] text-ink-secondary mt-0.5">Rata-rata kelas berdasarkan bank soal · klik topik untuk rekomendasi</p>
           </div>
         </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
-          {topicAccuracy.map(t => (
-            <div key={t.label} className="cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setTopicPopup(t.label)}>
-              <TopicBar label={t.label} value={t.value} />
-            </div>
-          ))}
-        </div>
+        {topicAccuracy.length === 0 ? (
+          <div className="flex items-center justify-center py-10 rounded-[8px] border border-dashed border-border">
+            <p className="text-[12px] text-ink-tertiary">Data akurasi akan tersedia setelah siswa mengerjakan asesmen</p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
+            {topicAccuracy.map(t => (
+              <div key={t.label} className="cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setTopicPopup(t.label)}>
+                <TopicBar label={t.label} value={t.value} />
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="rounded-card border border-border bg-surface shadow-sm">
-        <div className="border-b border-border px-5 py-3.5">
+        <div className="border-b border-border px-5 py-3.5 flex items-center justify-between">
           <h3 className="text-[14px] font-bold text-ink">Performa Siswa</h3>
+          <span className="text-[11px] text-ink-secondary">{classStudents.length} siswa · {activeClass}</span>
         </div>
         <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-          {students.slice(0, 6).map(s => <StudentPerformanceCard key={s.id} student={s} />)}
+          {(showAllStudents ? classStudents : classStudents.slice(0, 6)).map(s => <StudentPerformanceCard key={s.id} student={s} />)}
         </div>
+        {classStudents.length > 6 && (
+          <div className="border-t border-border px-5 py-3 text-center">
+            <button onClick={() => setShowAllStudents(p => !p)}
+              className="text-[12px] font-semibold text-primary hover:underline">
+              {showAllStudents ? "Tampilkan lebih sedikit ↑" : `Lihat semua ${classStudents.length} siswa ↓`}
+            </button>
+          </div>
+        )}
       </div>
 
       {/* Topic popup dialog */}
@@ -2289,22 +3531,163 @@ function TeacherAnalytics() {
 
 // ── Teacher Recommendations ───────────────────────────────────────────────────
 
+const REC_DONE_KEY = "catchup_rec_done";
+const REC_DONE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days in ms
+
+function loadRecDone(): Map<string, number> {
+  const raw = lsGet<Array<{ id: string; doneAt: number }>>(REC_DONE_KEY);
+  if (!raw) return new Map();
+  const now = Date.now();
+  return new Map(raw.filter(e => now - e.doneAt < REC_DONE_TTL).map(e => [e.id, e.doneAt]));
+}
+
+function saveRecDone(map: Map<string, number>) {
+  lsSet(REC_DONE_KEY, [...map.entries()].map(([id, doneAt]) => ({ id, doneAt })));
+}
+
 function TeacherRecommendations() {
+  const [activeClass] = useActiveClass();
+  const [recs, setRecs] = useState<typeof teachingRecommendations>([]);
+  const [summary, setSummary] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [bankQs, setBankQs] = useState<typeof questionBank>([]);
+  // Map of id → timestamp when marked done
+  const [doneMap, setDoneMap] = useState<Map<string, number>>(new Map());
+
+  useEffect(() => {
+    setDoneMap(loadRecDone());
+    initBankStore();
+    setBankQs([..._bankStore.questions]);
+  }, []);
+
+  // Reset recommendations when class changes so stale data isn't shown
+  useEffect(() => {
+    setRecs([]);
+    setSummary("");
+    setError("");
+  }, [activeClass]);
+
+  function toggleDone(id: string) {
+    setDoneMap(prev => {
+      const next = new Map(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.set(id, Date.now());
+      }
+      saveRecDone(next);
+      return next;
+    });
+  }
+
+  function clearDone() {
+    setDoneMap(new Map());
+    lsSet(REC_DONE_KEY, []);
+  }
+
+  useEffect(() => {
+    if (bankQs.length === 0) return;
+
+    // Filter bank questions for active class
+    const classQs = bankQs.filter(q => !q.classId || q.classId === activeClass);
+    const topicMap = new Map<string, { total: number; sumRate: number }>();
+    for (const q of classQs) {
+      const t = q.topic || "Umum";
+      const cur = topicMap.get(t) ?? { total: 0, sumRate: 0 };
+      topicMap.set(t, { total: cur.total + 1, sumRate: cur.sumRate + q.successRate });
+    }
+    const topicStats = [...topicMap.entries()].map(([topic, v]) => ({
+      topic, count: v.total, avgSuccessRate: Math.round(v.sumRate / v.total),
+    }));
+
+    setLoading(true);
+    setError("");
+    fetch("/api/recommendations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topicStats, className: activeClass }),
+    })
+      .then(r => r.json())
+      .then((data: { summary?: string; recommendations?: typeof teachingRecommendations; error?: string }) => {
+        if (data.error) { setError(data.error); return; }
+        setSummary(data.summary ?? "");
+        setRecs(data.recommendations ?? []);
+      })
+      .catch(e => setError(e instanceof Error ? e.message : "Gagal memuat rekomendasi"))
+      .finally(() => setLoading(false));
+  }, [bankQs]);
+
+  const pending = recs.filter(r => !doneMap.has(r.id));
+  // Sort done by most recently done first
+  const done = recs
+    .filter(r => doneMap.has(r.id))
+    .sort((a, b) => (doneMap.get(b.id) ?? 0) - (doneMap.get(a.id) ?? 0));
+
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Rekomendasi AI" title="Rekomendasi Tindakan Guru"
-        description="Berdasarkan analisis hasil asesmen kelas, AI merekomendasikan intervensi berikut." />
-      <AIInsightPanel title="Ringkasan AI">
-        <p>
-          <strong className="text-ink">2 topik kritis</strong> perlu remedial minggu ini.{" "}
-          <strong className="text-danger">Diskriminan</strong> dan{" "}
-          <strong className="text-danger">Rumus Vieta</strong> memiliki akurasi di bawah 50%,
-          memengaruhi ~{Math.round(classStats.total * 0.55)} siswa. Total waktu remedial: <strong className="text-ink">35 menit</strong>.
-        </p>
-      </AIInsightPanel>
-      <div className="space-y-4">
-        {teachingRecommendations.map(r => <RecommendationCard key={r.id} rec={r} />)}
-      </div>
+      <PageHeader eyebrow="Rekomendasi AI" title={`Rekomendasi — ${activeClass || currentTeacher.classes[0]}`}
+        description="Berdasarkan analisis soal di bank soal, AI merekomendasikan intervensi pengajaran berikut." />
+
+      {bankQs.length === 0 && !loading && (
+        <EmptyState icon={Sparkles} title="Belum ada data soal"
+          description="Tambahkan soal ke bank soal terlebih dahulu agar AI dapat menganalisis dan memberi rekomendasi pengajaran." />
+      )}
+
+      {loading && (
+        <div className="rounded-card border border-border bg-surface p-8 text-center space-y-3">
+          <div className="flex justify-center">
+            <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+          </div>
+          <p className="text-[13px] text-ink-secondary">AI sedang menganalisis data soal dan menyusun rekomendasi...</p>
+        </div>
+      )}
+
+      {error && !loading && (
+        <AlertPanel tone="danger" title="Gagal memuat rekomendasi">{error}</AlertPanel>
+      )}
+
+      {!loading && !error && summary && (
+        <AIInsightPanel title="Ringkasan AI">
+          <p>{summary}</p>
+        </AIInsightPanel>
+      )}
+
+      {/* Pending recommendations */}
+      {!loading && pending.length > 0 && (
+        <div className="space-y-4">
+          {pending.map(r => (
+            <RecommendationCard key={r.id} rec={r} done={false} onToggle={() => toggleDone(r.id)} />
+          ))}
+        </div>
+      )}
+
+      {!loading && recs.length > 0 && pending.length === 0 && (
+        <div className="rounded-[10px] border border-success/20 bg-success/5 px-5 py-4 text-center">
+          <p className="text-[13px] font-semibold text-success">Semua rekomendasi sudah diselesaikan!</p>
+        </div>
+      )}
+
+      {/* Done recommendations section */}
+      {!loading && done.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-[13px] font-bold text-ink">Rekomendasi yang Sudah Diselesaikan</h3>
+              <p className="text-[11px] text-ink-tertiary mt-0.5">Disimpan selama 7 hari · {done.length} item</p>
+            </div>
+            <button onClick={clearDone}
+              className="text-[11px] font-semibold text-ink-secondary hover:text-danger transition-colors underline">
+              Hapus Semua
+            </button>
+          </div>
+          <div className="space-y-3">
+            {done.map(r => (
+              <RecommendationCard key={r.id} rec={r} done={true} onToggle={() => toggleDone(r.id)} />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2386,6 +3769,7 @@ function StudentApp({ page }: { page: string }) {
 
   const screens: Record<string, React.ReactNode> = {
     dashboard: <StudentDashboard />,
+    materials: <StudentMaterials />,
     simulator: <StudentSimulator page={simulatorPage} onPageChange={setSimulatorPage} />,
     adaptive: <StudentAdaptive />,
     review: <StudentReview />,
@@ -2401,9 +3785,195 @@ function StudentApp({ page }: { page: string }) {
   }
 
   return (
-    <AppShell role="student" nav={studentNav}>
+    <AppShell role="student" nav={studentNav} demoData>
       {screens[page] ?? <StudentDashboard />}
     </AppShell>
+  );
+}
+
+// ── Student Materials ─────────────────────────────────────────────────────────
+
+function StudentMaterials() {
+  const [mats, setMats] = useState<Material[]>([]);
+  const [search, setSearch] = useState("");
+
+  useEffect(() => {
+    initMatStore();
+    setMats([..._matStore.uploadedMaterials]);
+  }, []);
+
+  // Only show materials for student's own class (or unclassified)
+  const filtered = mats.filter(m => {
+    const matchClass = !m.className || m.className === studentProfile.className;
+    const matchSearch = !search ||
+      m.title.toLowerCase().includes(search.toLowerCase()) ||
+      (m.subject ?? "").toLowerCase().includes(search.toLowerCase());
+    return matchClass && matchSearch;
+  });
+
+  function downloadMaterial(mat: Material) {
+    const file = _matStore.materialFiles[mat.id];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = file.name || mat.title;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      return;
+    }
+    // Fallback: try data URL stored in localStorage (persists across tabs/refresh)
+    const dataUrl = lsGet<string>(`catchup_file_${mat.id}`);
+    if (dataUrl) {
+      const a = document.createElement("a");
+      a.href = dataUrl;
+      a.download = mat.title;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+    alert("File tidak tersedia untuk diunduh. Hubungi gurumu untuk informasi lebih lanjut.");
+  }
+
+  return (
+    <div className="space-y-6">
+      <PageHeader
+        eyebrow="Ruang Belajar"
+        title="Materi dari Guru"
+        description={`Materi untuk kelas ${studentProfile.className} yang sudah diunggah gurumu.`}
+      />
+
+      <div className="flex items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-2 max-w-sm">
+        <Search className="h-3.5 w-3.5 shrink-0 text-ink-tertiary" />
+        <input
+          type="text"
+          placeholder="Cari materi..."
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          className="flex-1 bg-transparent text-[13px] placeholder:text-ink-tertiary focus:outline-none"
+        />
+      </div>
+
+      <div className="rounded-card border border-border bg-surface shadow-sm">
+        <div className="border-b border-border px-5 py-3.5">
+          <h2 className="text-[14px] font-bold text-ink">{filtered.length} Materi Tersedia</h2>
+        </div>
+        <div className="p-4 space-y-3">
+          {filtered.length === 0 ? (
+            <div className="py-12 flex flex-col items-center gap-3 text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
+                <BookOpen className="h-6 w-6 text-ink-tertiary" />
+              </div>
+              <div>
+                <p className="text-[14px] font-semibold text-ink">Belum ada materi</p>
+                <p className="text-[12px] text-ink-secondary mt-1">Gurumu belum mengunggah materi. Pantau terus!</p>
+              </div>
+            </div>
+          ) : (
+            filtered.map(mat => (
+              <div key={mat.id} className="flex items-start gap-4 rounded-card border border-border bg-background p-4 hover:border-success/30 hover:shadow-soft transition-all">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-success/10 border border-success/20">
+                  <FileText className="h-5 w-5 text-success" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-start justify-between gap-2 flex-wrap">
+                    <div className="min-w-0">
+                      <p className="text-[13px] font-semibold text-ink truncate">{mat.title}</p>
+                      <p className="text-[11px] text-ink-secondary mt-0.5">{mat.subject} · {mat.type} · {mat.uploadedAt}</p>
+                    </div>
+                    <button
+                      onClick={() => downloadMaterial(mat)}
+                      className="flex items-center gap-1.5 rounded-[6px] border border-border bg-background px-2.5 py-1.5 text-[11px] font-semibold text-ink-secondary hover:border-success/40 hover:text-success transition-colors shrink-0">
+                      <Download className="h-3 w-3" />Unduh
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StudentAssessmentTabs() {
+  const [tab, setTab] = useState<"mendatang" | "selesai" | "tertinggal">("mendatang");
+  const [all, setAll] = useState<SavedAssessment[]>([]);
+  useEffect(() => {
+    initAssessStore();
+    setAll([..._assessStore.list]);
+  }, []);
+
+  const mendatang = all.filter(a => a.status === "Terjadwal");
+  const selesai = all.filter(a => a.status === "Selesai");
+  const tertinggal = all.filter(a => a.status === "Berlangsung");
+
+  const tabs = [
+    { key: "mendatang" as const, label: "Mendatang", count: mendatang.length },
+    { key: "selesai" as const, label: "Selesai", count: selesai.length },
+    { key: "tertinggal" as const, label: "Tertinggal", count: tertinggal.length },
+  ];
+
+  const list = tab === "mendatang" ? mendatang : tab === "selesai" ? selesai : tertinggal;
+
+  return (
+    <div className="rounded-card border border-border bg-surface shadow-sm">
+      <div className="flex border-b border-border">
+        {tabs.map(t => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            className={cn(
+              "flex-1 py-3 text-[12px] font-semibold transition-colors relative",
+              tab === t.key ? "text-primary" : "text-ink-secondary hover:text-ink"
+            )}>
+            {t.label}
+            {t.count > 0 && (
+              <span className={cn(
+                "ml-1.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold",
+                tab === t.key ? "bg-primary text-white" : "bg-border/60 text-ink-secondary"
+              )}>{t.count}</span>
+            )}
+            {tab === t.key && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-primary rounded-full" />}
+          </button>
+        ))}
+      </div>
+      <div className="p-4">
+        {list.length === 0 ? (
+          <p className="text-[12px] text-ink-tertiary text-center py-4">
+            {tab === "mendatang" ? "Belum ada asesmen terjadwal dari gurumu."
+              : tab === "selesai" ? "Belum ada asesmen yang diselesaikan."
+              : "Tidak ada asesmen yang tertinggal."}
+          </p>
+        ) : (
+          <div className="space-y-2.5">
+            {list.map(a => (
+              <div key={a.id} className="flex items-center gap-3 rounded-[10px] border border-border bg-background p-3">
+                <div className={cn(
+                  "flex h-8 w-8 shrink-0 items-center justify-center rounded-[6px]",
+                  tab === "selesai" ? "bg-success/10" : tab === "tertinggal" ? "bg-danger/10" : "bg-primary/10"
+                )}>
+                  {tab === "selesai" ? <CheckCircle2 className="h-4 w-4 text-success" />
+                    : tab === "tertinggal" ? <AlertCircle className="h-4 w-4 text-danger" />
+                    : <Clock className="h-4 w-4 text-primary" />}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[12px] font-semibold text-ink truncate">{a.title}</p>
+                  <p className="text-[10px] text-ink-secondary">{a.type} · {a.scheduledFor}</p>
+                </div>
+                {tab === "selesai" && a.avgScore && (
+                  <span className={cn("text-[14px] font-bold tabular-nums",
+                    a.avgScore >= 80 ? "text-success" : a.avgScore >= 65 ? "text-primary" : "text-warning"
+                  )}>{a.avgScore}</span>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -2416,7 +3986,7 @@ function StudentDashboard() {
       <CatchMeUpCard
         studentName={studentProfile.name}
         weakTopics={weakTopics.slice(0, 2).map(t => t.topic)}
-        nextAction="Kamu masih lemah di Diskriminan (38%) dan Rumus Vieta (42%). Latihan 15 menit hari ini bisa langsung meningkatkan pemahamanmu!"
+        nextAction={weakTopics.length > 0 ? `Kamu masih lemah di ${weakTopics[0].topic}. Latihan 15 menit hari ini bisa langsung meningkatkan pemahamanmu!` : "Kerjakan asesmen dari gurumu untuk mendapatkan analisis performa personal."}
         onStart={() => router.push("/student/adaptive")}
       />
 
@@ -2433,7 +4003,13 @@ function StudentDashboard() {
                 <div className="text-[11px] text-ink-secondary">Rata-rata</div>
               </div>
             </div>
-            <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={90} />
+            {scoreTrend.length === 0 ? (
+              <div className="flex items-center justify-center h-[90px] rounded-[8px] border border-dashed border-border">
+                <p className="text-[12px] text-ink-tertiary">Data tren akan muncul setelah mengerjakan asesmen</p>
+              </div>
+            ) : (
+              <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={90} />
+            )}
           </div>
 
           <div className="rounded-card border border-border bg-surface shadow-sm">
@@ -2441,22 +4017,17 @@ function StudentDashboard() {
               <h3 className="text-[14px] font-bold text-ink">Hasil Asesmen Terbaru</h3>
               <Link href="/student/review" className="text-[12px] font-semibold text-primary hover:underline">Lihat semua</Link>
             </div>
-            <div className="px-5 py-1">
-              {studentResults.map(r => (
+            <div className="px-5 py-3">
+              {studentResults.length === 0 ? (
+                <p className="text-[12px] text-ink-tertiary text-center py-4">Belum ada hasil asesmen. Kerjakan asesmen dari gurumu!</p>
+              ) : studentResults.map(r => (
                 <RecentAssessmentRow key={r.id} title={r.assessmentTitle} type={r.type} date={r.date}
                   score={r.score} classAvg={r.classAvg} rank={r.rank} />
               ))}
             </div>
           </div>
 
-          <div className="rounded-card border border-border bg-surface shadow-sm p-5">
-            <h3 className="text-[14px] font-bold text-ink mb-3">Asesmen Mendatang</h3>
-            <div className="space-y-2.5">
-              {assessments.filter(a => a.status === "Terjadwal").slice(0, 2).map(a => (
-                <UpcomingCard key={a.id} title={a.title} type={a.type} date={a.scheduledFor} duration={a.duration} questions={a.totalQuestions} />
-              ))}
-            </div>
-          </div>
+          <StudentAssessmentTabs />
         </div>
 
         <div className="space-y-5">
@@ -2512,11 +4083,65 @@ function StudentDashboard() {
 
 // ── Student Simulator ─────────────────────────────────────────────────────────
 
+function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
+  const [items, setItems] = useState<SavedAssessment[]>([]);
+  useEffect(() => {
+    initAssessStore();
+    setItems(_assessStore.list.filter(a => a.status === "Terjadwal"));
+  }, []);
+  if (items.length === 0) return (
+    <div className="flex items-center justify-center rounded-card border border-dashed border-border py-10">
+      <p className="text-[13px] text-ink-tertiary">Belum ada asesmen terjadwal dari gurumu.</p>
+    </div>
+  );
+  const now = Date.now();
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {items.map(a => {
+        const hasQuestions = (a.questions?.length ?? 0) > 0;
+        const notYetOpen = a.openAt ? now < new Date(a.openAt).getTime() : false;
+        const alreadyClosed = a.closeAt ? now > new Date(a.closeAt).getTime() : false;
+        const accessible = hasQuestions && !notYetOpen && !alreadyClosed;
+        return (
+          <div key={a.id} role="button" tabIndex={0}
+            onClick={() => onStart(a.id)}
+            onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onStart(a.id); } }}
+            className={cn("rounded-card border bg-surface p-5 transition-all cursor-pointer group",
+              accessible ? "border-border hover:border-primary/30 hover:shadow-soft" : "border-border opacity-60")}>
+            <div className="flex items-start gap-3">
+              <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px]",
+                accessible ? "bg-primary-soft" : "bg-background")}>
+                <ShieldCheck className={cn("h-5 w-5", accessible ? "text-primary" : "text-ink-tertiary")} />
+              </div>
+              <div className="flex-1">
+                <div className="text-[13px] font-bold text-ink">{a.title}</div>
+                <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.questions?.length ?? 0} soal · {a.duration} mnt</div>
+                <div className="flex items-center gap-2 mt-2 flex-wrap">
+                  {a.openAt && <Badge tone="neutral">Buka: {new Date(a.openAt).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}</Badge>}
+                  {a.closeAt && <Badge tone="neutral">Tutup: {new Date(a.closeAt).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}</Badge>}
+                  {!hasQuestions && <Badge tone="warning">Belum ada soal</Badge>}
+                  {notYetOpen && <Badge tone="warning">Belum dibuka</Badge>}
+                  {alreadyClosed && <Badge tone="danger">Sudah ditutup</Badge>}
+                  {accessible && <Badge tone="danger">Mode Kiosk</Badge>}
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: (p: string) => void }) {
+  const [examAssessment, setExamAssessment] = useState<SavedAssessment | null>(null);
+  const [noQuestionsAlert, setNoQuestionsAlert] = useState(false);
   const [current, setCurrent] = useState(0);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [confidence, setConfidence] = useState<Record<number, "yakin" | "cukup" | "ragu">>({});
   const [finished, setFinished] = useState(false);
+  const [finalScore, setFinalScore] = useState(0);
+  const [finalCorrect, setFinalCorrect] = useState(0);
   const [timeLeft, setTimeLeft] = useState(45 * 60);
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [kioskWarning, setKioskWarning] = useState(false);
@@ -2525,6 +4150,8 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   finishedRef.current = finished;
   const answersRef = React.useRef(answers);
   answersRef.current = answers;
+  const examAssessmentRef = React.useRef(examAssessment);
+  examAssessmentRef.current = examAssessment;
   const warningShownRef = React.useRef(false);
 
   function triggerKioskWarning() {
@@ -2545,6 +4172,44 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     finishedRef.current = true;
     try { localStorage.removeItem("catchup_exam_session"); } catch {}
     exitFullscreen();
+    const assessment = examAssessmentRef.current;
+    const ans = answersRef.current;
+    if (assessment?.questions?.length) {
+      const qs = assessment.questions as QuestionBankEntry[];
+      const correctCount = qs.filter((q, i) => ans[i] === q.correctAnswer).length;
+      const score = Math.round((correctCount / qs.length) * 100);
+      setFinalScore(score);
+      setFinalCorrect(correctCount);
+      const resultId = `result_${Date.now()}`;
+      saveResult({
+        id: resultId,
+        assessmentId: assessment.id,
+        assessmentTitle: assessment.title,
+        type: assessment.type ?? "Asesmen",
+        date: new Date().toLocaleDateString("id-ID"),
+        score,
+        totalQuestions: qs.length,
+        correctCount,
+        answers: Object.fromEntries(Object.entries(ans).map(([k, v]) => [k, v])),
+      });
+      const incorrectQs: StoredIncorrectQ[] = qs
+        .map((q, qi) => ({ q, qi, studentAns: ans[qi] }))
+        .filter((item): item is { q: QuestionBankEntry; qi: number; studentAns: string } =>
+          item.studentAns !== undefined && item.studentAns !== item.q.correctAnswer)
+        .map(({ q, studentAns }) => ({
+          id: `${resultId}_${q.id}`,
+          assessmentId: assessment.id,
+          assessmentTitle: assessment.title,
+          topic: q.topic ?? "",
+          question: q.question,
+          yourAnswer: studentAns,
+          correctAnswer: q.correctAnswer,
+          explanation: q.explanation ?? "",
+          date: new Date().toLocaleDateString("id-ID"),
+          options: { A: q.options.A, B: q.options.B, C: q.options.C, D: q.options.D, ...(q.options.E ? { E: q.options.E } : {}) },
+        }));
+      if (incorrectQs.length > 0) saveIncorrectQuestions(incorrectQs);
+    }
     setFinished(true);
   }
 
@@ -2634,35 +4299,48 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   // ── Pick screen ──
   if (page === "pick") {
     return (
-      <AppShell role="student" nav={studentNav}>
+      <AppShell role="student" nav={studentNav} demoData>
         <div className="space-y-6">
           <PageHeader eyebrow="Simulasi Ujian" title="Pilih Asesmen Resmi"
             description="Pilih ujian yang akan diikuti. Ujian resmi berjalan dalam mode kiosk — berpindah tab atau keluar layar penuh otomatis mengakhiri ujian." />
           <AlertPanel tone="danger" title="Perhatian: Mode Ujian Ketat">
             Berpindah tab, meminimalkan jendela, atau keluar layar penuh akan otomatis menyelesaikan dan mengumpulkan jawaban kamu.
           </AlertPanel>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {assessments.filter(a => a.status === "Terjadwal").map(a => (
-              <div key={a.id} role="button" tabIndex={0}
-                onClick={() => onPageChange("exam")}
-                onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPageChange("exam"); } }}
-                className="rounded-card border border-border bg-surface p-5 hover:border-primary/30 hover:shadow-soft transition-all cursor-pointer group">
-                <div className="flex items-start gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-primary-soft">
-                    <ShieldCheck className="h-5 w-5 text-primary" />
-                  </div>
-                  <div className="flex-1">
-                    <div className="text-[13px] font-bold text-ink">{a.title}</div>
-                    <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.totalQuestions} soal · {a.duration} mnt</div>
-                    <div className="flex items-center gap-2 mt-2">
-                      <Badge tone="neutral">{a.scheduledFor}</Badge>
-                      <Badge tone="danger">Mode Kiosk</Badge>
-                    </div>
-                  </div>
+          <SimulatorPickList onStart={(id) => {
+            initAssessStore();
+            const a = _assessStore.list.find(x => x.id === id) ?? null;
+            if (!a || !a.questions?.length) {
+              setNoQuestionsAlert(true);
+              return;
+            }
+            const now = Date.now();
+            if (a.openAt && now < new Date(a.openAt).getTime()) {
+              setNoQuestionsAlert(true);
+              return;
+            }
+            if (a.closeAt && now > new Date(a.closeAt).getTime()) {
+              setNoQuestionsAlert(true);
+              return;
+            }
+            setExamAssessment(a);
+            setCurrent(0);
+            setAnswers({});
+            setConfidence({});
+            onPageChange("exam");
+          }} />
+          {noQuestionsAlert && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setNoQuestionsAlert(false)} />
+              <div className="relative w-full max-w-sm rounded-card border border-border bg-surface shadow-xl p-6 text-center space-y-4">
+                <AlertCircle className="h-10 w-10 text-warning mx-auto" />
+                <div>
+                  <p className="text-[15px] font-bold text-ink">Asesmen Belum Bisa Diakses</p>
+                  <p className="text-[13px] text-ink-secondary mt-1">Asesmen ini belum tersedia — mungkin belum waktunya, sudah berakhir, atau belum ada soal. Hubungi gurumu untuk info lebih lanjut.</p>
                 </div>
+                <Button variant="default" className="w-full h-9" onClick={() => setNoQuestionsAlert(false)}>Tutup</Button>
               </div>
-            ))}
-          </div>
+            </div>
+          )}
 
           <div className="pt-2 border-t border-border">
             <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-3">Latihan Mandiri (Tanpa Kiosk)</p>
@@ -2693,9 +4371,9 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
           </div>
           <div>
             <h2 className="text-2xl font-bold text-ink">Asesmen Selesai!</h2>
-            <p className="text-[14px] text-ink-secondary mt-1">Hasil sedang diproses AI...</p>
+            <p className="text-[14px] text-ink-secondary mt-1">{finalCorrect} dari {examAssessment?.questions?.length ?? 0} soal benar</p>
           </div>
-          <ScoreCircle score={Math.round((Object.keys(answers).length / simulatorQuestions.length) * 100)} size={96} />
+          <ScoreCircle score={finalScore} size={96} />
           <Button variant="default" onClick={() => { onPageChange("pick"); setFinished(false); setCurrent(0); setAnswers({}); setTimeLeft(45 * 60); }}>
             Kembali ke Beranda
           </Button>
@@ -2704,10 +4382,27 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     );
   }
 
-  const examTitle = assessments.find(a => a.status === "Terjadwal")?.title ?? "Asesmen Diagnostik";
-  const total = simulatorQuestions.length;
-  const currentQ = simulatorQuestions[current];
-  const currentOpts = [currentQ.optionA, currentQ.optionB, currentQ.optionC, currentQ.optionD, currentQ.optionE];
+  const examQuestions = (examAssessment?.questions ?? []) as QuestionBankEntry[];
+  const examTitle = examAssessment?.title ?? "Asesmen";
+  const total = examQuestions.length;
+
+  // Guard: if page is exam but no questions loaded, go back to pick
+  if (page === "exam" && total === 0) {
+    return (
+      <AppShell role="student" nav={studentNav} demoData>
+        <div className="flex flex-col items-center gap-4 py-16 text-center">
+          <AlertCircle className="h-10 w-10 text-warning" />
+          <p className="text-[15px] font-bold text-ink">Tidak ada soal di asesmen ini</p>
+          <Button variant="default" onClick={() => onPageChange("pick")}>Kembali ke Daftar Asesmen</Button>
+        </div>
+      </AppShell>
+    );
+  }
+
+  const currentQ = examQuestions[current];
+  const currentOpts = currentQ ? [
+    currentQ.options.A, currentQ.options.B, currentQ.options.C, currentQ.options.D, currentQ.options.E ?? ""
+  ] : ["","","","",""];
   const answeredCount = Object.keys(answers).length;
   const timerMins = String(Math.floor(timeLeft / 60)).padStart(2, "0");
   const timerSecs = String(timeLeft % 60).padStart(2, "0");
@@ -2769,6 +4464,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3">
             {["A", "B", "C", "D", "E"].map((opt, i) => {
+              if (!currentOpts[i]) return null;
               const sel = answers[current] === opt;
               return (
                 <button key={opt} onClick={() => setAnswers(prev => ({ ...prev, [current]: opt }))}
@@ -2852,13 +4548,12 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
       {/* Kiosk warning dialog */}
       <ConfirmDialog
         open={kioskWarning}
-        title="Peringatan: Kiosk Mode"
-        message="Memindahkan fokus atau menekan ESC saat ujian dianggap sebagai pelanggaran. Jika kamu keluar sekarang, asesmen akan otomatis berakhir dan disubmit. Apakah kamu yakin ingin keluar?"
-        confirmLabel="Ya, Akhiri Asesmen"
-        confirmVariant="danger"
-        cancelLabel="Kembali ke Ujian"
+        title="Asesmen Berakhir"
+        message="Kamu telah meninggalkan mode ujian. Asesmen secara otomatis berakhir dan jawaban kamu telah disubmit."
+        confirmLabel="Selesai"
+        confirmVariant="default"
         onConfirm={() => { setKioskWarning(false); autoSubmit(); }}
-        onCancel={() => { setKioskWarning(false); warningShownRef.current = false; }}
+        onCancel={() => { setKioskWarning(false); autoSubmit(); }}
       />
     </div>
   );
@@ -2866,29 +4561,47 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
 
 // ── Student Adaptive ──────────────────────────────────────────────────────────
 
-function AdaptiveSession({ questions, difficulty, onFinish }: { questions: SimulatorQuestion[]; difficulty: string; onFinish: () => void }) {
+function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions: QuestionBankEntry[]; difficulty: string; topic?: string; onFinish: () => void }) {
   const [current, setCurrent] = useState(0);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [done, setDone] = useState(false);
 
-  const sessionQs = questions.slice(0, 5);
-
-  if (sessionQs.length === 0) {
+  if (questions.length === 0) {
     return (
       <div className="space-y-6">
         <EmptyState title="Tidak ada soal tersedia"
-          description={`Tidak ada soal dengan kesulitan "${difficulty}" saat ini.`}
+          description={`Tidak ada soal dengan filter "${topic ?? "Semua"}" / "${difficulty}" saat ini.`}
           action={<Button variant="default" onClick={onFinish}>Kembali</Button>} />
       </div>
     );
   }
 
-  const currentQ = sessionQs[current];
-  const isLast = current === sessionQs.length - 1;
+  const currentQ = questions[current];
+  const isLast = current === questions.length - 1;
 
   if (done) {
-    const correct = sessionQs.filter((q, i) => answers[i] === q.correctAnswer).length;
-    const score = Math.round((correct / sessionQs.length) * 100);
+    const correct = questions.filter((q, i) => answers[i] === q.correctAnswer).length;
+    const score = Math.round((correct / questions.length) * 100);
+
+    // Save incorrect questions from adaptive session
+    const incorrectQs: StoredIncorrectQ[] = questions
+      .map((q, i) => ({ q, i, studentAns: answers[i] }))
+      .filter((item): item is { q: QuestionBankEntry; i: number; studentAns: string } =>
+        item.studentAns !== undefined && item.studentAns !== item.q.correctAnswer)
+      .map(({ q, studentAns }) => ({
+        id: `adaptive_${Date.now()}_${q.id}`,
+        assessmentId: "adaptive",
+        assessmentTitle: `Latihan Adaptif${topic && topic !== "Semua" ? ` – ${topic}` : ""}`,
+        topic: q.topic ?? "",
+        question: q.question,
+        yourAnswer: studentAns,
+        correctAnswer: q.correctAnswer,
+        explanation: q.explanation ?? "",
+        date: new Date().toLocaleDateString("id-ID"),
+        options: { A: q.options.A, B: q.options.B, C: q.options.C, D: q.options.D, ...(q.options.E ? { E: q.options.E } : {}) },
+      }));
+    if (incorrectQs.length > 0) saveIncorrectQuestions(incorrectQs);
+
     return (
       <div className="flex flex-col items-center gap-6 py-16 text-center">
         <div className="flex h-20 w-20 items-center justify-center rounded-full bg-success-light">
@@ -2896,40 +4609,41 @@ function AdaptiveSession({ questions, difficulty, onFinish }: { questions: Simul
         </div>
         <div>
           <h2 className="text-2xl font-bold text-ink">Latihan Selesai!</h2>
-          <p className="text-[14px] text-ink-secondary mt-1">Kesulitan: {difficulty}</p>
+          <p className="text-[14px] text-ink-secondary mt-1">{correct} dari {questions.length} soal benar</p>
         </div>
         <ScoreCircle score={score} size={96} />
-        <p className="text-[13px] text-ink-secondary">{correct} dari {sessionQs.length} soal benar</p>
         <Button variant="default" onClick={onFinish}>Selesai</Button>
       </div>
     );
   }
 
-  const opts = [currentQ.optionA, currentQ.optionB, currentQ.optionC, currentQ.optionD, currentQ.optionE];
+  const opts = [currentQ.options.A, currentQ.options.B, currentQ.options.C, currentQ.options.D, currentQ.options.E ?? ""];
 
   return (
     <div className="space-y-5 max-w-2xl mx-auto">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">Latihan Adaptif · {difficulty}</p>
-          <h2 className="text-[18px] font-bold text-ink">Soal {current + 1} dari {sessionQs.length}</h2>
+          <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">Latihan Adaptif · {topic ?? "Semua"} · {difficulty}</p>
+          <h2 className="text-[18px] font-bold text-ink">Soal {current + 1} dari {questions.length}</h2>
         </div>
         <Button variant="ghost" className="h-8 text-[12px]" onClick={onFinish}>
           <X className="mr-1.5 h-3.5 w-3.5" />Keluar
         </Button>
       </div>
       <div className="h-1.5 rounded-full bg-border overflow-hidden">
-        <div className="h-full bg-primary transition-all" style={{ width: `${((current + 1) / sessionQs.length) * 100}%` }} />
+        <div className="h-full bg-primary transition-all" style={{ width: `${((current + 1) / questions.length) * 100}%` }} />
       </div>
       <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
         <div className="flex items-center gap-2 mb-3">
           <Badge tone="neutral">Soal {current + 1}</Badge>
           <Badge tone={currentQ.difficulty === "Mudah" ? "success" : currentQ.difficulty === "Sedang" ? "warning" : "danger"}>{currentQ.difficulty}</Badge>
+          {currentQ.topic && <Badge tone="neutral">{currentQ.topic}</Badge>}
         </div>
         <p className="text-[15px] font-medium text-ink leading-relaxed">{currentQ.question}</p>
       </div>
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         {["A", "B", "C", "D", "E"].map((opt, i) => {
+          if (!opts[i]) return null;
           const sel = answers[current] === opt;
           return (
             <button key={opt} onClick={() => setAnswers(prev => ({ ...prev, [current]: opt }))}
@@ -2964,58 +4678,141 @@ function AdaptiveSession({ questions, difficulty, onFinish }: { questions: Simul
 
 function StudentAdaptive() {
   const [difficulty, setDifficulty] = useState<"Mudah" | "Sedang" | "Sulit" | "Campur">("Campur");
-  const [showSession, setShowSession] = useState(false);
+  const [selectedTopic, setSelectedTopic] = useState<string>("Semua");
+  const [sessionQs, setSessionQs] = useState<QuestionBankEntry[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [bankQs, setBankQs] = useState<QuestionBankEntry[]>([]);
 
-  const filteredQuestions = difficulty === "Campur"
-    ? simulatorQuestions
-    : simulatorQuestions.filter(q => q.difficulty === difficulty);
+  useEffect(() => { initBankStore(); setBankQs([..._bankStore.questions]); }, []);
 
-  if (showSession) {
-    return <AdaptiveSession questions={filteredQuestions} difficulty={difficulty} onFinish={() => setShowSession(false)} />;
+  const topics = ["Semua", ...Array.from(new Set(bankQs.map(q => q.topic).filter(Boolean)))];
+
+  async function startSession(overrideTopic?: string) {
+    const topic = overrideTopic ?? selectedTopic;
+    setLoading(true);
+    let filtered = bankQs.filter(q => {
+      const matchTopic = topic === "Semua" || q.topic === topic;
+      const matchDiff = difficulty === "Campur" || q.difficulty === difficulty;
+      return matchTopic && matchDiff;
+    });
+
+    if (filtered.length < 5) {
+      try {
+        const res = await fetch("/api/generate-questions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            materialTitle: "Latihan Adaptif",
+            topic: topic === "Semua" ? "Matematika Umum" : topic,
+            subject: topic === "Semua" ? "Umum" : topic,
+            count: Math.max(10, 10 - filtered.length),
+            difficulty: difficulty === "Campur" ? "Sedang" : difficulty,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json() as { questions?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> };
+          if (data.questions?.length) {
+            const generated: QuestionBankEntry[] = data.questions.map((q, i) => ({
+              id: `adaptive_gen_${Date.now()}_${i}`,
+              question: q.question,
+              options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
+              correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
+              explanation: q.explanation ?? "",
+              topic: q.topic ?? (topic === "Semua" ? "Umum" : topic),
+              subtopic: "",
+              bloom: "Menerapkan" as const,
+              difficulty: (["Mudah","Sedang","Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
+              styleType: "TKA" as const,
+              source: "AI Generated",
+              usageCount: 0,
+              successRate: 0,
+              status: "Disetujui" as const,
+              isLocked: false,
+            }));
+            filtered = [...filtered, ...generated];
+          }
+        }
+      } catch { /* continue with what we have */ }
+    }
+
+    const shuffled = [...filtered].sort(() => Math.random() - 0.5).slice(0, 10);
+    setLoading(false);
+    setSessionQs(shuffled);
   }
+
+  if (sessionQs !== null) {
+    return <AdaptiveSession questions={sessionQs} difficulty={difficulty} topic={selectedTopic} onFinish={() => setSessionQs(null)} />;
+  }
+
+  const availableCount = bankQs.filter(q => {
+    const matchTopic = selectedTopic === "Semua" || q.topic === selectedTopic;
+    const matchDiff = difficulty === "Campur" || q.difficulty === difficulty;
+    return matchTopic && matchDiff;
+  }).length;
 
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Latihan Adaptif" title="Latihan Disesuaikan AI"
-        description="AI memilih soal berdasarkan kelemahanmu dan menyesuaikan tingkat kesulitan secara real-time." />
+        description="Pilih topik dan tingkat kesulitan. AI akan menyiapkan soal dari bank soal atau men-generate soal baru jika perlu." />
 
-      <div>
-        <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Tingkat Kesulitan</label>
-        <div className="flex gap-2 flex-wrap">
-          {(["Mudah", "Sedang", "Sulit", "Campur"] as const).map(d => (
-            <button key={d} onClick={() => setDifficulty(d)}
-              className={cn(
-                "rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors border",
-                difficulty === d ? "bg-primary text-white border-primary" : "bg-background text-ink-secondary border-border hover:border-primary/30"
-              )}>
-              {d}
-            </button>
-          ))}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+        <div>
+          <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Topik</label>
+          <div className="flex gap-2 flex-wrap">
+            {topics.map(t => (
+              <button key={t} onClick={() => setSelectedTopic(t)}
+                className={cn("rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors border",
+                  selectedTopic === t ? "bg-primary text-white border-primary" : "bg-background text-ink-secondary border-border hover:border-primary/30")}>
+                {t}
+              </button>
+            ))}
+          </div>
+        </div>
+        <div>
+          <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Tingkat Kesulitan</label>
+          <div className="flex gap-2 flex-wrap">
+            {(["Mudah", "Sedang", "Sulit", "Campur"] as const).map(d => (
+              <button key={d} onClick={() => setDifficulty(d)}
+                className={cn("rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors border",
+                  difficulty === d ? "bg-primary text-white border-primary" : "bg-background text-ink-secondary border-border hover:border-primary/30")}>
+                {d}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      <CatchMeUpCard studentName={studentProfile.name}
-        weakTopics={weakTopics.slice(0, 2).map(t => t.topic)}
-        nextAction="Latihan hari ini fokus pada Diskriminan — 10 soal pilihan AI."
-        onStart={() => { document.getElementById("adaptive-topics")?.scrollIntoView({ behavior: "smooth" }); }} />
-
-      <div id="adaptive-topics" className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-        {weakTopics.slice(0, 3).map(t => (
-          <div key={t.id} className="rounded-card border border-border bg-surface p-4 hover:border-primary/30 hover:shadow-soft transition-all">
-            <div className="flex items-start justify-between gap-2 mb-3">
-              <div>
-                <div className="text-[13px] font-semibold text-ink">{t.topic}</div>
-                <div className="text-[11px] text-ink-secondary">{t.questionsAttempted} soal dicoba</div>
-              </div>
-              <MasteryBadge level={t.mastery} />
-            </div>
-            <TopicBar label="Akurasi" value={t.accuracyRate} />
-            <Button variant="default" className="w-full mt-3 h-7 text-[11px]" onClick={() => setShowSession(true)}>
-              <Zap className="mr-1.5 h-3 w-3" />Latihan Sekarang
-            </Button>
-          </div>
-        ))}
+      <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
+        <p className="text-[12px] text-ink-secondary mb-4">
+          {availableCount > 0
+            ? `${availableCount} soal tersedia di bank soal · AI akan melengkapi jika perlu`
+            : "Belum ada soal di bank soal · AI akan generate soal baru secara otomatis"}
+        </p>
+        <Button variant="default" className="w-full h-10" onClick={() => startSession()} disabled={loading}>
+          {loading ? "AI sedang menyiapkan soal..." : <><Zap className="mr-2 h-4 w-4" />Mulai Latihan Sekarang</>}
+        </Button>
       </div>
+
+      {weakTopics.length > 0 && (
+        <div id="adaptive-topics" className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {weakTopics.slice(0, 3).map(t => (
+            <div key={t.id} className="rounded-card border border-border bg-surface p-4 hover:border-primary/30 hover:shadow-soft transition-all">
+              <div className="flex items-start justify-between gap-2 mb-3">
+                <div>
+                  <div className="text-[13px] font-semibold text-ink">{t.topic}</div>
+                  <div className="text-[11px] text-ink-secondary">{t.questionsAttempted} soal dicoba</div>
+                </div>
+                <MasteryBadge level={t.mastery} />
+              </div>
+              <TopicBar label="Akurasi" value={t.accuracyRate} />
+              <Button variant="default" className="w-full mt-3 h-7 text-[11px]"
+                onClick={() => { setSelectedTopic(t.topic); startSession(t.topic); }}>
+                <Zap className="mr-1.5 h-3 w-3" />Latihan Sekarang
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -3024,12 +4821,21 @@ function StudentAdaptive() {
 
 function StudentReview() {
   const router = useRouter();
+  const [results, setResults] = useState<CompletedResult[]>([]);
   const [reviewDetailId, setReviewDetailId] = useState<string | null>(null);
-  const reviewResult = studentResults.find(r => r.id === reviewDetailId);
+  const [materials, setMaterials] = useState<Material[]>([]);
 
-  // Mock student answers: sq3 wrong (answered C, correct D), sq5 wrong (answered B, correct A)
-  const mockStudentAnswers: Record<string, string> = { sq3: "C", sq5: "B" };
-  const reviewQs = simulatorQuestions.slice(0, 5);
+  useEffect(() => {
+    initResultStore();
+    initAssessStore();
+    initMatStore();
+    setResults([..._resultStore.list]);
+    setMaterials([..._matStore.uploadedMaterials]);
+  }, []);
+
+  const reviewResult = results.find(r => r.id === reviewDetailId) ?? null;
+  const reviewAssessment = reviewResult ? (_assessStore.list.find(a => a.id === reviewResult.assessmentId) ?? null) : null;
+  const reviewQs = (reviewAssessment?.questions ?? []) as QuestionBankEntry[];
 
   return (
     <div className="space-y-6">
@@ -3041,12 +4847,20 @@ function StudentReview() {
         <div className="border-b border-border px-5 py-3.5">
           <h3 className="text-[14px] font-bold text-ink">Semua Asesmen</h3>
         </div>
-        <div className="px-5 py-1">
-          {studentResults.map(r => (
-            <div key={r.id} onClick={() => setReviewDetailId(r.id)} className="cursor-pointer">
-              <RecentAssessmentRow title={r.assessmentTitle} type={r.type} date={r.date}
-                score={r.score} classAvg={r.classAvg} rank={r.rank} />
+        <div className="px-5 py-3">
+          {results.length === 0 ? (
+            <div className="flex flex-col items-center gap-3 py-10 text-center">
+              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
+                <FileText className="h-6 w-6 text-ink-tertiary" />
+              </div>
+              <div>
+                <p className="text-[14px] font-semibold text-ink">Belum ada asesmen diselesaikan</p>
+                <p className="text-[12px] text-ink-secondary mt-1">Hasil asesmen akan muncul di sini setelah kamu mengerjakannya</p>
+              </div>
             </div>
+          ) : results.map(r => (
+            <RecentAssessmentRow key={r.id} title={r.assessmentTitle} type={r.type} date={r.date}
+              score={r.score} onClick={() => setReviewDetailId(r.id)} />
           ))}
         </div>
       </div>
@@ -3067,20 +4881,24 @@ function StudentReview() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-5 space-y-4">
-              {reviewQs.map((q, idx) => {
-                const studentAns = mockStudentAnswers[q.id] ?? q.correctAnswer;
-                const isWrong = studentAns !== q.correctAnswer;
-                const opts: Record<string, string> = { A: q.optionA, B: q.optionB, C: q.optionC, D: q.optionD, E: q.optionE };
+              {reviewQs.length === 0 ? (
+                <p className="text-[13px] text-ink-secondary text-center py-8">Detail soal tidak tersedia</p>
+              ) : reviewQs.map((q, idx) => {
+                const studentAns = reviewResult.answers[String(idx)];
+                const isWrong = studentAns !== undefined && studentAns !== q.correctAnswer;
+                const opts: Record<string, string> = { A: q.options.A, B: q.options.B, C: q.options.C, D: q.options.D, ...(q.options.E ? { E: q.options.E } : {}) };
                 return (
                   <div key={q.id} className={cn("rounded-card border p-4", isWrong ? "border-danger/20 bg-danger-light/30" : "border-border bg-surface")}>
                     <div className="flex items-center gap-2 mb-2">
                       <span className="text-[11px] font-bold text-ink-secondary">Soal {idx + 1}</span>
-                      <Badge tone={isWrong ? "danger" : "success"}>{isWrong ? "Salah" : "Benar"}</Badge>
+                      <Badge tone={studentAns === undefined ? "neutral" : isWrong ? "danger" : "success"}>
+                        {studentAns === undefined ? "Tidak dijawab" : isWrong ? "Salah" : "Benar"}
+                      </Badge>
                       <Badge tone="neutral">{q.topic}</Badge>
                     </div>
                     <p className="text-[13px] font-medium text-ink mb-3">{q.question}</p>
                     <div className="grid grid-cols-1 gap-1.5 mb-3">
-                      {(["A", "B", "C", "D", "E"] as const).map(opt => {
+                      {Object.entries(opts).map(([opt, text]) => {
                         const isCorrect = q.correctAnswer === opt;
                         const isStudentAns = studentAns === opt;
                         const isWrongAns = isStudentAns && !isCorrect;
@@ -3095,36 +4913,52 @@ function StudentReview() {
                               isWrongAns ? "bg-danger text-white" :
                               "bg-border text-ink-secondary"
                             )}>{opt}</span>
-                            <span className="text-[12px] text-ink flex-1">{opts[opt]}</span>
-                            {isWrongAns && <span className={cn("text-[10px] font-semibold shrink-0", "text-danger")}>Jawaban kamu (Salah)</span>}
+                            <span className="text-[12px] text-ink flex-1">{text}</span>
+                            {isWrongAns && <span className="text-[10px] font-semibold shrink-0 text-danger">Jawaban kamu (Salah)</span>}
                             {isCorrect && <span className="text-[10px] text-success font-semibold shrink-0">Jawaban benar</span>}
                           </div>
                         );
                       })}
                     </div>
-                    <div className="rounded-[6px] bg-background border border-border p-2.5 space-y-1.5">
-                      <div className="flex items-center gap-1.5">
-                        <span className={cn("text-[11px] font-semibold", isWrong ? "text-danger" : "text-success")}>
-                          {isWrong ? `Jawaban kamu: ${studentAns} (Salah)` : `Jawaban kamu: ${studentAns} (Benar)`}
-                        </span>
+                    {q.explanation && (
+                      <div className="rounded-[6px] bg-background border border-border p-2.5">
+                        <p className="text-[11px] text-ink leading-relaxed">{q.explanation}</p>
+                        {q.sourceTitle && (
+                          <button onClick={() => {
+                            const mat = materials.find(m => m.title.toLowerCase() === q.sourceTitle?.toLowerCase());
+                            if (mat) {
+                              const file = _matStore.materialFiles[mat.id];
+                              if (file) {
+                                const url = URL.createObjectURL(file);
+                                const a = document.createElement("a");
+                                a.href = url; a.download = file.name || mat.title;
+                                document.body.appendChild(a); a.click();
+                                document.body.removeChild(a);
+                                URL.revokeObjectURL(url);
+                              } else {
+                                const dataUrl = lsGet<string>(`catchup_file_${mat.id}`);
+                                if (dataUrl) {
+                                  const a = document.createElement("a");
+                                  a.href = dataUrl; a.download = mat.title;
+                                  document.body.appendChild(a); a.click();
+                                  document.body.removeChild(a);
+                                }
+                              }
+                            }
+                          }}
+                            className="inline-flex items-center gap-1 mt-2 rounded-[4px] border border-primary/30 bg-primary-soft px-1.5 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/10 transition-colors cursor-pointer">
+                            <BookOpen className="h-3 w-3 shrink-0" />
+                            Sumber: {q.sourceTitle}{q.sourcePage ? `, hal. ${q.sourcePage}` : ""}
+                          </button>
+                        )}
                       </div>
-                      {isWrong && (
-                        <p className="text-[11px] text-ink-secondary">Jawaban benar: <strong className="text-success">{q.correctAnswer}</strong></p>
-                      )}
-                      <p className="text-[11px] text-ink leading-relaxed">{q.explanation}</p>
-                      <div className="flex items-center gap-1.5 pt-1">
-                        <span className="text-[10px] text-ink-tertiary">Referensi:</span>
-                        <span className="inline-flex items-center gap-1 rounded-[4px] border border-primary/20 bg-primary-soft px-2 py-0.5 text-[10px] font-medium text-primary">
-                          {q.topic}
-                        </span>
-                      </div>
-                    </div>
+                    )}
                   </div>
                 );
               })}
               <div className="pt-2">
                 <Button variant="default" className="w-full h-9 text-[13px]" onClick={() => { setReviewDetailId(null); router.push("/student/adaptive"); }}>
-                  <Zap className="mr-1.5 h-4 w-4" />Pelajari Ulang Topik Ini
+                  <Zap className="mr-1.5 h-4 w-4" />Latihan Soal Serupa
                 </Button>
               </div>
             </div>
@@ -3160,13 +4994,59 @@ function StudentWeakTopics() {
 // ── Student Incorrect ─────────────────────────────────────────────────────────
 
 function StudentIncorrect() {
+  const [questions, setQuestions] = useState<StoredIncorrectQ[]>([]);
+  useEffect(() => { initIncorrectStore(); setQuestions([..._incorrectStore.questions]); }, []);
+
+  function handleDelete(id: string) {
+    deleteIncorrectQuestion(id);
+    setQuestions(prev => prev.filter(q => q.id !== id));
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Soal Salah" title="Soal yang Perlu Dipelajari Ulang"
         description="Pelajari kembali soal yang salah dan pahami pembahasan." />
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {incorrectQuestions.map(q => <IncorrectQuestionCard key={q.id} q={q} />)}
-      </div>
+      {questions.length === 0 ? (
+        <div className="flex flex-col items-center gap-3 py-16 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
+            <CheckCircle2 className="h-6 w-6 text-success" />
+          </div>
+          <p className="text-[14px] font-semibold text-ink">Belum ada soal salah</p>
+          <p className="text-[12px] text-ink-secondary">Soal yang salah saat asesmen akan muncul di sini</p>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {questions.map(q => (
+            <div key={q.id} className="rounded-card border border-danger/20 bg-surface p-4 space-y-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <Badge tone="neutral">{q.topic}</Badge>
+                <span className="text-[10px] text-ink-tertiary">{q.assessmentTitle} · {q.date}</span>
+                <button onClick={() => handleDelete(q.id)}
+                  className="ml-auto flex items-center gap-1 rounded-[4px] px-2 py-0.5 text-[10px] font-semibold text-ink-tertiary hover:text-danger hover:bg-danger-light transition-colors">
+                  <X className="h-3 w-3" />Hapus
+                </button>
+              </div>
+              <p className="text-[13px] font-medium text-ink leading-snug">{q.question}</p>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="rounded-[6px] bg-danger-light border border-danger/20 p-2.5">
+                  <div className="text-[9px] font-bold uppercase text-danger mb-1">Jawaban kamu</div>
+                  <div className="text-[11px] text-ink">{q.yourAnswer}: {q.options[q.yourAnswer] ?? ""}</div>
+                </div>
+                <div className="rounded-[6px] bg-success-light border border-success/20 p-2.5">
+                  <div className="text-[9px] font-bold uppercase text-success mb-1">Jawaban benar</div>
+                  <div className="text-[11px] text-ink">{q.correctAnswer}: {q.options[q.correctAnswer] ?? ""}</div>
+                </div>
+              </div>
+              {q.explanation && (
+                <div className="rounded-[6px] bg-background border border-border p-2.5">
+                  <div className="text-[10px] font-semibold text-ink-secondary mb-1">Pembahasan</div>
+                  <p className="text-[11px] text-ink leading-relaxed">{q.explanation}</p>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -3178,7 +5058,60 @@ function StudentTutor() {
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [localMats, setLocalMats] = useState<Material[]>([]);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
+  const messagesEndRef = React.useRef<HTMLDivElement>(null);
+
+  useEffect(() => { initMatStore(); setLocalMats([..._matStore.uploadedMaterials]); }, []);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  function downloadMat(mat: Material) {
+    const file = _matStore.materialFiles[mat.id];
+    if (file) {
+      const url = URL.createObjectURL(file);
+      const a = document.createElement("a");
+      a.href = url; a.download = file.name || mat.title;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a); URL.revokeObjectURL(url);
+      return;
+    }
+    const dataUrl = lsGet<string>(`catchup_file_${mat.id}`);
+    if (dataUrl) {
+      const a = document.createElement("a");
+      a.href = dataUrl; a.download = mat.title;
+      document.body.appendChild(a); a.click();
+      document.body.removeChild(a);
+    }
+  }
+
+  function renderContent(content: string) {
+    const parts = content.split(/(\[Sumber:[^\]]*\])/g);
+    if (parts.length <= 1) return <>{content}</>;
+    return (
+      <>
+        {parts.map((part, i) => {
+          const match = part.match(/^\[Sumber:\s*([^,\]]+)/);
+          if (match) {
+            const title = match[1].trim();
+            const mat = localMats.find(m => m.title.toLowerCase().includes(title.toLowerCase()) || title.toLowerCase().includes(m.title.toLowerCase()));
+            return (
+              <button key={i}
+                onClick={() => mat && downloadMat(mat)}
+                title={mat ? `Unduh: ${mat.title}` : title}
+                className="inline-flex items-center gap-1 rounded-[4px] border border-primary/30 bg-primary-soft px-1.5 py-0.5 text-[11px] font-semibold text-primary hover:bg-primary/10 transition-colors cursor-pointer mx-0.5 align-middle">
+                <BookOpen className="h-3 w-3 shrink-0" />
+                {part}
+              </button>
+            );
+          }
+          return <React.Fragment key={i}>{part}</React.Fragment>;
+        })}
+      </>
+    );
+  }
 
   async function send(text: string) {
     if (!text.trim() || isTyping) return;
@@ -3201,7 +5134,7 @@ function StudentTutor() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           messages: [...history, { role: "user", content: text }],
-          materials: materials.map(m => ({ title: m.title, topic: m.subject ?? "" })),
+          materials: localMats.map(m => ({ title: m.title, topic: m.subject ?? "" })),
         }),
       });
 
@@ -3247,8 +5180,24 @@ function StudentTutor() {
       <GroundingNotice />
       <div role="log" aria-label="Riwayat percakapan" aria-live="polite"
         className="flex-1 overflow-y-auto space-y-4 rounded-card border border-border bg-surface p-5 shadow-sm">
-        {messages.map(m => <ChatBubble key={m.id} message={m} grounded={m.grounded !== false} />)}
+        {messages.map(m => {
+          if (m.role === "user") return <ChatBubble key={m.id} message={m} grounded />;
+          return (
+            <div key={m.id} className="flex gap-2.5">
+              <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary text-white mt-1">
+                <Sparkles className="h-3.5 w-3.5" />
+              </div>
+              <div className="max-w-[82%]">
+                <div className="rounded-[12px] rounded-tl-sm bg-surface border border-border px-4 py-3 text-[13px] leading-relaxed text-ink shadow-sm whitespace-pre-wrap">
+                  {renderContent(m.content)}
+                </div>
+                {m.timestamp && <p className="text-[10px] text-ink-tertiary mt-1">{m.timestamp}</p>}
+              </div>
+            </div>
+          );
+        })}
         {isTyping && messages[messages.length - 1]?.content === "" && <TypingIndicator />}
+        <div ref={messagesEndRef} />
         {apiError && (
           <div className="flex items-center gap-2 rounded-[10px] border border-danger/20 bg-danger-light px-4 py-2.5">
             <AlertCircle className="h-4 w-4 shrink-0 text-danger" />
@@ -3298,14 +5247,26 @@ function StudentProgress() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="col-span-1 lg:col-span-2 rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Tren Nilai</h3>
-          <p className="text-[12px] text-ink-secondary mb-4">September hingga sekarang</p>
-          <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={100} />
+          <p className="text-[12px] text-ink-secondary mb-4">Berdasarkan riwayat asesmen</p>
+          {scoreTrend.length === 0 ? (
+            <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
+              <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah mengerjakan asesmen</p>
+            </div>
+          ) : (
+            <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={100} />
+          )}
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Penguasaan Materi</h3>
-          <div className="space-y-3">
-            {subjectMastery.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
-          </div>
+          {subjectMastery.length === 0 ? (
+            <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
+              <p className="text-[12px] text-ink-tertiary">Belum ada data penguasaan</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {subjectMastery.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -3384,7 +5345,7 @@ function ParentApp({ page }: { page: string }) {
     notifications: <ParentNotificationsPage />,
   };
   return (
-    <AppShell role="parent" nav={parentNav}>
+    <AppShell role="parent" nav={parentNav} demoData>
       {screens[page] ?? <ParentDashboard />}
     </AppShell>
   );
@@ -3531,11 +5492,23 @@ function ParentRecommendations() {
     <div className="space-y-6">
       <PageHeader eyebrow="Rekomendasi Pengajaran" title={`Saran Belajar dari ${currentTeacher.name}`}
         description={`Rekomendasi pengajaran untuk ${studentProfile.name} berdasarkan analisis AI dan penilaian guru.`} />
-      <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
-        <p>{studentProfile.name.split(" ")[0]} paling sering salah di <strong className="text-ink">{parentRecs[0].topic}</strong> ({parentRecs[0].wrongCount}× salah) dan <strong className="text-ink">{parentRecs[1].topic}</strong> ({parentRecs[1].wrongCount}× salah). Fokus latihan pada topik-topik ini.</p>
-      </AIInsightPanel>
+      {parentRecs.length >= 2 && (
+        <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
+          <p>{studentProfile.name.split(" ")[0]} paling sering salah di <strong className="text-ink">{parentRecs[0].topic}</strong> ({parentRecs[0].wrongCount}× salah) dan <strong className="text-ink">{parentRecs[1].topic}</strong> ({parentRecs[1].wrongCount}× salah). Fokus latihan pada topik-topik ini.</p>
+        </AIInsightPanel>
+      )}
       <div className="space-y-4">
-        {parentRecs.slice(0, 2).map(r => <RecommendationCard key={r.id} rec={r} />)}
+        {parentRecs.length === 0 ? (
+          <div className="flex flex-col items-center gap-3 py-10 text-center">
+            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
+              <Lightbulb className="h-6 w-6 text-ink-tertiary" />
+            </div>
+            <p className="text-[14px] font-semibold text-ink">Belum ada rekomendasi</p>
+            <p className="text-[12px] text-ink-secondary">Rekomendasi akan muncul setelah ada hasil asesmen</p>
+          </div>
+        ) : (
+          parentRecs.slice(0, 2).map(r => <RecommendationCard key={r.id} rec={r} />)
+        )}
       </div>
     </div>
   );
@@ -3583,7 +5556,7 @@ function AdminApp({ page }: { page: string }) {
     settings: <AdminSettings />,
   };
   return (
-    <AppShell role="admin" nav={adminNav}>
+    <AppShell role="admin" nav={adminNav} demoData>
       {screens[page] ?? <AdminDashboard />}
     </AppShell>
   );

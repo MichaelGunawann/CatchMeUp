@@ -1,7 +1,12 @@
 export const dynamic = "force-dynamic";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import Groq from "groq-sdk";
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY ?? "");
+let _groq: Groq | null = null;
+function getGroq(): Groq {
+  if (_groq) return _groq;
+  _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  return _groq;
+}
 
 export async function POST(req: Request) {
   const { materialTitle, topic, subject, count = 5, difficulty = "Sedang" } = await req.json() as {
@@ -30,13 +35,17 @@ Pastikan:
 - Pertanyaan jelas dan sesuai level SMA Indonesia
 - Ada 4 pilihan (A, B, C, D) per soal
 - Penjelasan jawaban lengkap dan edukatif
-- Jawaban tersebar merata (tidak selalu A)`;
-
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
+- Jawaban tersebar merata (tidak selalu A)
+- Jangan include sourceTitle atau sourcePage (tidak ada materi spesifik)`;
 
   try {
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const completion = await getGroq().chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 8192,
+    });
+
+    const text = completion.choices[0].message.content ?? "[]";
     const jsonMatch = text.match(/\[[\s\S]*\]/);
     const questions = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
     return Response.json({ questions });

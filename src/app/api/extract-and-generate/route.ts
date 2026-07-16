@@ -1,7 +1,18 @@
 export const dynamic = "force-dynamic";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import Groq from "groq-sdk";
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY ?? "");
+let _groq: Groq | null = null;
+function getGroq(): Groq {
+  if (_groq) return _groq;
+  _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  return _groq;
+}
+
+async function extractPdfText(buffer: Buffer): Promise<string> {
+  const { extractText } = await import("unpdf");
+  const { text } = await extractText(new Uint8Array(buffer), { mergePages: true });
+  return text.trim();
+}
 
 export async function POST(req: Request) {
   const formData = await req.formData();
@@ -10,69 +21,75 @@ export async function POST(req: Request) {
   const materialTitle = (formData.get("materialTitle") as string) ?? "";
   const subject = (formData.get("subject") as string) ?? "";
 
-  if (!file) {
-    return Response.json({ error: "File tidak ditemukan.", questions: [] }, { status: 400 });
-  }
+  if (!file) return Response.json({ error: "File tidak ditemukan.", questions: [] }, { status: 400 });
+  if (!process.env.GROQ_API_KEY) return Response.json({ error: "GROQ_API_KEY belum diset di .env.local", questions: [] }, { status: 500 });
 
-  if (!process.env.GOOGLE_AI_API_KEY) {
-    return Response.json({ error: "API key belum diset di .env.local", questions: [] }, { status: 500 });
-  }
-
-  const name = file.name.toLowerCase();
   const buffer = Buffer.from(await file.arrayBuffer());
-
-  const prompt = `Kamu adalah pembuat soal profesional untuk ujian SMA Indonesia.
-Berdasarkan isi dokumen materi "${materialTitle}" (${subject}), buatkan tepat ${count} soal pilihan ganda yang:
-- Menguji pemahaman isi materi secara langsung
-- Sesuai level SMA Indonesia
-- Penjelasan merujuk ke konten dokumen
-
-Kembalikan HANYA JSON array tanpa teks lain:
-[
-  {
-    "question": "Pertanyaan berdasarkan isi materi",
-    "options": { "A": "...", "B": "...", "C": "...", "D": "..." },
-    "correctAnswer": "A",
-    "explanation": "Penjelasan singkat mengapa jawaban ini benar",
-    "topic": "Topik dari materi",
-    "difficulty": "Mudah"
-  }
-]`;
+  const name = file.name.toLowerCase();
+  let extractedText = "";
 
   try {
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-    let result;
-
     if (name.endsWith(".pdf")) {
-      // Gemini reads PDF natively — no pdf-parse needed
-      result = await model.generateContent([
-        { inlineData: { mimeType: "application/pdf", data: buffer.toString("base64") } },
-        { text: prompt },
-      ]);
+      extractedText = await extractPdfText(buffer);
     } else if (name.endsWith(".docx")) {
       const mammoth = await import("mammoth");
-      const extracted = await mammoth.extractRawText({ buffer });
-      const text = extracted.value.trim().slice(0, 12000);
-      if (!text) return Response.json({ error: "Dokumen DOCX kosong atau tidak dapat dibaca.", questions: [] }, { status: 400 });
-      result = await model.generateContent(`${prompt}\n\nIsi materi:\n${text}`);
+      const result = await mammoth.extractRawText({ buffer });
+      extractedText = result.value.trim();
     } else if (name.endsWith(".txt")) {
-      const text = (await file.text()).slice(0, 12000);
-      result = await model.generateContent(`${prompt}\n\nIsi materi:\n${text}`);
+      extractedText = await file.text();
     } else {
       return Response.json({
         error: `Format "${name.split(".").pop()?.toUpperCase()}" tidak didukung. Gunakan PDF, DOCX, atau TXT.`,
         questions: [],
       }, { status: 400 });
     }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : "Unknown";
+    return Response.json({ error: `Gagal membaca file: ${msg}`, questions: [] }, { status: 500 });
+  }
 
-    const text = result.response.text();
+  extractedText = extractedText.replace(/\s+/g, " ").trim().slice(0, 10000);
+  if (!extractedText) return Response.json({ error: "File kosong atau tidak dapat dibaca.", questions: [] }, { status: 400 });
+
+  const prompt = `Kamu adalah pembuat soal profesional untuk ujian SMA Indonesia.
+Berikut adalah isi materi dari file "${materialTitle}" (${subject}):
+
+---
+${extractedText}
+---
+
+Berdasarkan isi materi di atas, buatkan tepat ${count} soal pilihan ganda yang menguji pemahaman isi materi secara langsung.
+
+Format WAJIB — kembalikan HANYA JSON array, tanpa teks lain:
+[
+  {
+    "question": "Pertanyaan berdasarkan isi materi",
+    "options": { "A": "...", "B": "...", "C": "...", "D": "..." },
+    "correctAnswer": "B",
+    "explanation": "Penjelasan singkat mengapa jawaban ini benar, merujuk ke materi",
+    "topic": "Topik spesifik dari materi",
+    "difficulty": "Sedang",
+    "sourceTitle": "${materialTitle}",
+    "sourcePage": 1
+  }
+]
+
+Pastikan:
+- sourceTitle harus sama dengan "${materialTitle}"
+- sourcePage harus angka halaman di materi (estimasi atau asli jika terlihat)`;
+
+  try {
+    const completion = await getGroq().chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 4096,
+    });
+
+    const text = completion.choices[0].message.content ?? "[]";
     const jsonMatch = text.match(/\[[\s\S]*\]/);
     const questions = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
 
-    if (!questions.length) {
-      return Response.json({ error: "AI tidak menghasilkan soal. Coba lagi.", questions: [] }, { status: 500 });
-    }
-
+    if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal. Coba lagi.", questions: [] }, { status: 500 });
     return Response.json({ questions });
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";

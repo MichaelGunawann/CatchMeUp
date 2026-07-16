@@ -1,7 +1,12 @@
 export const dynamic = "force-dynamic";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import Groq from "groq-sdk";
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY ?? "");
+let _groq: Groq | null = null;
+function getGroq(): Groq {
+  if (_groq) return _groq;
+  _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  return _groq;
+}
 
 export async function POST(req: Request) {
   const { materialTitle, topic, subject } = await req.json() as {
@@ -20,17 +25,20 @@ Berikan ringkasan dalam format JSON berikut (HANYA JSON, tanpa teks lain):
   "keyPoints": ["poin 1", "poin 2", "poin 3", "poin 4", "poin 5"],
   "prerequisites": ["prasyarat 1", "prasyarat 2"],
   "estimatedStudyTime": "X menit",
-  "difficultyLevel": "Mudah|Sedang|Sulit"
+  "difficultyLevel": "Mudah"
 }`;
 
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-
   try {
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const completion = await getGroq().chat.completions.create({
+      model: "llama-3.1-8b-instant",
+      messages: [{ role: "user", content: prompt }],
+      max_tokens: 1024,
+    });
+
+    const text = completion.choices[0].message.content ?? "{}";
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    const summary = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
-    return Response.json(summary);
+    const result = jsonMatch ? JSON.parse(jsonMatch[0]) : {};
+    return Response.json(result);
   } catch (err) {
     const msg = err instanceof Error ? err.message : "Unknown error";
     return Response.json({ error: msg }, { status: 500 });

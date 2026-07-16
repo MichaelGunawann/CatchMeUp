@@ -114,7 +114,7 @@ export function StatCard({
           </div>
         )}
       </div>
-      <div className={cn("text-[28px] font-bold leading-none tabular-nums mb-2", valueColor)}>{value}</div>
+      <div className={cn("text-[28px] font-bold leading-none tabular-nums mb-2", valueColor)} suppressHydrationWarning>{value}</div>
       <div className="flex items-center gap-1.5">
         {trend === "up" && <TrendingUp className="h-3 w-3 text-success" />}
         {trend === "down" && <TrendingDown className="h-3 w-3 text-danger" />}
@@ -1029,9 +1029,10 @@ export function QuestionBankRow({
         <div className="flex-1 min-w-0">
           <p className="text-[13px] font-medium text-ink leading-snug line-clamp-2">{entry.question}</p>
           <div className="flex flex-wrap items-center gap-2 mt-2.5">
-            <BloomBadge level={entry.bloom} />
-            <DifficultyBadge difficulty={entry.difficulty} />
+            <Badge tone="primary">{entry.topic}</Badge>
             <Badge tone="neutral">{entry.styleType}</Badge>
+            <DifficultyBadge difficulty={entry.difficulty} />
+            <BloomBadge level={entry.bloom} />
             <Badge tone={entry.status === "Disetujui" ? "success" : entry.status === "Perlu Ditinjau" ? "warning" : "danger"}>
               {entry.status}
             </Badge>
@@ -1206,33 +1207,58 @@ export function IncorrectQuestionCard({
 
 export function RecommendationCard({
   rec,
+  done = false,
+  onToggle,
 }: {
   rec: TeachingRecommendation;
+  done?: boolean;
+  onToggle?: () => void;
 }) {
-  const priorityStyle = {
-    Tinggi: { bg: "bg-danger-light", text: "text-danger", border: "border-danger/20" },
-    Sedang: { bg: "bg-warning-light", text: "text-warning", border: "border-warning/20" },
-    Rendah: { bg: "bg-background", text: "text-ink-secondary", border: "border-border" },
-  }[rec.priority];
+  const priorityStyle = done
+    ? { bg: "bg-success/5", text: "text-success", border: "border-success/20" }
+    : {
+        Tinggi: { bg: "bg-danger-light", text: "text-danger", border: "border-danger/20" },
+        Sedang: { bg: "bg-warning-light", text: "text-warning", border: "border-warning/20" },
+        Rendah: { bg: "bg-background", text: "text-ink-secondary", border: "border-border" },
+      }[rec.priority];
 
   return (
     <div className={cn(
-      "rounded-card border p-4 space-y-3",
-      priorityStyle.bg, priorityStyle.border
+      "rounded-card border p-4 space-y-3 transition-all",
+      priorityStyle.bg, priorityStyle.border,
+      done && "opacity-70"
     )}>
       <div className="flex items-start justify-between gap-2">
         <div className="flex-1">
           <div className="flex items-center gap-2 flex-wrap mb-1">
-            <span className="text-[13px] font-bold text-ink">{rec.topic}</span>
-            <Badge tone={rec.priority === "Tinggi" ? "danger" : rec.priority === "Sedang" ? "warning" : "neutral"}>
-              Prioritas {rec.priority}
-            </Badge>
+            <span className={cn("text-[13px] font-bold text-ink", done && "line-through text-ink-secondary")}>{rec.topic}</span>
+            {done ? (
+              <Badge tone="success">Selesai Dijelaskan</Badge>
+            ) : (
+              <Badge tone={rec.priority === "Tinggi" ? "danger" : rec.priority === "Sedang" ? "warning" : "neutral"}>
+                Prioritas {rec.priority}
+              </Badge>
+            )}
           </div>
           <p className="text-[12px] text-ink-secondary leading-snug">{rec.issue}</p>
         </div>
-        <div className="shrink-0 text-right">
-          <div className="text-[18px] font-bold text-ink">{rec.affectedStudents}</div>
-          <div className="text-[10px] text-ink-tertiary">siswa</div>
+        <div className="flex items-start gap-3 shrink-0">
+          <div className="text-right">
+            <div className="text-[18px] font-bold text-ink">{rec.affectedStudents}</div>
+            <div className="text-[10px] text-ink-tertiary">siswa</div>
+          </div>
+          <button
+            onClick={onToggle}
+            title={done ? "Tandai belum selesai" : "Tandai sudah dijelaskan"}
+            className={cn(
+              "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border-2 transition-all",
+              done
+                ? "border-success bg-success text-white hover:bg-success/80"
+                : "border-border bg-background text-transparent hover:border-success hover:text-success"
+            )}
+          >
+            <CheckCircle2 className="h-4 w-4" />
+          </button>
         </div>
       </div>
       <div className="rounded-[8px] bg-surface border border-border/60 p-3">
@@ -1241,7 +1267,7 @@ export function RecommendationCard({
           <span className="text-[11px] font-semibold text-primary">Saran AI</span>
           <span className="text-[11px] text-ink-tertiary ml-auto">{rec.estimatedTime}</span>
         </div>
-        <p className="text-[12px] text-ink leading-relaxed">{rec.suggestion}</p>
+        <p className={cn("text-[12px] text-ink leading-relaxed", done && "text-ink-secondary")}>{rec.suggestion}</p>
       </div>
     </div>
   );

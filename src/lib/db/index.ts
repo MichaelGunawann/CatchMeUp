@@ -69,56 +69,84 @@ function makeInitials(name: string) {
   return name.split(" ").slice(0, 2).map(n => n[0]).join("").toUpperCase();
 }
 
-const studentNames = [
-  "Sari Dewi", "Budi Santoso", "Citra Lestari", "Deni Rahmat", "Eko Prasetyo",
-  "Fira Nanda", "Gilang Ramadhan", "Hana Pertiwi", "Ilham Nugroho", "Joko Susanto",
-  "Kartika Wulandari", "Lukman Hakim", "Maya Indah", "Nanda Putra", "Okta Firmansyah",
-  "Putri Rahayu", "Rizki Maulana", "Sinta Maharani", "Teguh Wibowo", "Ulfa Rosyidah",
-  "Vino Setiawan", "Andi Pratama", "Wahyu Hidayat", "Xena Permata", "Yudi Prasetyo",
-  "Zara Ananda", "Arif Budiman", "Bella Safitri", "Candra Kusuma", "Dewi Ratnasari",
-  "Erwin Cahyono", "Fauzi Rizaldi",
-];
-
-const rawScores = [94, 91, 88, 87, 84, 83, 81, 79, 78, 76, 75, 73, 72, 71, 70, 68, 67, 65, 64, 63, 63, 85, 58, 56, 55, 53, 52, 51, 50, 47, 43, 38];
-const rawXP =    [2400,2200,2050,1980,1870,1820,1760,1680,1620,1540,1490,1430,1380,1340,1290,1240,1190,1140,1090,1050,1040,1850,980,940,890,840,800,770,740,690,640,580];
-
 function getStatus(score: number): StudentStatus {
   if (score >= 63) return "On Track";
   if (score >= 50) return "Need Review";
   return "At Risk";
 }
 
-const rankByScore: Map<number, number> = new Map(
-  [...Array(rawScores.length).keys()]
-    .sort((a, b) => rawScores[b] - rawScores[a])
-    .map((originalIdx, sortedPos) => [originalIdx, sortedPos + 1])
+function buildStudents(
+  names: string[], scores: number[], xps: number[],
+  streaks: number[], totals: number[],
+  classId: string, className: string, idPrefix: string
+): Student[] {
+  const rankMap = new Map(
+    [...Array(scores.length).keys()]
+      .sort((a, b) => scores[b] - scores[a])
+      .map((idx, pos) => [idx, pos + 1])
+  );
+  return names.map((name, i) => ({
+    id: `${idPrefix}${i + 1}`,
+    name,
+    initials: makeInitials(name),
+    nis: `${220000 + parseInt(idPrefix.replace(/\D/g, "") || "0") * 100 + i + 1}`,
+    classId,
+    className,
+    avgScore: scores[i],
+    status: getStatus(scores[i]),
+    xp: xps[i],
+    streak: streaks[i] ?? 0,
+    rank: rankMap.get(i) ?? i + 1,
+    totalAssessments: totals[i] ?? 8,
+  }));
+}
+
+// ── XI IPA 2 (cls1) — 32 students ──
+const cls1Students = buildStudents(
+  ["Sari Dewi","Budi Santoso","Citra Lestari","Deni Rahmat","Eko Prasetyo","Fira Nanda","Gilang Ramadhan","Hana Pertiwi","Ilham Nugroho","Joko Susanto","Kartika Wulandari","Lukman Hakim","Maya Indah","Nanda Putra","Okta Firmansyah","Putri Rahayu","Rizki Maulana","Sinta Maharani","Teguh Wibowo","Ulfa Rosyidah","Vino Setiawan","Andi Pratama","Wahyu Hidayat","Xena Permata","Yudi Prasetyo","Zara Ananda","Arif Budiman","Bella Safitri","Candra Kusuma","Dewi Ratnasari","Erwin Cahyono","Fauzi Rizaldi"],
+  [94,91,88,87,84,83,81,79,78,76,75,73,72,71,70,68,67,65,64,63,63,85,58,56,55,53,52,51,50,47,43,38],
+  [2400,2200,2050,1980,1870,1820,1760,1680,1620,1540,1490,1430,1380,1340,1290,1240,1190,1140,1090,1050,1040,1850,980,940,890,840,800,770,740,690,640,580],
+  [7,5,12,3,8,4,6,2,9,11,5,3,7,4,2,5,1,3,6,2,4,7,1,2,0,3,1,2,0,1,0,0],
+  [12,12,12,11,12,11,12,10,11,12,11,10,12,11,12,11,10,12,11,10,11,12,10,9,10,9,8,9,8,7,6,5],
+  "cls1", "XI IPA 2", "s"
 );
 
-export const students: Student[] = studentNames.map((name, i) => ({
-  id: `s${i + 1}`,
-  name,
-  initials: makeInitials(name),
-  nis: `${220000 + i + 1}`,
-  classId: "cls1",
-  className: "XI IPA 2",
-  avgScore: rawScores[i],
-  status: getStatus(rawScores[i]),
-  xp: rawXP[i],
-  streak: [7, 5, 12, 3, 8, 4, 6, 2, 9, 11, 5, 3, 7, 4, 2, 5, 1, 3, 6, 2, 4, 7, 1, 2, 0, 3, 1, 2, 0, 1, 0, 0][i] ?? 0,
-  rank: rankByScore.get(i) ?? i + 1,
-  totalAssessments: [12, 12, 12, 11, 12, 11, 12, 10, 11, 12, 11, 10, 12, 11, 12, 11, 10, 12, 11, 10, 11, 12, 10, 9, 10, 9, 8, 9, 8, 7, 6, 5][i] ?? 8,
-}));
+// ── XI IPA 1 (cls2) — 34 students, avg ≈ 74 ──
+const cls2Students = buildStudents(
+  ["Ahmad Fauzi","Anisa Rahma","Bagus Setiawan","Cantika Dewi","Daffa Putra","Erika Yuliana","Fadhil Rahman","Gita Safira","Hendra Gunawan","Indira Sari","Joni Perdana","Kartini Wahyu","Luthfi Hakim","Mia Zulfatun","Nabil Mustofa","Ovi Lestari","Pandu Nugroho","Qonita Firdaus","Raka Wirawan","Salsabila Putri","Taufik Hidayat","Ummu Kultsum","Vicky Ramadhan","Winda Astuti","Yovanka Putri","Zaid Maulana","Alfian Hidayat","Bunga Pratiwi","Cahyo Nugroho","Dinda Maharani","Erfan Budi","Faiza Humaira","Gilang Saputra","Hanifah Zahra"],
+  [96,93,91,89,87,85,84,82,81,80,79,77,76,75,74,73,71,70,69,68,67,66,65,63,62,60,58,56,54,52,50,48,45,43],
+  [2500,2350,2180,2060,1950,1880,1800,1720,1660,1590,1530,1460,1400,1350,1300,1250,1200,1150,1100,1060,1010,980,940,900,860,820,780,740,700,660,620,580,540,500],
+  [9,6,14,4,10,5,7,3,11,12,6,4,8,5,3,6,2,4,7,3,5,8,2,3,1,4,2,3,1,2,1,0,1,0],
+  [12,12,12,12,11,12,12,11,11,12,11,11,12,11,12,11,11,12,11,11,12,11,10,10,10,9,9,8,9,8,7,7,6,5],
+  "cls2", "XI IPA 1", "c2s"
+);
 
-export const studentProfile = students.find(s => s.name === "Andi Pratama") ?? students[21];
+// ── XI IPA 3 (cls3) — 30 students, avg ≈ 61 ──
+const cls3Students = buildStudents(
+  ["Aditya Pranata","Berliana Sari","Ciko Ramadhan","Dhea Anjani","Evan Naufal","Feby Andriani","Galih Permana","Hesty Wulandari","Irfan Setyawan","Jenni Rahayu","Kevin Ardian","Lana Krisna","Mutiara Dewi","Naufal Syarif","Olivia Pramesti","Pio Satria","Qisthi Amalia","Rendy Prabowo","Suci Romadhoni","Tri Wahyuni","Ulfatun Hasanah","Vela Sita","Wahyu Prasetia","Xandra Maulida","Yoga Pratama","Zelika Amanda","Andri Setiawan","Bintang Ramdhan","Cantiq Safira","Dion Purnama"],
+  [88,85,82,79,77,74,72,70,68,66,64,62,61,60,58,57,55,53,51,49,47,45,43,41,39,37,35,33,30,27],
+  [2200,2000,1830,1700,1600,1510,1440,1370,1300,1230,1170,1100,1060,1010,960,920,870,830,780,740,700,660,620,580,540,500,460,420,380,340],
+  [6,4,9,2,7,3,5,1,8,9,4,2,6,3,1,4,0,2,5,1,3,6,0,1,0,2,0,1,0,0],
+  [11,11,11,10,11,10,11,9,10,11,10,9,11,10,11,10,9,10,10,9,10,9,8,8,9,8,7,7,6,5],
+  "cls3", "XI IPA 3", "c3s"
+);
 
-// On Track: scores ≥ 63 → 22 students; Need Review: 50-62 → 7; At Risk: <50 → 3
-export const classStats = {
-  total: students.length,
-  onTrack: students.filter(s => s.status === "On Track").length,
-  needReview: students.filter(s => s.status === "Need Review").length,
-  atRisk: students.filter(s => s.status === "At Risk").length,
-  avgScore: Math.round(students.reduce((sum, s) => sum + s.avgScore, 0) / students.length),
-};
+export const students: Student[] = [...cls1Students, ...cls2Students, ...cls3Students];
+
+export const studentProfile = students.find(s => s.name === "Andi Pratama") ?? cls1Students[21];
+
+export function getClassStats(classId: string) {
+  const cls = students.filter(s => s.classId === classId);
+  return {
+    total: cls.length,
+    onTrack: cls.filter(s => s.status === "On Track").length,
+    needReview: cls.filter(s => s.status === "Need Review").length,
+    atRisk: cls.filter(s => s.status === "At Risk").length,
+    avgScore: cls.length ? Math.round(cls.reduce((sum, s) => sum + s.avgScore, 0) / cls.length) : 0,
+  };
+}
+
+export const classStats = getClassStats("cls1");
 
 // ── Parents ────────────────────────────────────────────────────────────
 export type Parent = { id: string; name: string; initials: string; studentId: string; phone: string };
@@ -150,6 +178,7 @@ export const subjects: Subject[] = [
 // ── Materials (Knowledge Corpus) ───────────────────────────────────────
 export type Material = {
   id: string; title: string; type: MaterialType; subject: string;
+  classId?: string; className?: string;
   publisher?: string; chapter?: string; year?: number;
   uploadedAt: string; pages: number; status: "Aktif" | "Draf" | "Diproses";
   aiProcessed: boolean; questionsGenerated: number;
@@ -174,15 +203,7 @@ export const assessmentStyles: AssessmentStyleCorpus[] = [
   { id: "as7", name: "Kuis Harian Matematika (Internal)", styleType: "Kuis", year: 2025, papersCount: 8, questionsCount: 80, subject: "Matematika", status: "Draf", description: "Kuis harian internal — 10 soal, durasi 20 menit. Dirancang untuk asesmen formatif cepat setiap awal atau akhir pertemuan." },
 ];
 
-export const pastPaperTopics = [
-  { topic: "Fungsi Kuadrat", frequency2023: 4, frequency2024: 5, frequency2025: 6, trend: "naik" as const },
-  { topic: "Persamaan Kuadrat", frequency2023: 6, frequency2024: 6, frequency2025: 5, trend: "stabil" as const },
-  { topic: "Diskriminan", frequency2023: 2, frequency2024: 3, frequency2025: 4, trend: "naik" as const },
-  { topic: "Rumus Vieta", frequency2023: 3, frequency2024: 2, frequency2025: 2, trend: "stabil" as const },
-  { topic: "Transformasi Grafik", frequency2023: 1, frequency2024: 3, frequency2025: 4, trend: "naik" as const },
-  { topic: "Barisan Aritmetika", frequency2023: 5, frequency2024: 5, frequency2025: 5, trend: "stabil" as const },
-  { topic: "Barisan Geometri", frequency2023: 3, frequency2024: 4, frequency2025: 5, trend: "naik" as const },
-];
+export const pastPaperTopics: { topic: string; frequency2023: number; frequency2024: number; frequency2025: number; trend: "naik" | "turun" | "stabil" }[] = [];
 
 // ── Question Bank ──────────────────────────────────────────────────────
 export type QuestionBankEntry = {
@@ -193,25 +214,11 @@ export type QuestionBankEntry = {
   options: { A: string; B: string; C: string; D: string; E?: string };
   correctAnswer: "A" | "B" | "C" | "D" | "E";
   explanation: string;
+  sourceTitle?: string; sourcePage?: number;
+  classId?: string;
 };
 
-export const questionBank: QuestionBankEntry[] = [
-  { id: "qb1", question: "Jika f(x) = (x − 3)², maka titik puncak grafik berada di koordinat...", topic: "Fungsi Kuadrat", subtopic: "Titik Puncak", bloom: "Memahami", difficulty: "Sedang", styleType: "TKA", source: "Modul Matematika, hal. 8", usageCount: 7, successRate: 74, status: "Disetujui", isLocked: false, options: { A: "(3, 0)", B: "(−3, 0)", C: "(0, 3)", D: "(0, −3)" }, correctAnswer: "A", explanation: "Bentuk f(x) = (x − a)² memiliki titik puncak di (a, 0). Karena a = 3, titik puncaknya adalah (3, 0)." },
-  { id: "qb2", question: "Akar-akar persamaan x² − 5x + 6 = 0 adalah...", topic: "Persamaan Kuadrat", subtopic: "Pemfaktoran", bloom: "Menerapkan", difficulty: "Mudah", styleType: "TKA", source: "Modul Matematika, hal. 15", usageCount: 9, successRate: 82, status: "Disetujui", isLocked: true, options: { A: "x = 1 dan x = 6", B: "x = 2 dan x = 3", C: "x = −2 dan x = −3", D: "x = −1 dan x = 6" }, correctAnswer: "B", explanation: "Faktorkan: (x − 2)(x − 3) = 0, sehingga x = 2 atau x = 3." },
-  { id: "qb3", question: "Diskriminan dari 2x² + 3x − 5 = 0 adalah...", topic: "Diskriminan", subtopic: "Perhitungan D", bloom: "Menerapkan", difficulty: "Sedang", styleType: "UTS", source: "Modul Matematika, hal. 18", usageCount: 6, successRate: 38, status: "Perlu Ditinjau", isLocked: false, options: { A: "9", B: "31", C: "41", D: "49" }, correctAnswer: "D", explanation: "D = b² − 4ac = 3² − 4(2)(−5) = 9 + 40 = 49." },
-  { id: "qb4", question: "Jika jumlah akar persamaan x² + px + 12 = 0 adalah 7, maka nilai p adalah...", topic: "Rumus Vieta", subtopic: "Jumlah Akar", bloom: "Menganalisis", difficulty: "Sulit", styleType: "TKA", source: "Modul Matematika, hal. 20", usageCount: 4, successRate: 42, status: "Disetujui", isLocked: false, options: { A: "−7", B: "7", C: "−12", D: "12" }, correctAnswer: "A", explanation: "Rumus Vieta: x₁ + x₂ = −p/a = −p. Jika jumlah akar = 7, maka −p = 7 → p = −7." },
-  { id: "qb5", question: "Titik puncak dari parabola y = −x² + 4x − 1 adalah...", topic: "Fungsi Kuadrat", subtopic: "Titik Puncak", bloom: "Menerapkan", difficulty: "Sedang", styleType: "TKA", source: "Modul Matematika, hal. 10", usageCount: 8, successRate: 71, status: "Disetujui", isLocked: false, options: { A: "(2, 3)", B: "(−2, 3)", C: "(2, −3)", D: "(4, −1)" }, correctAnswer: "A", explanation: "x puncak = −b/(2a) = −4/(2×(−1)) = 2. y puncak = −4 + 8 − 1 = 3. Jadi (2, 3)." },
-  { id: "qb6", question: "Grafik y = (x − 2)² bergeser ke mana dibandingkan y = x²?", topic: "Transformasi Grafik", subtopic: "Pergeseran Horizontal", bloom: "Memahami", difficulty: "Mudah", styleType: "UTS", source: "Modul Matematika, hal. 12", usageCount: 10, successRate: 61, status: "Disetujui", isLocked: false, options: { A: "2 satuan ke kanan", B: "2 satuan ke kiri", C: "2 satuan ke atas", D: "2 satuan ke bawah" }, correctAnswer: "A", explanation: "Substitusi x − 2 menggeser grafik ke kanan sejauh 2 satuan." },
-  { id: "qb7", question: "Suku ke-n barisan aritmetika dengan suku pertama 3 dan beda 4 adalah...", topic: "Barisan Aritmetika", subtopic: "Rumus Suku ke-n", bloom: "Menerapkan", difficulty: "Mudah", styleType: "UTS", source: "Buku Teks Matematika XI, hal. 142", usageCount: 5, successRate: 78, status: "Disetujui", isLocked: false, options: { A: "4n − 1", B: "4n + 3", C: "3n + 4", D: "4n − 3" }, correctAnswer: "A", explanation: "Uₙ = a + (n−1)b = 3 + (n−1)·4 = 3 + 4n − 4 = 4n − 1." },
-  { id: "qb8", question: "Barisan geometri 2, 6, 18, 54, ... memiliki rasio...", topic: "Barisan Geometri", subtopic: "Rasio", bloom: "Mengingat", difficulty: "Mudah", styleType: "Kuis", source: "Buku Teks Matematika XI, hal. 158", usageCount: 6, successRate: 89, status: "Disetujui", isLocked: false, options: { A: "2", B: "3", C: "4", D: "6" }, correctAnswer: "B", explanation: "r = U₂/U₁ = 6/2 = 3." },
-  { id: "qb9", question: "Suku ke-10 barisan aritmetika 5, 9, 13, 17, ... adalah...", topic: "Barisan Aritmetika", subtopic: "Suku ke-n", bloom: "Menerapkan", difficulty: "Mudah", styleType: "UTS", source: "Buku Teks Matematika XI, hal. 143", usageCount: 4, successRate: 85, status: "Disetujui", isLocked: false, options: { A: "37", B: "41", C: "45", D: "49" }, correctAnswer: "B", explanation: "Uₙ = a + (n−1)d = 5 + (10−1)×4 = 5 + 36 = 41." },
-  { id: "qb10", question: "Suku ke-5 barisan geometri 3, 6, 12, ... adalah...", topic: "Barisan Geometri", subtopic: "Suku ke-n", bloom: "Menerapkan", difficulty: "Sedang", styleType: "UTS", source: "Buku Teks Matematika XI, hal. 160", usageCount: 5, successRate: 72, status: "Disetujui", isLocked: false, options: { A: "24", B: "36", C: "48", D: "96" }, correctAnswer: "C", explanation: "r = 2. U₅ = 3 × 2⁴ = 3 × 16 = 48." },
-  { id: "qb11", question: "Grafik y = x² + 3 dibandingkan y = x² bergeser sejauh...", topic: "Transformasi Grafik", subtopic: "Pergeseran Vertikal", bloom: "Memahami", difficulty: "Mudah", styleType: "UTS", source: "Modul Matematika, hal. 13", usageCount: 8, successRate: 78, status: "Disetujui", isLocked: false, options: { A: "3 satuan ke kanan", B: "3 satuan ke kiri", C: "3 satuan ke atas", D: "3 satuan ke bawah" }, correctAnswer: "C", explanation: "Penambahan konstanta di luar fungsi (+ 3) menggeser grafik 3 satuan ke atas." },
-  { id: "qb12", question: "Persamaan 3x² − 2x + 5 = 0 memiliki jenis akar...", topic: "Diskriminan", subtopic: "Jenis Akar", bloom: "Menganalisis", difficulty: "Sedang", styleType: "TKA", source: "Modul Matematika, hal. 19", usageCount: 7, successRate: 45, status: "Disetujui", isLocked: false, options: { A: "Dua akar real berbeda", B: "Dua akar real sama", C: "Tidak memiliki akar real", D: "Satu akar real" }, correctAnswer: "C", explanation: "D = (−2)² − 4(3)(5) = 4 − 60 = −56 < 0. Karena D < 0, tidak ada akar real." },
-  { id: "qb13", question: "Persamaan kuadrat x² − (p+q)x + pq = 0 memiliki akar p dan q. Jika p × q = 8 dan p + q = 6, maka persamaannya adalah...", topic: "Rumus Vieta", subtopic: "Membentuk Persamaan", bloom: "Menerapkan", difficulty: "Sedang", styleType: "TKA", source: "Modul Matematika, hal. 21", usageCount: 6, successRate: 55, status: "Disetujui", isLocked: false, options: { A: "x² − 6x + 8 = 0", B: "x² + 6x + 8 = 0", C: "x² − 6x − 8 = 0", D: "x² + 6x − 8 = 0" }, correctAnswer: "A", explanation: "Persamaan: x² − (p+q)x + pq = 0 → x² − 6x + 8 = 0." },
-  { id: "qb14", question: "Nilai minimum dari f(x) = 2x² − 8x + 5 adalah...", topic: "Fungsi Kuadrat", subtopic: "Nilai Optimum", bloom: "Menganalisis", difficulty: "Sulit", styleType: "TKA", source: "Modul Matematika, hal. 11", usageCount: 3, successRate: 41, status: "Disetujui", isLocked: false, options: { A: "−3", B: "−5", C: "−8", D: "5" }, correctAnswer: "A", explanation: "x optimum = −b/(2a) = 8/4 = 2. f(2) = 2(4) − 16 + 5 = 8 − 16 + 5 = −3." },
-  { id: "qb15", question: "Selisih akar-akar persamaan x² − 7x + 12 = 0 adalah...", topic: "Persamaan Kuadrat", subtopic: "Hubungan Akar", bloom: "Menganalisis", difficulty: "Sulit", styleType: "TKA", source: "Modul Matematika, hal. 16", usageCount: 4, successRate: 48, status: "Disetujui", isLocked: false, options: { A: "1", B: "2", C: "3", D: "4" }, correctAnswer: "A", explanation: "Akar-akarnya: (x−3)(x−4)=0, jadi x₁=3, x₂=4. Selisih = |4−3| = 1." },
-];
+export const questionBank: QuestionBankEntry[] = [];
 
 // ── Pending AI Questions ───────────────────────────────────────────────
 export type PendingQuestion = {
@@ -220,13 +227,7 @@ export type PendingQuestion = {
   sourceRef: string; status: QuestionStatus;
 };
 
-export const pendingQuestions: PendingQuestion[] = [
-  { id: "pq1", question: "Nilai diskriminan dari persamaan 3x² − 7x + 2 = 0 adalah...", optionA: "25", optionB: "37", optionC: "49", optionD: "61", correctAnswer: "A", explanation: "D = b² − 4ac = 49 − 24 = 25.", topic: "Diskriminan", difficulty: "Sedang", sourceRef: "Modul Matematika – Fungsi Kuadrat, hal. 18", status: "Perlu Ditinjau" },
-  { id: "pq2", question: "Jika akar-akar persamaan 2x² − 8x + k = 0 adalah sama, maka nilai k adalah...", optionA: "4", optionB: "6", optionC: "8", optionD: "10", correctAnswer: "C", explanation: "Akar sama → D = 0. D = 64 − 8k = 0 → k = 8.", topic: "Diskriminan", difficulty: "Sulit", sourceRef: "Modul Matematika – Fungsi Kuadrat, hal. 19", status: "Perlu Ditinjau" },
-  { id: "pq3", question: "Hasil kali akar-akar dari x² − 6x + 5 = 0 adalah...", optionA: "5", optionB: "6", optionC: "−5", optionD: "−6", correctAnswer: "A", explanation: "Hasil kali akar = c/a = 5/1 = 5.", topic: "Rumus Vieta", difficulty: "Mudah", sourceRef: "Modul Matematika – Fungsi Kuadrat, hal. 20", status: "Perlu Ditinjau" },
-  { id: "pq4", question: "Persamaan kuadrat yang akar-akarnya 3 dan −5 adalah...", optionA: "x² + 2x − 15 = 0", optionB: "x² − 2x − 15 = 0", optionC: "x² + 2x + 15 = 0", optionD: "x² − 2x + 15 = 0", correctAnswer: "A", explanation: "Jumlah akar = 3 + (−5) = −2, hasil kali = 3×(−5) = −15. Jadi x² − (−2)x + (−15) = x² + 2x − 15 = 0.", topic: "Persamaan Kuadrat", difficulty: "Sedang", sourceRef: "Modul Matematika – Fungsi Kuadrat, hal. 22", status: "Perlu Ditinjau" },
-  { id: "pq5", question: "Grafik y = x² + 6x + 9 adalah parabola yang melalui titik puncak...", optionA: "(−3, 0)", optionB: "(3, 0)", optionC: "(0, 9)", optionD: "(−3, 9)", correctAnswer: "A", explanation: "y = (x + 3)² → puncak di (−3, 0).", topic: "Fungsi Kuadrat", difficulty: "Sedang", sourceRef: "Modul Matematika – Fungsi Kuadrat, hal. 10", status: "Disetujui" },
-];
+export const pendingQuestions: PendingQuestion[] = [];
 
 // ── Assessments ────────────────────────────────────────────────────────
 export type Assessment = {
@@ -237,15 +238,14 @@ export type Assessment = {
   createdAt: string;
 };
 
-export const assessments: Assessment[] = [
-  { id: "a1", title: "UTS Matematika XI – Semester 1 2025", type: "UTS", subject: "Matematika XI", classId: "cls1", totalQuestions: 40, duration: 90, scheduledFor: "15 Nov 2025", avgScore: 76, participants: 32, status: "Selesai", createdAt: "1 Nov 2025" },
-  { id: "a2", title: "Kuis Fungsi Kuadrat", type: "Kuis Guru", subject: "Matematika XI", classId: "cls1", totalQuestions: 15, duration: 30, scheduledFor: "22 Nov 2025", avgScore: 82, participants: 30, status: "Selesai", createdAt: "20 Nov 2025" },
-  { id: "a3", title: "Kuis Diskriminan & Vieta", type: "Kuis Guru", subject: "Matematika XI", classId: "cls1", totalQuestions: 10, duration: 20, scheduledFor: "29 Okt 2025", avgScore: 68, participants: 31, status: "Selesai", createdAt: "27 Okt 2025" },
-  { id: "a4", title: "Tes Diagnostik Fungsi Kuadrat", type: "Tes Diagnostik", subject: "Matematika XI", classId: "cls1", totalQuestions: 20, duration: 45, scheduledFor: "5 Sep 2025", avgScore: 72, participants: 32, status: "Selesai", createdAt: "3 Sep 2025" },
-  { id: "a5", title: "Tes Diagnostik Fisika", type: "Tes Diagnostik", subject: "Fisika XI", classId: "cls1", totalQuestions: 20, duration: 45, scheduledFor: "28 Nov 2025", status: "Terjadwal", createdAt: "24 Nov 2025" },
-  { id: "a6", title: "UAS Biologi XII", type: "UAS", subject: "Biologi XII", classId: "cls3", totalQuestions: 50, duration: 120, scheduledFor: "5 Des 2025", status: "Terjadwal", createdAt: "20 Nov 2025" },
-  { id: "a7", title: "Tryout Matematika – Persiapan SNBT", type: "Tryout", subject: "Matematika XI", classId: "cls1", totalQuestions: 30, duration: 60, scheduledFor: "12 Des 2025", status: "Terjadwal", createdAt: "25 Nov 2025" },
-];
+export const assessments: Assessment[] = [];
+
+// Helper: map class name → class id
+export const classIdByName: Record<string, string> = {
+  "XI IPA 1": "cls2",
+  "XI IPA 2": "cls1",
+  "XI IPA 3": "cls3",
+};
 
 // ── Student Assessment Results ─────────────────────────────────────────
 export type StudentResult = {
@@ -254,12 +254,7 @@ export type StudentResult = {
   wrong: number; unanswered: number; duration: number; rank?: number; classAvg?: number;
 };
 
-export const studentResults: StudentResult[] = [
-  { id: "sr1", assessmentId: "a1", assessmentTitle: "UTS Matematika XI – Semester 1 2025", type: "UTS", date: "15 Nov 2025", score: 85, totalQuestions: 40, correct: 34, wrong: 5, unanswered: 1, duration: 82, rank: 6, classAvg: 76 },
-  { id: "sr2", assessmentId: "a2", assessmentTitle: "Kuis Fungsi Kuadrat", type: "Kuis Guru", date: "22 Nov 2025", score: 87, totalQuestions: 15, correct: 13, wrong: 2, unanswered: 0, duration: 22, rank: 4, classAvg: 82 },
-  { id: "sr3", assessmentId: "a3", assessmentTitle: "Kuis Diskriminan & Vieta", type: "Kuis Guru", date: "29 Okt 2025", score: 70, totalQuestions: 10, correct: 7, wrong: 3, unanswered: 0, duration: 18, rank: 10, classAvg: 68 },
-  { id: "sr4", assessmentId: "a4", assessmentTitle: "Tes Diagnostik Fungsi Kuadrat", type: "Tes Diagnostik", date: "5 Sep 2025", score: 75, totalQuestions: 20, correct: 15, wrong: 4, unanswered: 1, duration: 38, rank: 9, classAvg: 72 },
-];
+export const studentResults: StudentResult[] = [];
 
 // ── Weak Topics ────────────────────────────────────────────────────────
 export type WeakTopic = {
@@ -268,13 +263,7 @@ export type WeakTopic = {
   lastPracticed: string; recommendedAction: string;
 };
 
-export const weakTopics: WeakTopic[] = [
-  { id: "wt1", topic: "Diskriminan Persamaan Kuadrat", subject: "Matematika", mastery: "Perlu Bantuan", accuracyRate: 38, questionsAttempted: 13, lastPracticed: "3 hari lalu", recommendedAction: "Kerjakan 10 soal latihan diskriminan level Mudah" },
-  { id: "wt2", topic: "Rumus Vieta (Jumlah & Hasil Kali Akar)", subject: "Matematika", mastery: "Perlu Bantuan", accuracyRate: 42, questionsAttempted: 12, lastPracticed: "5 hari lalu", recommendedAction: "Pelajari kembali hubungan akar dan koefisien" },
-  { id: "wt3", topic: "Transformasi Grafik Kuadrat", subject: "Matematika", mastery: "Berkembang", accuracyRate: 61, questionsAttempted: 18, lastPracticed: "2 hari lalu", recommendedAction: "Fokus pada pergeseran horizontal dan vertikal" },
-  { id: "wt4", topic: "Hukum Newton II", subject: "Fisika", mastery: "Berkembang", accuracyRate: 65, questionsAttempted: 11, lastPracticed: "1 minggu lalu", recommendedAction: "Latih soal aplikasi F = ma dengan satuan berbeda" },
-  { id: "wt5", topic: "Barisan Geometri", subject: "Matematika", mastery: "Berkembang", accuracyRate: 68, questionsAttempted: 9, lastPracticed: "4 hari lalu", recommendedAction: "Review konsep rasio dan suku ke-n" },
-];
+export const weakTopics: WeakTopic[] = [];
 
 // ── Incorrect Questions ────────────────────────────────────────────────
 export type IncorrectQuestion = {
@@ -283,12 +272,7 @@ export type IncorrectQuestion = {
   date: string; difficulty: Difficulty; confidenceDiagnosis: ConfidenceDiagnosis;
 };
 
-export const incorrectQuestions: IncorrectQuestion[] = [
-  { id: "iq1", question: "Diskriminan dari 2x² + 3x − 5 = 0 adalah...", yourAnswer: "C (41)", correctAnswer: "D (49)", explanation: "D = b² − 4ac = 3² − 4(2)(−5) = 9 + 40 = 49. Perhatikan tanda minus pada c = −5.", topic: "Diskriminan", assessmentTitle: "Kuis Diskriminan & Vieta", date: "29 Okt 2025", difficulty: "Sedang", confidenceDiagnosis: "Miskonsepsi" },
-  { id: "iq2", question: "Jika jumlah akar x² + px + 12 = 0 adalah 7, maka p adalah...", yourAnswer: "B (7)", correctAnswer: "A (−7)", explanation: "Rumus Vieta: x₁ + x₂ = −b/a = −p. Jika jumlah = 7, maka −p = 7, p = −7.", topic: "Rumus Vieta", assessmentTitle: "Kuis Diskriminan & Vieta", date: "29 Okt 2025", difficulty: "Sulit", confidenceDiagnosis: "Celah Pengetahuan" },
-  { id: "iq3", question: "Grafik y = (x − 2)² bergeser ke mana dibandingkan y = x²?", yourAnswer: "B (2 satuan ke kiri)", correctAnswer: "A (2 satuan ke kanan)", explanation: "Substitusi (x − 2) menggeser grafik ke kanan. Tanda minus dalam kurung → ke kanan.", topic: "Transformasi Grafik", assessmentTitle: "UTS Matematika XI", date: "15 Nov 2025", difficulty: "Mudah", confidenceDiagnosis: "Miskonsepsi" },
-  { id: "iq4", question: "Persamaan yang akar-akarnya 3 dan −5 adalah...", yourAnswer: "B (x² − 2x − 15 = 0)", correctAnswer: "A (x² + 2x − 15 = 0)", explanation: "Jumlah akar = −2, hasil kali = −15. Persamaan: x² − (jumlah)x + (kali) = x² + 2x − 15 = 0.", topic: "Persamaan Kuadrat", assessmentTitle: "UTS Matematika XI", date: "15 Nov 2025", difficulty: "Sedang", confidenceDiagnosis: "Celah Pengetahuan" },
-];
+export const incorrectQuestions: IncorrectQuestion[] = [];
 
 // ── Teaching Recommendations ───────────────────────────────────────────
 export type TeachingRecommendation = {
@@ -297,58 +281,25 @@ export type TeachingRecommendation = {
   suggestion: string; estimatedTime: string;
 };
 
-export const teachingRecommendations: TeachingRecommendation[] = [
-  { id: "tr1", topic: "Diskriminan", issue: "58% siswa menjawab salah di soal diskriminan dengan konstanta negatif. Miskonsepsi pada operasi −4ac.", affectedStudents: 18, wrongCount: 7, priority: "Tinggi", suggestion: "Tambahkan sesi khusus 20 mnt dengan contoh bergantian antara konstanta positif dan negatif. Gunakan warna berbeda untuk menandai tanda konstanta.", estimatedTime: "20 menit" },
-  { id: "tr2", topic: "Rumus Vieta", issue: "Siswa sering membalik tanda pada jumlah akar. Mencampuradukkan −b/a dengan b/a.", affectedStudents: 14, wrongCount: 5, priority: "Tinggi", suggestion: "Buat mnemonic: 'Jumlah akar berlawanan dengan b'. Gunakan papan tulis untuk menuliskan rumus lengkap setiap kali masuk kelas.", estimatedTime: "15 menit" },
-  { id: "tr3", topic: "Transformasi Grafik", issue: "Kebingungan arah pergeseran horizontal masih tinggi (61% salah). Siswa mengira minus = ke kiri.", affectedStudents: 10, wrongCount: 3, priority: "Sedang", suggestion: "Gunakan Desmos.com untuk demonstrasi interaktif langsung di kelas. Biarkan siswa menggerakkan grafik secara mandiri.", estimatedTime: "10 menit" },
-  { id: "tr4", topic: "Barisan Geometri", issue: "Siswa kesulitan membedakan barisan aritmetika dan geometri saat soal tidak eksplisit.", affectedStudents: 8, wrongCount: 2, priority: "Sedang", suggestion: "Buat worksheet perbandingan berdampingan. Fokus pada identifikasi pola beda (d) vs rasio (r).", estimatedTime: "25 menit" },
-];
+export const teachingRecommendations: TeachingRecommendation[] = [];
 
 // ── Analytics ──────────────────────────────────────────────────────────
-export const topicAccuracy = [
-  { label: "Fungsi Kuadrat", value: 82, trend: "naik" as const },
-  { label: "Persamaan Kuadrat", value: 74, trend: "stabil" as const },
-  { label: "Diskriminan", value: 38, trend: "turun" as const },
-  { label: "Rumus Vieta", value: 42, trend: "stabil" as const },
-  { label: "Transformasi Grafik", value: 61, trend: "naik" as const },
-  { label: "Barisan Aritmetika", value: 75, trend: "naik" as const },
-  { label: "Barisan Geometri", value: 68, trend: "stabil" as const },
-];
-
-export const scoreDistribution = [2, 4, 7, 11, 5, 3];
-export const scoreDistributionLabels = ["< 50", "50–59", "60–69", "70–79", "80–89", "90–100"];
-
-export const teacherAnalyticsStats = [
-  { label: "Asesmen selesai", value: "4", detail: "Semester ini · 2 kuis, 1 UTS, 1 diagnostik", tone: "primary" as const },
-  { label: "Rata-rata nilai kelas", value: "76", detail: "Naik 4 poin dari UTS sebelumnya", tone: "success" as const },
-  { label: "Topik paling lemah", value: "Diskriminan", detail: "38% akurasi rata-rata kelas", tone: "warning" as const },
-  { label: "Soal AI tersedia", value: "142", detail: "87% disetujui guru · 18 menunggu", tone: "neutral" as const },
-];
-
-export const subjectMastery = [
-  { label: "Fungsi Kuadrat", value: 82, tone: "success" as const },
-  { label: "Persamaan Kuadrat", value: 74, tone: "primary" as const },
-  { label: "Diskriminan", value: 38, tone: "warning" as const },
-  { label: "Rumus Vieta", value: 42, tone: "warning" as const },
-  { label: "Transformasi Grafik", value: 61, tone: "primary" as const },
-];
-
-export const scoreTrend = [70, 74, 72, 78, 80, 83, 85];
-export const scoreTrendLabels = ["Sep", "Okt", "Okt", "Nov", "Nov", "Nov", "Skrg"];
+export const topicAccuracy: { label: string; value: number; trend: "naik" | "turun" | "stabil" }[] = [];
+export const scoreDistribution: number[] = [];
+export const scoreDistributionLabels: string[] = [];
+export const teacherAnalyticsStats: { label: string; value: string; detail: string; tone: "primary" | "success" | "warning" | "neutral" }[] = [];
+export const subjectMastery: { label: string; value: number; tone: "success" | "primary" | "warning" | "neutral" }[] = [];
+export const scoreTrend: number[] = [];
+export const scoreTrendLabels: string[] = [];
 
 export const studentProgressStats = [
-  { label: "Asesmen diikuti", value: "12", detail: "Semester ini", tone: "primary" as const },
-  { label: "Rata-rata nilai", value: "79", detail: "Naik 4 poin dari bulan lalu", tone: "success" as const },
-  { label: "Soal dikerjakan", value: "340", detail: "Latihan + asesmen", tone: "neutral" as const },
-  { label: "Topik lemah aktif", value: "2", detail: "Diskriminan & Rumus Vieta", tone: "warning" as const },
+  { label: "Rata-rata nilai", value: `${studentProfile.avgScore}`, detail: "Berdasarkan data kelas", tone: "success" as const },
+  { label: "XP terkumpul", value: `${studentProfile.xp.toLocaleString("id-ID")}`, detail: "Poin pengalaman belajar", tone: "primary" as const },
+  { label: "Streak belajar", value: `${studentProfile.streak} hari`, detail: "Konsistensi belajar harian", tone: "neutral" as const },
+  { label: "Peringkat kelas", value: `#${studentProfile.rank}`, detail: studentProfile.className, tone: "warning" as const },
 ];
 
-export const adminStats = [
-  { label: "Asesmen aktif", value: "24", detail: "4 berlangsung minggu ini", tone: "primary" as const },
-  { label: "Guru terdaftar", value: "48", detail: "Aktif menggunakan platform", tone: "neutral" as const },
-  { label: "Siswa aktif", value: "1.240", detail: "Dari total 1.312 siswa", tone: "success" as const },
-  { label: "Soal dalam bank", value: "3.820", detail: "Dari 12 mata pelajaran", tone: "warning" as const },
-];
+export const adminStats: { label: string; value: string; detail: string; tone: "primary" | "success" | "warning" | "neutral" }[] = [];
 
 // ── Simulator Questions ────────────────────────────────────────────────
 export type SimulatorQuestion = {
@@ -357,13 +308,7 @@ export type SimulatorQuestion = {
   explanation: string; topic: string; difficulty: Difficulty;
 };
 
-export const simulatorQuestions: SimulatorQuestion[] = [
-  { id: "sq1", number: 1, question: "Diketahui f(x) = 2x² − 3x + 1. Nilai f(−2) adalah...", optionA: "15", optionB: "11", optionC: "3", optionD: "−3", optionE: "−11", correctAnswer: "A", explanation: "f(−2) = 2(4) + 6 + 1 = 15.", topic: "Fungsi Kuadrat", difficulty: "Mudah" },
-  { id: "sq2", number: 2, question: "Akar-akar persamaan x² − 5x + 6 = 0 adalah...", optionA: "x = 1 dan x = 6", optionB: "x = 2 dan x = 3", optionC: "x = −2 dan x = −3", optionD: "x = −1 dan x = 6", optionE: "x = 1 dan x = −6", correctAnswer: "B", explanation: "(x − 2)(x − 3) = 0.", topic: "Persamaan Kuadrat", difficulty: "Mudah" },
-  { id: "sq3", number: 3, question: "Diskriminan dari 2x² + 3x − 5 = 0 adalah...", optionA: "9", optionB: "31", optionC: "41", optionD: "49", optionE: "−31", correctAnswer: "D", explanation: "D = 9 + 40 = 49.", topic: "Diskriminan", difficulty: "Sedang" },
-  { id: "sq4", number: 4, question: "Titik puncak dari y = −x² + 4x − 1 adalah...", optionA: "(2, 3)", optionB: "(−2, 3)", optionC: "(2, −3)", optionD: "(4, −1)", optionE: "(1, 2)", correctAnswer: "A", explanation: "x puncak = 2, y puncak = 3.", topic: "Titik Puncak Parabola", difficulty: "Sedang" },
-  { id: "sq5", number: 5, question: "Jumlah akar dari x² + px + 12 = 0 adalah 7, maka p = ...", optionA: "−7", optionB: "7", optionC: "−12", optionD: "12", optionE: "5", correctAnswer: "A", explanation: "−p = 7 → p = −7.", topic: "Rumus Vieta", difficulty: "Sulit" },
-];
+export const simulatorQuestions: SimulatorQuestion[] = [];
 
 // ── AI Tutor ───────────────────────────────────────────────────────────
 export type ChatMessage = {
@@ -420,9 +365,9 @@ export type Achievement = {
 };
 
 export const achievements: Achievement[] = [
-  { id: "ach1", title: "Streak 7 Hari", description: "Belajar 7 hari berturut-turut", category: "streak", xp: 100, earned: true, earnedAt: "8 Nov 2025", icon: "🔥" },
-  { id: "ach2", title: "Top 5 Kelas", description: "Masuk 5 besar peringkat kelas", category: "rank", xp: 150, earned: true, earnedAt: "22 Nov 2025", icon: "⭐" },
-  { id: "ach3", title: "Rajin Berlatih", description: "Kerjakan 100 soal latihan", category: "practice", xp: 50, earned: true, earnedAt: "20 Nov 2025", icon: "📚" },
+  { id: "ach1", title: "Streak 7 Hari", description: "Belajar 7 hari berturut-turut", category: "streak", xp: 100, earned: false, icon: "🔥" },
+  { id: "ach2", title: "Top 5 Kelas", description: "Masuk 5 besar peringkat kelas", category: "rank", xp: 150, earned: false, icon: "⭐" },
+  { id: "ach3", title: "Rajin Berlatih", description: "Kerjakan 100 soal latihan", category: "practice", xp: 50, earned: false, icon: "📚" },
   { id: "ach4", title: "Nilai Sempurna", description: "Skor 100 dalam satu asesmen", category: "score", xp: 200, earned: false, icon: "💎" },
   { id: "ach5", title: "Ahli Tiga Topik", description: "Capai Mahir di 3 topik berbeda", category: "mastery", xp: 300, earned: false, icon: "🎓" },
   { id: "ach6", title: "Comeback King", description: "Tingkatkan nilai 20+ poin dari asesmen sebelumnya", category: "score", xp: 250, earned: false, icon: "⚡" },
@@ -430,13 +375,14 @@ export const achievements: Achievement[] = [
   { id: "ach8", title: "Juara Kelas", description: "Raih peringkat 1 dalam asesmen manapun", category: "rank", xp: 400, earned: false, icon: "👑" },
 ];
 
-export const leaderboard = [
-  { rank: 1, studentId: "s1", name: "Sari Dewi", initials: "SD", avgScore: 94, xp: 2400, streak: 12, isCurrentUser: false },
-  { rank: 2, studentId: "s2", name: "Budi Santoso", initials: "BS", avgScore: 91, xp: 2200, streak: 5, isCurrentUser: false },
-  { rank: 3, studentId: "s3", name: "Citra Lestari", initials: "CL", avgScore: 88, xp: 2050, streak: 12, isCurrentUser: false },
-  { rank: 4, studentId: "s4", name: "Deni Rahmat", initials: "DR", avgScore: 87, xp: 1980, streak: 3, isCurrentUser: false },
-  { rank: 5, studentId: "s22", name: "Andi Pratama", initials: "AP", avgScore: 85, xp: 1850, streak: 7, isCurrentUser: true },
-];
+export const leaderboard = [...students]
+  .sort((a, b) => b.avgScore - a.avgScore)
+  .slice(0, 10)
+  .map((s, i) => ({
+    rank: i + 1, studentId: s.id, name: s.name, initials: s.initials,
+    avgScore: s.avgScore, xp: s.xp, streak: s.streak,
+    isCurrentUser: s.name === "Andi Pratama",
+  }));
 
 // ── Notifications ──────────────────────────────────────────────────────
 export type AppNotification = {
@@ -446,35 +392,13 @@ export type AppNotification = {
   href?: string;
 };
 
-export const teacherNotifications: AppNotification[] = [
-  { id: "tn1", title: "18 soal menunggu tinjauan", description: "AI menghasilkan 18 soal baru dari Modul Fungsi Kuadrat. Tinjau dan setujui sebelum diterbitkan.", time: "10 menit lalu", read: false, tone: "primary", href: "/teacher/question-review" },
-  { id: "tn2", title: "Diskriminan: perlu perhatian segera", description: "58% siswa XI IPA 2 gagal di topik Diskriminan. Rekomendasi remedial telah dibuat.", time: "1 jam lalu", read: false, tone: "warning", href: "/teacher/recommendations" },
-  { id: "tn3", title: "3 siswa berisiko tertinggal", description: "Dewi, Erwin, dan Fauzi konsisten di bawah 50 selama 3 asesmen berturut-turut.", time: "3 jam lalu", read: false, tone: "danger", href: "/teacher/analytics" },
-  { id: "tn4", title: "UTS Matematika selesai dinilai", description: "Semua 32 lembar jawaban telah diproses. Rata-rata kelas: 76. Lihat analitik lengkap.", time: "Kemarin, 14:32", read: true, tone: "success", href: "/teacher/results" },
-  { id: "tn5", title: "Materi PPT berhasil diproses", description: "PPT Fungsi Kuadrat (42 hal.) selesai dianalisis. 36 soal siap diekstrak.", time: "Kemarin, 09:15", read: true, tone: "neutral" },
-  { id: "tn6", title: "Tes Diagnostik Fisika dikonfirmasi", description: "Terjadwal 28 November 2025, pukul 13.00 WIB. 20 soal · 45 menit.", time: "2 hari lalu", read: true, tone: "neutral" },
-];
+export const teacherNotifications: AppNotification[] = [];
 
-export const studentNotifications: AppNotification[] = [
-  { id: "sn1", title: "Asesmen baru tersedia", description: "Tes Diagnostik Fisika dijadwalkan 28 November, pukul 13.00. Persiapkan dirimu!", time: "5 menit lalu", read: false, tone: "primary", href: "/student/simulator" },
-  { id: "sn2", title: "Topik lemah: Diskriminan 38%", description: "Akurasi kamu masih rendah. Latihan adaptif telah disiapkan khusus untukmu.", time: "2 jam lalu", read: false, tone: "warning", href: "/student/adaptive" },
-  { id: "sn3", title: "Hasil Kuis Fungsi Kuadrat", description: "Selamat! Kamu meraih skor 87 — di atas rata-rata kelas (82). Peringkat ke-4.", time: "Kemarin", read: true, tone: "success", href: "/student/review" },
-  { id: "sn4", title: "Materi baru: Barisan & Deret", description: "Bu Ratna menambahkan modul baru. Pelajari sebelum kuis minggu depan.", time: "2 hari lalu", read: true, tone: "neutral", href: "/student/dashboard" },
-  { id: "sn5", title: "Pencapaian: Streak 7 Hari!", description: "Kamu sudah belajar 7 hari berturut-turut dan mendapat +100 XP. Pertahankan!", time: "3 hari lalu", read: true, tone: "success", href: "/student/achievements" },
-];
+export const studentNotifications: AppNotification[] = [];
 
-export const parentNotifications: AppNotification[] = [
-  { id: "pn1", title: "Hasil Kuis Fungsi Kuadrat", description: "Andi mendapat nilai 87 — di atas rata-rata kelas (82). Peringkat ke-4 dari 30 peserta.", time: "1 jam lalu", read: false, tone: "success", href: "/parent/assessments" },
-  { id: "pn2", title: "Topik yang perlu perhatian", description: "Andi masih kesulitan di Diskriminan (38% akurasi). Bu Ratna menyarankan latihan tambahan.", time: "3 jam lalu", read: false, tone: "warning", href: "/parent/recommendations" },
-  { id: "pn3", title: "⚠️ Asesmen belum dikerjakan", description: "Tes Diagnostik Fisika (28 Nov) belum dikerjakan Andi. Ingatkan segera!", time: "Kemarin", read: false, tone: "danger", href: "/parent/assessments" },
-  { id: "pn4", title: "Streak belajar 7 hari", description: "Andi telah belajar konsisten 7 hari berturut-turut. Semangat belajarnya sangat baik!", time: "3 hari lalu", read: true, tone: "success", href: "/parent/progress" },
-];
+export const parentNotifications: AppNotification[] = [];
 
-export const adminNotifications: AppNotification[] = [
-  { id: "an1", title: "3 guru belum aktif minggu ini", description: "Pak Doni, Bu Wulan, dan 1 guru lain belum login sejak Senin.", time: "2 jam lalu", read: false, tone: "warning" },
-  { id: "an2", title: "Penyimpanan 78% penuh", description: "Media penyimpanan telah terpakai 78%. Pertimbangkan peningkatan kapasitas.", time: "Kemarin", read: false, tone: "danger" },
-  { id: "an3", title: "24 asesmen aktif minggu ini", description: "Total 24 asesmen berjalan di 8 kelas berbeda. Pantau progres dari dasbor.", time: "2 hari lalu", read: true, tone: "primary" },
-];
+export const adminNotifications: AppNotification[] = [];
 
 // ── Navigation ─────────────────────────────────────────────────────────
 export const teacherNav: NavItem[] = [
@@ -484,7 +408,7 @@ export const teacherNav: NavItem[] = [
   { title: "Bank Soal", href: "/teacher/question-bank", icon: Database, group: "SOAL" },
   { title: "Tinjau Soal AI", href: "/teacher/question-review", icon: ShieldCheck, group: "SOAL" },
   { title: "Buat Asesmen", href: "/teacher/assessment-builder", icon: FilePlus2, group: "ASESMEN" },
-  { title: "Hasil Asesmen", href: "/teacher/results", icon: BarChart3, group: "ASESMEN" },
+  { title: "List Asesmen", href: "/teacher/results", icon: BarChart3, group: "ASESMEN" },
   { title: "Analitik Kelas", href: "/teacher/analytics", icon: TrendingUp, group: "ANALITIK" },
   { title: "Rekomendasi", href: "/teacher/recommendations", icon: Lightbulb, group: "ANALITIK" },
   { title: "Konfigurasi AI", href: "/teacher/ai-config", icon: Settings2, group: "SISTEM" },
@@ -492,6 +416,7 @@ export const teacherNav: NavItem[] = [
 
 export const studentNav: NavItem[] = [
   { title: "Dasbor", href: "/student/dashboard", icon: Home, group: "OVERVIEW" },
+  { title: "Materi Guru", href: "/student/materials", icon: BookOpen, group: "BELAJAR" },
   { title: "Simulasi Ujian", href: "/student/simulator", icon: Monitor, group: "LATIHAN" },
   { title: "Latihan Adaptif", href: "/student/adaptive", icon: Zap, group: "LATIHAN" },
   { title: "Review Asesmen", href: "/student/review", icon: FileSearch, group: "REVIEW" },

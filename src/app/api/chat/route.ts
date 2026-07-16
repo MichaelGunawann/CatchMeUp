@@ -1,7 +1,15 @@
 export const dynamic = "force-dynamic";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import Groq from "groq-sdk";
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_AI_API_KEY ?? "");
+let _groq: Groq | null = null;
+function getGroq(): Groq {
+  if (_groq) return _groq;
+  _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+  return _groq;
+}
+
+const NO_MATERIAL_MSG =
+  "Maaf, kami belum bisa menjawab karena tidak ada materi ini di pustaka. Minta gurumu untuk mengunggah materi terlebih dahulu agar AI Companion dapat membantu.";
 
 export async function POST(req: Request) {
   const { messages, materials } = await req.json() as {
@@ -9,27 +17,49 @@ export async function POST(req: Request) {
     materials?: { title: string; topic: string }[];
   };
 
-  const systemInstruction = materials?.length
-    ? `Kamu adalah AI Companion untuk siswa di platform Catch Up. Kamu HANYA boleh menjawab berdasarkan materi yang tersedia:\n${materials.map(m => `- ${m.title} (Topik: ${m.topic})`).join("\n")}\n\nJika pertanyaan di luar cakupan materi tersebut, katakan bahwa topik itu belum ada dalam materi yang diunggah guru.\n\nJawab dalam Bahasa Indonesia. Berikan penjelasan yang jelas dan mudah dipahami siswa SMA.`
-    : `Kamu adalah AI Companion untuk siswa di platform Catch Up. Belum ada materi yang diunggah guru. Jawab dalam Bahasa Indonesia, berikan penjelasan umum yang membantu, dan anjurkan siswa untuk meminta gurunya mengunggah materi agar jawabanmu lebih spesifik.`;
+  if (!materials?.length) {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: NO_MATERIAL_MSG })}\n\n`));
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+    });
+  }
 
-  const lastMessage = messages[messages.length - 1];
-  const history = messages.slice(0, -1).map(m => ({
-    role: m.role === "assistant" ? "model" as const : "user" as const,
-    parts: [{ text: m.content }],
-  }));
+  const materialList = materials.map(m => `- ${m.title} (Topik: ${m.topic})`).join("\n");
+  const systemPrompt = `Kamu adalah AI Companion untuk siswa di platform Catch Up Indonesia.
 
-  const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash", systemInstruction });
+ATURAN KETAT:
+1. Kamu HANYA boleh menjawab berdasarkan materi yang ada di daftar berikut. JANGAN menjawab topik yang tidak ada dalam daftar materi.
+2. Jika pertanyaan tidak berkaitan dengan materi yang tersedia, jawab PERSIS dengan: "Maaf, kami belum bisa menjawab karena tidak ada materi ini di pustaka."
+3. Setiap penjelasan HARUS mencantumkan sumber dokumen dengan format: [Sumber: Nama Dokumen, hal. X]
+4. Jawab dalam Bahasa Indonesia yang jelas dan mudah dipahami siswa SMA.
+5. Berikan penjelasan mendalam berdasarkan materi yang tersedia.
+
+MATERI YANG TERSEDIA:
+${materialList}`;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const chat = model.startChat({ history });
-        const result = await chat.sendMessageStream(lastMessage.content);
+        const response = await getGroq().chat.completions.create({
+          model: "llama-3.3-70b-versatile",
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...messages.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
+          ],
+          stream: true,
+          max_tokens: 1024,
+        });
 
-        for await (const chunk of result.stream) {
-          const text = chunk.text();
+        for await (const chunk of response) {
+          const text = chunk.choices[0]?.delta?.content ?? "";
           if (text) {
             controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
           }
