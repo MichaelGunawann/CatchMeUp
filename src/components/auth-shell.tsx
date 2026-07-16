@@ -30,7 +30,7 @@ export function AuthShell({
             <img
               src="/logo.png"
               alt="Catch Me Up"
-              className="h-11 w-auto object-contain drop-shadow-sm"
+              className="h-24 w-auto object-contain drop-shadow-sm"
               draggable={false}
             />
           </Link>

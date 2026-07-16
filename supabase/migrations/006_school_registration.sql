@@ -90,6 +90,7 @@ $$;
 -- teacher/student registration combobox can never surface a school that
 -- hasn't been approved yet (or was rejected).
 DROP POLICY IF EXISTS "Anyone can view schools for registration" ON schools;
+DROP POLICY IF EXISTS "Anyone can view active schools for registration" ON schools;
 CREATE POLICY "Anyone can view active schools for registration"
   ON schools FOR SELECT
   USING (status = 'ACTIVE');
@@ -97,6 +98,7 @@ CREATE POLICY "Anyone can view active schools for registration"
 -- A School Admin must be able to see their own managed school(s)
 -- regardless of status, so a pending/rejected registration renders its
 -- own status banner instead of silently looking like a 404.
+DROP POLICY IF EXISTS "School admins can view their own managed schools" ON schools;
 CREATE POLICY "School admins can view their own managed schools"
   ON schools FOR SELECT
   USING (
@@ -107,6 +109,7 @@ CREATE POLICY "School admins can view their own managed schools"
 -- PENDING/REJECTED) to review registration requests. Read-only - the
 -- approval mutation itself never goes through an RLS UPDATE grant (see
 -- /api/platform-admin/approve-school).
+DROP POLICY IF EXISTS "Platform admins can view all schools" ON schools;
 CREATE POLICY "Platform admins can view all schools"
   ON schools FOR SELECT
   USING (

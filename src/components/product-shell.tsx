@@ -237,17 +237,6 @@ export function AppShell({
               <div className="text-[11px] text-ink-secondary">{meta.label}</div>
             </div>
             <div className="my-1 h-px bg-border" />
-            {(["teacher", "student", "parent", "admin"] as Role[])
-              .filter(r => r !== role)
-              .map(r => (
-                <Link key={r} href={`/${r}/dashboard`}
-                  className="flex items-center gap-2 rounded-[4px] px-3 py-2 text-[12px] text-ink-secondary transition hover:bg-background hover:text-ink"
-                  role="menuitem">
-                  <div className={cn("h-2 w-2 rounded-full", roleMeta[r].color)} />
-                  {roleMeta[r].label}
-                </Link>
-              ))}
-            <div className="my-1 h-px bg-border" />
             <button
               type="button"
               onClick={handleLogout}
@@ -306,17 +295,6 @@ export function AppShell({
                   <div className="text-[13px] font-semibold text-ink">{displayName}</div>
                   <div className="text-[11px] text-ink-secondary">{meta.label}</div>
                 </div>
-                <div className="my-1 h-px bg-border" />
-                {(["teacher", "student", "parent", "admin"] as Role[])
-                  .filter(r => r !== role)
-                  .map(r => (
-                    <Link key={r} href={`/${r}/dashboard`}
-                      className="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-secondary transition hover:bg-background hover:text-ink"
-                      role="menuitem">
-                      <div className={cn("h-2 w-2 rounded-full shrink-0", roleMeta[r].color)} />
-                      {roleMeta[r].label}
-                    </Link>
-                  ))}
                 <div className="my-1 h-px bg-border" />
                 <button
                   type="button"
