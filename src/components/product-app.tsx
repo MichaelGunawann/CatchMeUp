@@ -49,8 +49,6 @@ import {
   school,
   scoreTrend,
   scoreTrendLabels,
-  scoreDistribution,
-  scoreDistributionLabels,
   studentProfile,
   studentProgressStats,
   studentResults,
@@ -58,7 +56,6 @@ import {
   suggestedPrompts,
   teacherAnalyticsStats,
   teachingRecommendations,
-  topicAccuracy,
   weakTopics,
   simulatorQuestions,
   teacherNav,
@@ -491,6 +488,91 @@ function computeRealClassStats(classStudents: Student[]) {
     atRisk: classStudents.filter(s => s.status === "At Risk").length,
     avgScore: classStudents.length ? Math.round(classStudents.reduce((sum, s) => sum + s.avgScore, 0) / classStudents.length) : 0,
   };
+}
+
+type ClassAnalytics = {
+  scoreTrend: number[]; scoreTrendLabels: string[];
+  scoreDistribution: number[]; scoreDistributionLabels: string[];
+  topicAccuracy: { label: string; value: number }[];
+};
+
+// Real replacement for the teacherAnalyticsStats/scoreTrend/scoreDistribution/
+// topicAccuracy mock (all permanently empty for this screen). Same
+// class+subject dual scoping already established for this teacher dashboard
+// (fetchRealClassStudents above) - a teacher's RLS access to
+// question_attempts/questions is already scoped to their own assigned
+// classes, so unlike the parent-side equivalent this can run as a direct
+// client query with no new server route needed.
+async function fetchClassAnalytics(classId: string, subjectId: string): Promise<ClassAnalytics> {
+  const { data: aRows } = await supabase
+    .from("assessments")
+    .select("id, title, created_at")
+    .eq("class_id", classId)
+    .eq("subject_id", subjectId)
+    .order("created_at", { ascending: true });
+  const assessments = aRows ?? [];
+  const assessmentIds = assessments.map(a => a.id as string);
+  const empty: ClassAnalytics = { scoreTrend: [], scoreTrendLabels: [], scoreDistribution: [], scoreDistributionLabels: ["0-40", "41-60", "61-80", "81-100"], topicAccuracy: [] };
+  if (assessmentIds.length === 0) return empty;
+
+  const { data: attemptRows } = await supabase
+    .from("assessment_attempts")
+    .select("id, assessment_id, score")
+    .in("assessment_id", assessmentIds)
+    .in("status", ["submitted", "graded"]);
+  const attempts = (attemptRows ?? []) as Array<{ id: string; assessment_id: string; score: number | null }>;
+
+  const byAssessment = new Map<string, { sum: number; count: number }>();
+  for (const a of attempts) {
+    if (a.score == null) continue;
+    const cur = byAssessment.get(a.assessment_id) ?? { sum: 0, count: 0 };
+    cur.sum += a.score;
+    cur.count += 1;
+    byAssessment.set(a.assessment_id, cur);
+  }
+  const trendPoints = assessments
+    .map(a => ({ title: a.title as string, stat: byAssessment.get(a.id as string) }))
+    .filter((p): p is { title: string; stat: { sum: number; count: number } } => !!p.stat);
+  const scoreTrend = trendPoints.map(p => Math.round(p.stat.sum / p.stat.count));
+  const scoreTrendLabels = trendPoints.map(p => p.title);
+
+  const latestWithData = [...assessments].reverse().find(a => byAssessment.has(a.id as string));
+  let scoreDistribution: number[] = [];
+  if (latestWithData) {
+    const scores = attempts.filter(a => a.assessment_id === latestWithData.id && a.score != null).map(a => a.score as number);
+    const buckets = [0, 0, 0, 0];
+    for (const s of scores) {
+      if (s <= 40) buckets[0]++;
+      else if (s <= 60) buckets[1]++;
+      else if (s <= 80) buckets[2]++;
+      else buckets[3]++;
+    }
+    scoreDistribution = buckets;
+  }
+
+  const attemptIds = attempts.map(a => a.id);
+  const topicAccuracy: { label: string; value: number }[] = [];
+  if (attemptIds.length > 0) {
+    const { data: qaRows } = await supabase
+      .from("question_attempts")
+      .select("is_correct, assessment_questions(questions(topic))")
+      .in("assessment_attempt_id", attemptIds);
+    type QARow = { is_correct: boolean | null; assessment_questions: { questions: { topic: string } | null } | null };
+    const byTopic = new Map<string, { total: number; correct: number }>();
+    for (const r of (qaRows ?? []) as unknown as QARow[]) {
+      const topic = r.assessment_questions?.questions?.topic;
+      if (!topic) continue;
+      const cur = byTopic.get(topic) ?? { total: 0, correct: 0 };
+      cur.total += 1;
+      if (r.is_correct) cur.correct += 1;
+      byTopic.set(topic, cur);
+    }
+    for (const [label, v] of byTopic.entries()) {
+      topicAccuracy.push({ label, value: Math.round((v.correct / v.total) * 100) });
+    }
+  }
+
+  return { scoreTrend, scoreTrendLabels, scoreDistribution, scoreDistributionLabels: empty.scoreDistributionLabels, topicAccuracy };
 }
 
 type OwnStudentStats = { avgScore: number; xp: number; streak: number; rank: number; classSize: number; className: string; totalAssessments: number };
@@ -4120,13 +4202,26 @@ function TeacherAnalytics() {
   const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name ?? teacher?.classes[0]?.name ?? "-";
   const [classStudents, setClassStudents] = useState<Student[]>([]);
   const activeStats = computeRealClassStats(classStudents);
+  const [analytics, setAnalytics] = useState<ClassAnalytics>({ scoreTrend: [], scoreTrendLabels: [], scoreDistribution: [], scoreDistributionLabels: [], topicAccuracy: [] });
 
   useEffect(() => {
     if (!activeClass) { setClassStudents([]); return; }
     fetchRealClassStudents(activeClass, activeAssignment?.subjectId, activeClassName).then(setClassStudents);
   }, [activeClass, activeAssignment?.subjectId, activeClassName]);
 
-  const popupTopic = topicAccuracy.find(t => t.label === topicPopup);
+  useEffect(() => {
+    if (!activeClass || !activeAssignment?.subjectId) { setAnalytics({ scoreTrend: [], scoreTrendLabels: [], scoreDistribution: [], scoreDistributionLabels: [], topicAccuracy: [] }); return; }
+    fetchClassAnalytics(activeClass, activeAssignment.subjectId).then(setAnalytics);
+  }, [activeClass, activeAssignment?.subjectId]);
+
+  const teacherAnalyticsStats = [
+    { label: "Rata-rata Kelas", value: String(activeStats.avgScore), detail: `${activeStats.total} siswa`, tone: "primary" as const },
+    { label: "Sesuai Target", value: String(activeStats.onTrack), detail: "On Track", tone: "success" as const },
+    { label: "Perlu Ditinjau", value: String(activeStats.needReview), detail: "Need Review", tone: "warning" as const },
+    { label: "Butuh Perhatian", value: String(activeStats.atRisk), detail: "At Risk", tone: "neutral" as const },
+  ];
+
+  const popupTopic = analytics.topicAccuracy.find(t => t.label === topicPopup);
   const popupRec = topicPopup
     ? teachingRecommendations.find(r => r.topic.toLowerCase() === topicPopup.toLowerCase())
     : null;
@@ -4143,23 +4238,23 @@ function TeacherAnalytics() {
         <div className="col-span-1 lg:col-span-2 rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Tren Nilai Kelas</h3>
           <p className="text-[12px] text-ink-secondary mb-4">Rata-rata per asesmen</p>
-          {scoreTrend.length === 0 ? (
+          {analytics.scoreTrend.length === 0 ? (
             <div className="flex items-center justify-center h-[120px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah asesmen diselesaikan</p>
             </div>
           ) : (
-            <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={120} />
+            <SimpleChart data={analytics.scoreTrend} labels={analytics.scoreTrendLabels} height={120} />
           )}
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Distribusi Nilai</h3>
           <p className="text-[12px] text-ink-secondary mb-4">Berdasarkan asesmen terakhir</p>
-          {scoreDistribution.length === 0 ? (
+          {analytics.scoreDistribution.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Belum ada data asesmen</p>
             </div>
           ) : (
-            <SimpleChart data={scoreDistribution} labels={scoreDistributionLabels} type="bar" height={100} />
+            <SimpleChart data={analytics.scoreDistribution} labels={analytics.scoreDistributionLabels} type="bar" height={100} />
           )}
         </div>
       </div>
@@ -4171,13 +4266,13 @@ function TeacherAnalytics() {
             <p className="text-[12px] text-ink-secondary mt-0.5">Rata-rata kelas berdasarkan bank soal · klik topik untuk rekomendasi</p>
           </div>
         </div>
-        {topicAccuracy.length === 0 ? (
+        {analytics.topicAccuracy.length === 0 ? (
           <div className="flex items-center justify-center py-10 rounded-[8px] border border-dashed border-border">
             <p className="text-[12px] text-ink-tertiary">Data akurasi akan tersedia setelah siswa mengerjakan asesmen</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
-            {topicAccuracy.map(t => (
+            {analytics.topicAccuracy.map(t => (
               <div key={t.label} className="cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setTopicPopup(t.label)}>
                 <TopicBar label={t.label} value={t.value} />
               </div>
@@ -6320,31 +6415,111 @@ function ParentAssessments() {
 
 function ParentRecommendations() {
   const [child, setChild] = useState<ParentChild | null | undefined>(undefined);
+  const [recs, setRecs] = useState<typeof teachingRecommendations>([]);
+  const [summary, setSummary] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [doneMap, setDoneMap] = useState<Map<string, number>>(new Map());
+
+  useEffect(() => { setDoneMap(loadRecDone()); }, []);
   useEffect(() => { fetchParentPrimaryChild().then(setChild); }, []);
+
+  useEffect(() => {
+    if (!child) return;
+    setLoading(true);
+    setError("");
+    authedFetch("/api/parent/topic-stats", { studentId: child.studentId })
+      .then((data) => {
+        const topicStats = (data as { topicStats?: Array<{ topic: string; avgSuccessRate: number; count: number }> } | null)?.topicStats ?? [];
+        if (topicStats.length === 0) { setLoading(false); return; }
+        return fetch("/api/recommendations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ topicStats, className: child.className }),
+        })
+          .then(r => r.json())
+          .then((res: { summary?: string; recommendations?: typeof teachingRecommendations; error?: string }) => {
+            if (res.error) { setError(res.error); return; }
+            setSummary(res.summary ?? "");
+            setRecs(res.recommendations ?? []);
+          });
+      })
+      .catch(e => setError(e instanceof Error ? e.message : "Gagal memuat rekomendasi"))
+      .finally(() => setLoading(false));
+  }, [child]);
+
+  function toggleDone(id: string) {
+    setDoneMap(prev => {
+      const next = new Map(prev);
+      if (next.has(id)) next.delete(id); else next.set(id, Date.now());
+      saveRecDone(next);
+      return next;
+    });
+  }
+
   const childName = child?.fullName ?? "anak Anda";
-  const parentRecs = [...teachingRecommendations].sort((a, b) => b.wrongCount - a.wrongCount);
+  const pending = recs.filter(r => !doneMap.has(r.id));
+  const done = recs.filter(r => doneMap.has(r.id)).sort((a, b) => (doneMap.get(b.id) ?? 0) - (doneMap.get(a.id) ?? 0));
+
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Rekomendasi Pengajaran" title="Saran Belajar dari Guru Kelas"
-        description={`Rekomendasi pengajaran untuk ${childName} berdasarkan analisis AI dan penilaian guru.`} />
-      {parentRecs.length >= 2 && (
+        description={`Rekomendasi pengajaran untuk ${childName} berdasarkan analisis AI atas hasil asesmen yang sudah dikerjakan.`} />
+
+      {loading && (
+        <div className="rounded-card border border-border bg-surface p-8 text-center space-y-3">
+          <div className="flex justify-center">
+            <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+          </div>
+          <p className="text-[13px] text-ink-secondary">AI sedang menganalisis hasil asesmen {childName.split(" ")[0]}...</p>
+        </div>
+      )}
+
+      {error && !loading && (
+        <AlertPanel tone="danger" title="Gagal memuat rekomendasi">{error}</AlertPanel>
+      )}
+
+      {!loading && !error && summary && (
         <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
-          <p>{childName.split(" ")[0]} paling sering salah di <strong className="text-ink">{parentRecs[0].topic}</strong> ({parentRecs[0].wrongCount}× salah) dan <strong className="text-ink">{parentRecs[1].topic}</strong> ({parentRecs[1].wrongCount}× salah). Fokus latihan pada topik-topik ini.</p>
+          <p>{summary}</p>
         </AIInsightPanel>
       )}
-      <div className="space-y-4">
-        {parentRecs.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 py-10 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
-              <Lightbulb className="h-6 w-6 text-ink-tertiary" />
-            </div>
-            <p className="text-[14px] font-semibold text-ink">Belum ada rekomendasi</p>
-            <p className="text-[12px] text-ink-secondary">Rekomendasi akan muncul setelah ada hasil asesmen</p>
+
+      {!loading && !error && recs.length === 0 && (
+        <div className="flex flex-col items-center gap-3 py-10 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
+            <Lightbulb className="h-6 w-6 text-ink-tertiary" />
           </div>
-        ) : (
-          parentRecs.slice(0, 2).map(r => <RecommendationCard key={r.id} rec={r} />)
-        )}
-      </div>
+          <p className="text-[14px] font-semibold text-ink">Belum ada rekomendasi</p>
+          <p className="text-[12px] text-ink-secondary">Rekomendasi akan muncul setelah ada hasil asesmen</p>
+        </div>
+      )}
+
+      {!loading && pending.length > 0 && (
+        <div className="space-y-4">
+          {pending.map(r => <RecommendationCard key={r.id} rec={r} done={false} onToggle={() => toggleDone(r.id)} />)}
+        </div>
+      )}
+
+      {!loading && recs.length > 0 && pending.length === 0 && (
+        <div className="rounded-[10px] border border-success/20 bg-success/5 px-5 py-4 text-center">
+          <p className="text-[13px] font-semibold text-success">Semua rekomendasi sudah diselesaikan!</p>
+        </div>
+      )}
+
+      {!loading && done.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-[13px] font-bold text-ink">Rekomendasi yang Sudah Diselesaikan</h3>
+              <p className="text-[11px] text-ink-tertiary mt-0.5">Disimpan selama 7 hari · {done.length} item</p>
+            </div>
+          </div>
+          <div className="space-y-3">
+            {done.map(r => <RecommendationCard key={r.id} rec={r} done={true} onToggle={() => toggleDone(r.id)} />)}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
