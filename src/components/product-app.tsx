@@ -55,7 +55,6 @@ import {
   studentProgressStats,
   studentResults,
   students,
-  subjectMastery,
   suggestedPrompts,
   teacherAnalyticsStats,
   teachingRecommendations,
@@ -1303,6 +1302,51 @@ async function fetchChildCompletedAttempts(studentId: string): Promise<ReviewLis
     score: r.score ?? 0,
     allowReview: r.assessments?.allow_review ?? false,
   }));
+}
+
+type ScoreTrendData = { trend: number[]; labels: string[] };
+type SubjectMasteryEntry = { label: string; value: number; tone: "success" | "primary" | "warning" | "neutral" };
+
+// Real replacement for the scoreTrend/subjectMastery mock (both permanently
+// empty arrays in src/lib/db). Deliberately reads only assessment_attempts +
+// assessments + subjects - tables already proven safe for both a student's
+// own session and a parent's linked-child session before this function
+// existed. question_attempts/questions would give truer per-topic (rather
+// than per-subject) granularity, but neither has a parent-facing RLS policy
+// today, and adding cross-table policies is exactly what caused the
+// teacher_assignments recursion incident (012/013) - so "Penguasaan Topik"
+// here is real per-SUBJECT average score, not fine-grained sub-topic
+// accuracy. Flagged rather than silently relabeled.
+async function fetchScoreTrendAndSubjectMastery(studentId: string): Promise<{ scoreTrend: ScoreTrendData; subjectMastery: SubjectMasteryEntry[] }> {
+  const { data } = await supabase
+    .from("assessment_attempts")
+    .select("score, submitted_at, assessments(subject_id, subjects(name))")
+    .eq("student_id", studentId)
+    .in("status", ["submitted", "graded"])
+    .order("submitted_at", { ascending: true });
+  type Row = { score: number | null; submitted_at: string | null; assessments: { subject_id: string; subjects: { name: string } | null } | null };
+  const rows = ((data ?? []) as unknown as Row[]).filter(r => r.score != null);
+
+  const recent = rows.slice(-6);
+  const scoreTrend: ScoreTrendData = {
+    trend: recent.map(r => r.score as number),
+    labels: recent.map(r => r.submitted_at ? new Date(r.submitted_at).toLocaleDateString("id-ID", { day: "numeric", month: "short" }) : "-"),
+  };
+
+  const bySubject = new Map<string, { sum: number; count: number }>();
+  for (const r of rows) {
+    const name = r.assessments?.subjects?.name ?? "Umum";
+    const cur = bySubject.get(name) ?? { sum: 0, count: 0 };
+    cur.sum += r.score as number;
+    cur.count += 1;
+    bySubject.set(name, cur);
+  }
+  const subjectMastery: SubjectMasteryEntry[] = [...bySubject.entries()].map(([label, s]) => {
+    const value = Math.round(s.sum / s.count);
+    return { label, value, tone: value >= 80 ? "success" : value >= 60 ? "primary" : "warning" };
+  });
+
+  return { scoreTrend, subjectMastery };
 }
 
 // Per-question review detail - only ever returns rows when the assessment's
@@ -5916,6 +5960,19 @@ function StudentTutor() {
 
 function StudentProgress() {
   const ownStats = useOwnStudentStats();
+  const [scoreTrendData, setScoreTrendData] = useState<ScoreTrendData>({ trend: [], labels: [] });
+  const [subjectMasteryData, setSubjectMasteryData] = useState<SubjectMasteryEntry[]>([]);
+
+  useEffect(() => {
+    getCurrentStudent().then(student => {
+      if (!student) return;
+      fetchScoreTrendAndSubjectMastery(student.id).then(({ scoreTrend, subjectMastery }) => {
+        setScoreTrendData(scoreTrend);
+        setSubjectMasteryData(subjectMastery);
+      });
+    });
+  }, []);
+
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Progres Belajar" title="Perjalanan Belajarmu" />
@@ -5926,23 +5983,23 @@ function StudentProgress() {
         <div className="col-span-1 lg:col-span-2 rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Tren Nilai</h3>
           <p className="text-[12px] text-ink-secondary mb-4">Berdasarkan riwayat asesmen</p>
-          {scoreTrend.length === 0 ? (
+          {scoreTrendData.trend.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah mengerjakan asesmen</p>
             </div>
           ) : (
-            <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={100} />
+            <SimpleChart data={scoreTrendData.trend} labels={scoreTrendData.labels} height={100} />
           )}
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Penguasaan Materi</h3>
-          {subjectMastery.length === 0 ? (
+          {subjectMasteryData.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Belum ada data penguasaan</p>
             </div>
           ) : (
             <div className="space-y-3">
-              {subjectMastery.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
+              {subjectMasteryData.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
             </div>
           )}
         </div>
@@ -6155,11 +6212,19 @@ function ParentDashboard() {
 function ParentProgress() {
   const [child, setChild] = useState<ParentChild | null | undefined>(undefined);
   const [stats, setStats] = useState<OwnStudentStats | null>(null);
+  const [scoreTrendData, setScoreTrendData] = useState<ScoreTrendData>({ trend: [], labels: [] });
+  const [subjectMasteryData, setSubjectMasteryData] = useState<SubjectMasteryEntry[]>([]);
 
   useEffect(() => {
     fetchParentPrimaryChild().then(c => {
       setChild(c);
-      if (c) fetchClassRankedStats(c.studentId, c.classId).then(setStats);
+      if (c) {
+        fetchClassRankedStats(c.studentId, c.classId).then(setStats);
+        fetchScoreTrendAndSubjectMastery(c.studentId).then(({ scoreTrend, subjectMastery }) => {
+          setScoreTrendData(scoreTrend);
+          setSubjectMasteryData(subjectMastery);
+        });
+      }
     });
   }, []);
 
@@ -6186,23 +6251,23 @@ function ParentProgress() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Tren Nilai</h3>
-          {scoreTrend.length === 0 ? (
+          {scoreTrendData.trend.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah anak mengerjakan asesmen</p>
             </div>
           ) : (
-            <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={100} />
+            <SimpleChart data={scoreTrendData.trend} labels={scoreTrendData.labels} height={100} />
           )}
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Penguasaan Topik</h3>
-          {subjectMastery.length === 0 ? (
+          {subjectMasteryData.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Belum ada data penguasaan</p>
             </div>
           ) : (
             <div className="space-y-3">
-              {subjectMastery.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
+              {subjectMasteryData.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
             </div>
           )}
         </div>
