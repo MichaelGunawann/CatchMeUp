@@ -1,5 +1,7 @@
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 import Groq from "groq-sdk";
+import { supabaseAdmin } from "@/lib/supabase/server";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -14,12 +16,42 @@ async function extractPdfText(buffer: Buffer): Promise<string> {
   return text.trim();
 }
 
+/**
+ * Accepts either a real materials Storage path (preferred - the file is
+ * already there from the upload step, so the server fetches it directly
+ * instead of the browser re-sending the raw bytes through this function) or
+ * a raw multipart file (kept for backward compatibility with any caller that
+ * hasn't uploaded to Storage yet). The multipart path is subject to
+ * Vercel's serverless request body size cap; the storagePath path is not.
+ */
 export async function POST(req: Request) {
-  const formData = await req.formData();
-  const file = formData.get("file") as File | null;
-  const count = parseInt((formData.get("count") as string) ?? "5");
-  const materialTitle = (formData.get("materialTitle") as string) ?? "";
-  const subject = (formData.get("subject") as string) ?? "";
+  const contentType = req.headers.get("content-type") ?? "";
+  let file: File | null = null;
+  let fileName = "";
+  let count = 5;
+  let materialTitle = "";
+  let subject = "";
+
+  if (contentType.includes("application/json")) {
+    const body = await req.json() as { storagePath?: string; fileName?: string; count?: number; materialTitle?: string; subject?: string };
+    if (!body.storagePath) return Response.json({ error: "storagePath tidak ditemukan.", questions: [] }, { status: 400 });
+    fileName = body.fileName ?? body.storagePath;
+    count = body.count ?? 5;
+    materialTitle = body.materialTitle ?? "";
+    subject = body.subject ?? "";
+
+    const { data, error } = await supabaseAdmin.storage.from("materials").download(body.storagePath);
+    if (error || !data) {
+      return Response.json({ error: `Gagal mengambil file dari penyimpanan: ${error?.message ?? "unknown"}`, questions: [] }, { status: 500 });
+    }
+    file = new File([await data.arrayBuffer()], fileName);
+  } else {
+    const formData = await req.formData();
+    file = formData.get("file") as File | null;
+    count = parseInt((formData.get("count") as string) ?? "5");
+    materialTitle = (formData.get("materialTitle") as string) ?? "";
+    subject = (formData.get("subject") as string) ?? "";
+  }
 
   if (!file) return Response.json({ error: "File tidak ditemukan.", questions: [] }, { status: 400 });
   if (!process.env.GROQ_API_KEY) return Response.json({ error: "GROQ_API_KEY belum diset di .env.local", questions: [] }, { status: 500 });

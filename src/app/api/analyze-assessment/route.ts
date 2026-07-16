@@ -1,4 +1,5 @@
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 import Groq from "groq-sdk";
 
 let _groq: Groq | null = null;

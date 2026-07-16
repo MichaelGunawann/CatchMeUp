@@ -55,7 +55,6 @@ import {
   studentProgressStats,
   studentResults,
   students,
-  subjectMastery,
   suggestedPrompts,
   teacherAnalyticsStats,
   teachingRecommendations,
@@ -83,7 +82,7 @@ import {
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase/client";
 import { getCurrentProfile } from "@/lib/auth/session";
-import { getCurrentTeacher, getCurrentStudent } from "@/lib/auth/authorization";
+import { getCurrentTeacher, getCurrentStudent, getCurrentParent } from "@/lib/auth/authorization";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -281,22 +280,26 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
       setUploading(false);
       return;
     }
-    await uploadMaterialFile(file, teacher.schoolId, matId);
+    const uploadedPath = await uploadMaterialFile(file, teacher.schoolId, matId);
 
     setToast({ message: "Mengunggah materi dan memulai analisis AI...", tone: "primary" });
 
-    // Extract questions from file
+    // Extract questions from the file already sitting in Storage - the
+    // server fetches it directly, so this isn't subject to Vercel's
+    // serverless request body size cap the way resending the raw file
+    // through this function would be.
     let rawQuestions: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> = [];
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("count", "5");
-      fd.append("materialTitle", title);
-      fd.append("subject", activeSubjectName);
-      const res = await fetch("/api/extract-and-generate", { method: "POST", body: fd });
-      const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
-      rawQuestions = data.questions ?? [];
-    } catch { /* will fall back to empty */ }
+    if (uploadedPath) {
+      try {
+        const res = await fetch("/api/extract-and-generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ storagePath: uploadedPath, fileName: title, count: 5, materialTitle: title, subject: activeSubjectName }),
+        });
+        const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
+        rawQuestions = data.questions ?? [];
+      } catch { /* will fall back to empty */ }
+    }
 
     if (!rawQuestions.length) {
       // Fallback: generate from metadata
@@ -488,6 +491,93 @@ function computeRealClassStats(classStudents: Student[]) {
     atRisk: classStudents.filter(s => s.status === "At Risk").length,
     avgScore: classStudents.length ? Math.round(classStudents.reduce((sum, s) => sum + s.avgScore, 0) / classStudents.length) : 0,
   };
+}
+
+type OwnStudentStats = { avgScore: number; xp: number; streak: number; rank: number; classSize: number; className: string; totalAssessments: number };
+
+// Real replacement for the studentProfile/studentProgressStats mock: computes
+// the signed-in student's own average (across every subject, unlike the
+// teacher-side dashboard's class+subject dual scoping - a student's overall
+// progress view isn't tied to one subject), real xp/streak (already real
+// columns on `students`), and a real class rank derived the same way as
+// computeRealClassStats/fetchRealClassStudents (rank by avgScore desc,
+// no-data students last).
+async function fetchOwnStudentStats(): Promise<OwnStudentStats | null> {
+  const student = await getCurrentStudent();
+  if (!student || !student.class_id) return null;
+  return fetchClassRankedStats(student.id, student.class_id);
+}
+
+// Shared by a student viewing their own stats and a parent viewing a linked
+// child's stats - same ranking computation, just parameterized by whose
+// student row to resolve. `xp`/`streak_days` are real columns on `students`
+// (added by migration 007) but not yet reflected in the generated
+// supabase/types.ts, so this reads them with an explicit select + cast, the
+// same workaround fetchRealClassStudents already uses above.
+async function fetchClassRankedStats(studentId: string, classId: string): Promise<OwnStudentStats | null> {
+  const [{ data: classData }, { data: classmates }] = await Promise.all([
+    supabase.from("classes").select("name").eq("id", classId).single(),
+    supabase.from("students").select("id, xp, streak_days").eq("class_id", classId).eq("status", "ACTIVE"),
+  ]);
+  const roster = (classmates ?? []) as Array<{ id: string; xp: number; streak_days: number }>;
+  const self = roster.find(r => r.id === studentId);
+  if (!self) return null;
+
+  const { data: aRows } = await supabase.from("assessments").select("id").eq("class_id", classId);
+  const assessmentIds = (aRows ?? []).map(r => r.id as string);
+
+  const scoreByStudent = new Map<string, { sum: number; count: number }>();
+  if (assessmentIds.length > 0) {
+    const { data: attemptRows } = await supabase
+      .from("assessment_attempts")
+      .select("student_id, score")
+      .in("assessment_id", assessmentIds)
+      .in("status", ["submitted", "graded"]);
+    for (const row of (attemptRows ?? []) as Array<{ student_id: string; score: number | null }>) {
+      if (row.score == null) continue;
+      const cur = scoreByStudent.get(row.student_id) ?? { sum: 0, count: 0 };
+      cur.sum += row.score;
+      cur.count += 1;
+      scoreByStudent.set(row.student_id, cur);
+    }
+  }
+
+  const withScores = roster.map(r => {
+    const stat = scoreByStudent.get(r.id);
+    return { id: r.id, avgScore: stat ? stat.sum / stat.count : null };
+  });
+  const ranked = [...withScores].sort((a, b) => (b.avgScore ?? -1) - (a.avgScore ?? -1));
+  const rankMap = new Map(ranked.map((s, i) => [s.id, i + 1]));
+
+  const own = scoreByStudent.get(studentId);
+  return {
+    avgScore: own ? Math.round(own.sum / own.count) : 0,
+    xp: self.xp,
+    streak: self.streak_days,
+    rank: rankMap.get(studentId) ?? roster.length,
+    classSize: roster.length,
+    className: classData?.name ?? "-",
+    totalAssessments: own?.count ?? 0,
+  };
+}
+
+function useOwnStudentStats(): OwnStudentStats | null {
+  const [stats, setStats] = useState<OwnStudentStats | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetchOwnStudentStats().then(s => { if (!cancelled) setStats(s); });
+    return () => { cancelled = true; };
+  }, []);
+  return stats;
+}
+
+function ownStudentStatCards(stats: OwnStudentStats | null) {
+  return [
+    { label: "Rata-rata nilai", value: stats ? String(stats.avgScore) : "-", detail: "Dari asesmen yang sudah dinilai", tone: "success" as const },
+    { label: "XP terkumpul", value: stats ? stats.xp.toLocaleString("id-ID") : "-", detail: "Poin pengalaman belajar", tone: "primary" as const },
+    { label: "Streak belajar", value: stats ? `${stats.streak} hari` : "-", detail: "Konsistensi belajar harian", tone: "neutral" as const },
+    { label: "Peringkat kelas", value: stats ? `#${stats.rank}` : "-", detail: stats?.className ?? "-", tone: "warning" as const },
+  ];
 }
 
 // ── Teacher Dashboard ─────────────────────────────────────────────────────────
@@ -1191,6 +1281,74 @@ async function fetchStudentCompletedAttempts(): Promise<ReviewListItem[]> {
   }));
 }
 
+// Parent-scoped equivalent of fetchStudentCompletedAttempts - relies on the
+// "Parents can view linked children attempts" RLS policy
+// (supabase/migrations/002_rls_policies.sql) which already restricts this to
+// only verified linked children, same trust boundary as the student version.
+async function fetchChildCompletedAttempts(studentId: string): Promise<ReviewListItem[]> {
+  const { data } = await supabase
+    .from("assessment_attempts")
+    .select("id, assessment_id, score, submitted_at, assessments(title, type, allow_review)")
+    .eq("student_id", studentId)
+    .in("status", ["submitted", "graded"])
+    .order("submitted_at", { ascending: false });
+  type Row = { id: string; assessment_id: string; score: number | null; submitted_at: string | null; assessments: { title: string; type: string | null; allow_review: boolean } | null };
+  return ((data ?? []) as unknown as Row[]).map(r => ({
+    attemptId: r.id,
+    assessmentId: r.assessment_id,
+    assessmentTitle: r.assessments?.title ?? "Asesmen",
+    type: r.assessments?.type ?? "Asesmen",
+    date: r.submitted_at ? new Date(r.submitted_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }) : "-",
+    score: r.score ?? 0,
+    allowReview: r.assessments?.allow_review ?? false,
+  }));
+}
+
+type ScoreTrendData = { trend: number[]; labels: string[] };
+type SubjectMasteryEntry = { label: string; value: number; tone: "success" | "primary" | "warning" | "neutral" };
+
+// Real replacement for the scoreTrend/subjectMastery mock (both permanently
+// empty arrays in src/lib/db). Deliberately reads only assessment_attempts +
+// assessments + subjects - tables already proven safe for both a student's
+// own session and a parent's linked-child session before this function
+// existed. question_attempts/questions would give truer per-topic (rather
+// than per-subject) granularity, but neither has a parent-facing RLS policy
+// today, and adding cross-table policies is exactly what caused the
+// teacher_assignments recursion incident (012/013) - so "Penguasaan Topik"
+// here is real per-SUBJECT average score, not fine-grained sub-topic
+// accuracy. Flagged rather than silently relabeled.
+async function fetchScoreTrendAndSubjectMastery(studentId: string): Promise<{ scoreTrend: ScoreTrendData; subjectMastery: SubjectMasteryEntry[] }> {
+  const { data } = await supabase
+    .from("assessment_attempts")
+    .select("score, submitted_at, assessments(subject_id, subjects(name))")
+    .eq("student_id", studentId)
+    .in("status", ["submitted", "graded"])
+    .order("submitted_at", { ascending: true });
+  type Row = { score: number | null; submitted_at: string | null; assessments: { subject_id: string; subjects: { name: string } | null } | null };
+  const rows = ((data ?? []) as unknown as Row[]).filter(r => r.score != null);
+
+  const recent = rows.slice(-6);
+  const scoreTrend: ScoreTrendData = {
+    trend: recent.map(r => r.score as number),
+    labels: recent.map(r => r.submitted_at ? new Date(r.submitted_at).toLocaleDateString("id-ID", { day: "numeric", month: "short" }) : "-"),
+  };
+
+  const bySubject = new Map<string, { sum: number; count: number }>();
+  for (const r of rows) {
+    const name = r.assessments?.subjects?.name ?? "Umum";
+    const cur = bySubject.get(name) ?? { sum: 0, count: 0 };
+    cur.sum += r.score as number;
+    cur.count += 1;
+    bySubject.set(name, cur);
+  }
+  const subjectMastery: SubjectMasteryEntry[] = [...bySubject.entries()].map(([label, s]) => {
+    const value = Math.round(s.sum / s.count);
+    return { label, value, tone: value >= 80 ? "success" : value >= 60 ? "primary" : "warning" };
+  });
+
+  return { scoreTrend, subjectMastery };
+}
+
 // Per-question review detail - only ever returns rows when the assessment's
 // allow_review is true, since that's exactly what the "Students can view
 // questions for reviewable completed assessments" RLS policy
@@ -1323,13 +1481,13 @@ async function insertMaterial(params: { schoolId: string; classId: string; subje
   return data.id;
 }
 
-async function uploadMaterialFile(file: File, schoolId: string, materialId: string): Promise<void> {
+async function uploadMaterialFile(file: File, schoolId: string, materialId: string): Promise<string | null> {
   const ext = file.name.split(".").pop() || "bin";
   const path = `${schoolId}/${materialId}.${ext}`;
   const { error } = await supabase.storage.from("materials").upload(path, file, { upsert: true });
-  if (!error) {
-    await supabase.from("materials").update({ file_url: path, file_size: file.size }).eq("id", materialId);
-  }
+  if (error) return null;
+  await supabase.from("materials").update({ file_url: path, file_size: file.size }).eq("id", materialId);
+  return path;
 }
 
 async function markMaterialProcessed(materialId: string): Promise<void> {
@@ -1347,15 +1505,6 @@ async function downloadMaterialFile(fileUrl: string, fallbackName: string): Prom
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-}
-
-// Pulls the file back down as a real File object for re-extraction (e.g.
-// "Generate 5 Soal Lagi" after a page reload, when nothing is cached
-// in-memory from this session's own upload).
-async function fetchMaterialAsFile(fileUrl: string, fileName: string): Promise<File | null> {
-  const { data, error } = await supabase.storage.from("materials").download(fileUrl);
-  if (error || !data) return null;
-  return new File([data], fileName);
 }
 
 // Publish/save-draft: creates the assessments row, then (for AI-sourced
@@ -1550,26 +1699,24 @@ function TeacherMaterials() {
   async function generateQuestionsFromMaterial(
     id: string,
     append = false,
-    fileOverride?: File,
+    storagePathOverride?: string,
     matOverride?: { title: string; subject: string },
   ): Promise<number> {
     const mat = matOverride ?? allMaterials.find(m => m.id === id);
-    let file: File | undefined = fileOverride ?? materialFiles[id];
-    if (!file && mat && "fileUrl" in mat && (mat as MaterialWithFile).fileUrl) {
-      file = (await fetchMaterialAsFile((mat as MaterialWithFile).fileUrl!, mat.title)) ?? undefined;
-    }
+    const storagePath = storagePathOverride ?? (mat && "fileUrl" in mat ? (mat as MaterialWithFile).fileUrl ?? undefined : undefined);
 
     let rawQuestions: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> = [];
 
-    if (file) {
-      // Real extraction: send the actual file to Gemini
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("count", "5");
-      fd.append("materialTitle", mat?.title ?? "Materi");
-      fd.append("subject", mat?.subject ?? activeSubjectName);
+    if (storagePath) {
+      // Real extraction: the server fetches the file directly from Storage
+      // (not through this request), so this isn't subject to Vercel's
+      // serverless request body size cap the way sending the raw file would be.
       try {
-        const res = await fetch("/api/extract-and-generate", { method: "POST", body: fd });
+        const res = await fetch("/api/extract-and-generate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ storagePath, fileName: mat?.title ?? "Materi", count: 5, materialTitle: mat?.title ?? "Materi", subject: mat?.subject ?? activeSubjectName }),
+        });
         const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
         if (data.error && !data.questions?.length) {
           setToast({ message: data.error, tone: "primary" });
@@ -1767,11 +1914,14 @@ function TeacherMaterials() {
                 };
                 setUploadedMaterials(prev => [newMat, ...prev]);
 
-                // Keep the file in-memory for this session's immediate
-                // extraction call below, and upload it to real Storage.
+                // Keep the file in-memory for this session's own download
+                // button, and upload it to real Storage - the extraction
+                // call below fetches it back from there server-side rather
+                // than resending the raw bytes through Vercel.
+                let uploadedPath: string | null = null;
                 if (capturedFile) {
                   setMaterialFiles(prev => ({ ...prev, [matId]: capturedFile }));
-                  await uploadMaterialFile(capturedFile, teacher.schoolId, matId);
+                  uploadedPath = await uploadMaterialFile(capturedFile, teacher.schoolId, matId);
                 }
 
                 // Close upload panel immediately so user sees the list
@@ -1794,7 +1944,7 @@ function TeacherMaterials() {
                 setToast({ message: "AI sedang membaca isi materi dan membuat soal...", tone: "primary" });
                 const count = await generateQuestionsFromMaterial(
                   matId, false,
-                  capturedFile ?? undefined,
+                  uploadedPath ?? undefined,
                   { title, subject: activeSubjectName },
                 );
                 setProcessingIds(prev => { const next = new Set(prev); next.delete(matId); return next; });
@@ -4897,7 +5047,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   // ── Pick screen ──
   if (page === "pick") {
     return (
-      <AppShell role="student" nav={studentNav} demoData>
+      <AppShell role="student" nav={studentNav}>
         <div className="space-y-6">
           <PageHeader eyebrow="Simulasi Ujian" title="Pilih Asesmen Resmi"
             description="Pilih ujian yang akan diikuti. Ujian resmi berjalan dalam mode kiosk — berpindah tab atau keluar layar penuh otomatis mengakhiri ujian." />
@@ -4966,7 +5116,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   // Guard: if page is exam but no questions loaded, go back to pick
   if (page === "exam" && total === 0) {
     return (
-      <AppShell role="student" nav={studentNav} demoData>
+      <AppShell role="student" nav={studentNav}>
         <div className="flex flex-col items-center gap-4 py-16 text-center">
           <AlertCircle className="h-10 w-10 text-warning" />
           <p className="text-[15px] font-bold text-ink">Tidak ada soal di asesmen ini</p>
@@ -5427,6 +5577,7 @@ function StudentReview() {
   const [reviewDetailId, setReviewDetailId] = useState<string | null>(null);
   const [reviewQs, setReviewQs] = useState<ReviewQuestionDetail[]>([]);
   const [materials, setMaterials] = useState<MaterialWithFile[]>([]);
+  const ownStats = useOwnStudentStats();
 
   useEffect(() => {
     fetchStudentMaterialsReal().then(setMaterials);
@@ -5444,7 +5595,7 @@ function StudentReview() {
     <div className="space-y-6">
       <PageHeader eyebrow="Review" title="Riwayat Asesmen" />
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {studentProgressStats.map(s => <StatCard key={s.label} {...s} />)}
+        {ownStudentStatCards(ownStats).map(s => <StatCard key={s.label} {...s} />)}
       </div>
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="border-b border-border px-5 py-3.5">
@@ -5808,33 +5959,47 @@ function StudentTutor() {
 // ── Student Progress ──────────────────────────────────────────────────────────
 
 function StudentProgress() {
+  const ownStats = useOwnStudentStats();
+  const [scoreTrendData, setScoreTrendData] = useState<ScoreTrendData>({ trend: [], labels: [] });
+  const [subjectMasteryData, setSubjectMasteryData] = useState<SubjectMasteryEntry[]>([]);
+
+  useEffect(() => {
+    getCurrentStudent().then(student => {
+      if (!student) return;
+      fetchScoreTrendAndSubjectMastery(student.id).then(({ scoreTrend, subjectMastery }) => {
+        setScoreTrendData(scoreTrend);
+        setSubjectMasteryData(subjectMastery);
+      });
+    });
+  }, []);
+
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Progres Belajar" title="Perjalanan Belajarmu" />
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {studentProgressStats.map(s => <StatCard key={s.label} {...s} />)}
+        {ownStudentStatCards(ownStats).map(s => <StatCard key={s.label} {...s} />)}
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="col-span-1 lg:col-span-2 rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Tren Nilai</h3>
           <p className="text-[12px] text-ink-secondary mb-4">Berdasarkan riwayat asesmen</p>
-          {scoreTrend.length === 0 ? (
+          {scoreTrendData.trend.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah mengerjakan asesmen</p>
             </div>
           ) : (
-            <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={100} />
+            <SimpleChart data={scoreTrendData.trend} labels={scoreTrendData.labels} height={100} />
           )}
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Penguasaan Materi</h3>
-          {subjectMastery.length === 0 ? (
+          {subjectMasteryData.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Belum ada data penguasaan</p>
             </div>
           ) : (
             <div className="space-y-3">
-              {subjectMastery.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
+              {subjectMasteryData.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
             </div>
           )}
         </div>
@@ -5846,6 +6011,7 @@ function StudentProgress() {
 // ── Student Achievements ──────────────────────────────────────────────────────
 
 function StudentAchievements() {
+  const ownStats = useOwnStudentStats();
   const earned = achievements.filter(a => a.earned);
   const notEarned = achievements.filter(a => !a.earned);
 
@@ -5856,10 +6022,10 @@ function StudentAchievements() {
       <div className="rounded-card border border-border bg-gradient-hero text-white p-6">
         <div className="flex items-center gap-6">
           {[
-            { val: studentProfile.xp, label: "Total XP" },
+            { val: ownStats ? ownStats.xp.toLocaleString("id-ID") : "-", label: "Total XP" },
             { val: earned.length, label: "Pencapaian" },
-            { val: `#${studentProfile.rank}`, label: "Peringkat Kelas" },
-            { val: `🔥 ${studentProfile.streak}`, label: "Hari Streak" },
+            { val: ownStats ? `#${ownStats.rank}` : "-", label: "Peringkat Kelas" },
+            { val: ownStats ? `🔥 ${ownStats.streak}` : "🔥 -", label: "Hari Streak" },
           ].map((s, i) => (
             <React.Fragment key={s.label}>
               {i > 0 && <div className="h-10 w-px bg-white/20" />}
@@ -5906,6 +6072,33 @@ function StudentAchievements() {
 // PARENT
 // ═══════════════════════════════════════════════════════════════════════════════
 
+type ParentChild = { studentId: string; classId: string; fullName: string; className: string };
+
+// The legacy UI (ParentProgress/ParentAssessments/ParentRecommendations) was
+// built assuming a single child - there's no child-switcher anywhere in the
+// existing design, so this preserves that assumption rather than inventing
+// one. A parent with more than one verified link only ever sees the first;
+// flagged here since it's a real, if narrow, gap for multi-child parents.
+async function fetchParentPrimaryChild(): Promise<ParentChild | null> {
+  const parent = await getCurrentParent();
+  if (!parent) return null;
+  const { data: linkRows } = await supabase
+    .from("parent_student_links")
+    .select("students(id, user_profile_id, class_id, classes(name))")
+    .eq("parent_id", parent.id)
+    .eq("verified", true);
+  type Row = { students: { id: string; user_profile_id: string; class_id: string; classes: { name: string } | null } | null };
+  const link = ((linkRows ?? []) as unknown as Row[]).find(l => l.students !== null);
+  if (!link?.students) return null;
+  const { data: profile } = await supabase.from("user_profiles").select("full_name").eq("id", link.students.user_profile_id).single();
+  return {
+    studentId: link.students.id,
+    classId: link.students.class_id,
+    fullName: profile?.full_name ?? "-",
+    className: link.students.classes?.name ?? "-",
+  };
+}
+
 function ParentApp({ page }: { page: string }) {
   const screens: Record<string, React.ReactNode> = {
     dashboard: <ParentDashboard />,
@@ -5915,7 +6108,7 @@ function ParentApp({ page }: { page: string }) {
     notifications: <ParentNotificationsPage />,
   };
   return (
-    <AppShell role="parent" nav={parentNav} demoData>
+    <AppShell role="parent" nav={parentNav}>
       {screens[page] ?? <ParentDashboard />}
     </AppShell>
   );
@@ -6017,22 +6210,66 @@ function ParentDashboard() {
 }
 
 function ParentProgress() {
+  const [child, setChild] = useState<ParentChild | null | undefined>(undefined);
+  const [stats, setStats] = useState<OwnStudentStats | null>(null);
+  const [scoreTrendData, setScoreTrendData] = useState<ScoreTrendData>({ trend: [], labels: [] });
+  const [subjectMasteryData, setSubjectMasteryData] = useState<SubjectMasteryEntry[]>([]);
+
+  useEffect(() => {
+    fetchParentPrimaryChild().then(c => {
+      setChild(c);
+      if (c) {
+        fetchClassRankedStats(c.studentId, c.classId).then(setStats);
+        fetchScoreTrendAndSubjectMastery(c.studentId).then(({ scoreTrend, subjectMastery }) => {
+          setScoreTrendData(scoreTrend);
+          setSubjectMasteryData(subjectMastery);
+        });
+      }
+    });
+  }, []);
+
+  const firstName = child?.fullName.split(" ")[0] ?? "Anak";
+
+  if (child === undefined) return null;
+  if (child === null) {
+    return (
+      <div className="space-y-6">
+        <PageHeader eyebrow="Progres Belajar" title="Belum ada anak terhubung" />
+        <AlertPanel tone="primary" title="Belum ada tautan ke akun siswa">
+          Akun ini belum terhubung ke akun anak manapun. Hubungi admin sekolah untuk menautkan akun anak Anda.
+        </AlertPanel>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow={`Progres ${studentProfile.name.split(" ")[0]}`} title={`Perkembangan Belajar ${studentProfile.name.split(" ")[0]}`} />
+      <PageHeader eyebrow={`Progres ${firstName}`} title={`Perkembangan Belajar ${firstName}`} />
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {studentProgressStats.map(s => <StatCard key={s.label} {...s} />)}
+        {ownStudentStatCards(stats).map(s => <StatCard key={s.label} {...s} />)}
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Tren Nilai</h3>
-          <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={100} />
+          {scoreTrendData.trend.length === 0 ? (
+            <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
+              <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah anak mengerjakan asesmen</p>
+            </div>
+          ) : (
+            <SimpleChart data={scoreTrendData.trend} labels={scoreTrendData.labels} height={100} />
+          )}
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Penguasaan Topik</h3>
-          <div className="space-y-3">
-            {subjectMastery.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
-          </div>
+          {subjectMasteryData.length === 0 ? (
+            <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
+              <p className="text-[12px] text-ink-tertiary">Belum ada data penguasaan</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {subjectMasteryData.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -6040,15 +6277,40 @@ function ParentProgress() {
 }
 
 function ParentAssessments() {
+  const [child, setChild] = useState<ParentChild | null | undefined>(undefined);
+  const [results, setResults] = useState<ReviewListItem[]>([]);
+
+  useEffect(() => {
+    fetchParentPrimaryChild().then(c => {
+      setChild(c);
+      if (c) fetchChildCompletedAttempts(c.studentId).then(setResults);
+    });
+  }, []);
+
+  const firstName = child?.fullName.split(" ")[0] ?? "Anak";
+
+  if (child === undefined) return null;
+  if (child === null) {
+    return (
+      <div className="space-y-6">
+        <PageHeader eyebrow="Riwayat Asesmen" title="Belum ada anak terhubung" />
+        <AlertPanel tone="primary" title="Belum ada tautan ke akun siswa">
+          Akun ini belum terhubung ke akun anak manapun. Hubungi admin sekolah untuk menautkan akun anak Anda.
+        </AlertPanel>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Riwayat Asesmen" title={`Asesmen ${studentProfile.name.split(" ")[0]}`} />
+      <PageHeader eyebrow="Riwayat Asesmen" title={`Asesmen ${firstName}`} />
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="border-b border-border px-5 py-3.5"><h3 className="text-[14px] font-bold text-ink">Semua Asesmen</h3></div>
         <div className="px-5 py-1">
-          {studentResults.map(r => (
-            <RecentAssessmentRow key={r.id} title={r.assessmentTitle} type={r.type} date={r.date}
-              score={r.score} classAvg={r.classAvg} rank={r.rank} />
+          {results.length === 0 ? (
+            <p className="text-[12px] text-ink-tertiary text-center py-6">Belum ada asesmen diselesaikan.</p>
+          ) : results.map(r => (
+            <RecentAssessmentRow key={r.attemptId} title={r.assessmentTitle} type={r.type} date={r.date} score={r.score} />
           ))}
         </div>
       </div>
@@ -6057,14 +6319,17 @@ function ParentAssessments() {
 }
 
 function ParentRecommendations() {
+  const [child, setChild] = useState<ParentChild | null | undefined>(undefined);
+  useEffect(() => { fetchParentPrimaryChild().then(setChild); }, []);
+  const childName = child?.fullName ?? "anak Anda";
   const parentRecs = [...teachingRecommendations].sort((a, b) => b.wrongCount - a.wrongCount);
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Rekomendasi Pengajaran" title="Saran Belajar dari Guru Kelas"
-        description={`Rekomendasi pengajaran untuk ${studentProfile.name} berdasarkan analisis AI dan penilaian guru.`} />
+        description={`Rekomendasi pengajaran untuk ${childName} berdasarkan analisis AI dan penilaian guru.`} />
       {parentRecs.length >= 2 && (
         <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
-          <p>{studentProfile.name.split(" ")[0]} paling sering salah di <strong className="text-ink">{parentRecs[0].topic}</strong> ({parentRecs[0].wrongCount}× salah) dan <strong className="text-ink">{parentRecs[1].topic}</strong> ({parentRecs[1].wrongCount}× salah). Fokus latihan pada topik-topik ini.</p>
+          <p>{childName.split(" ")[0]} paling sering salah di <strong className="text-ink">{parentRecs[0].topic}</strong> ({parentRecs[0].wrongCount}× salah) dan <strong className="text-ink">{parentRecs[1].topic}</strong> ({parentRecs[1].wrongCount}× salah). Fokus latihan pada topik-topik ini.</p>
         </AIInsightPanel>
       )}
       <div className="space-y-4">
@@ -6126,7 +6391,7 @@ function AdminApp({ page }: { page: string }) {
     settings: <AdminSettings />,
   };
   return (
-    <AppShell role="admin" nav={adminNav} demoData>
+    <AppShell role="admin" nav={adminNav}>
       {screens[page] ?? <AdminDashboard />}
     </AppShell>
   );
@@ -6180,42 +6445,85 @@ function AdminDashboard() {
   );
 }
 
+type RealSchoolRow = { id: string; name: string; city: string | null; province: string | null; status: string; students: number; teachers: number };
+
+async function fetchRealSchools(): Promise<RealSchoolRow[]> {
+  // RLS already scopes this correctly: a SCHOOL_ADMIN's session only ever
+  // returns their own managed school(s); PLATFORM_ADMIN sees every school.
+  // No manual filtering needed here - the boundary is enforced by
+  // supabase/migrations/006_school_registration.sql's SELECT policies.
+  const { data: schools } = await supabase.from("schools").select("id, name, city, province, status").order("name");
+  const rows = schools ?? [];
+  if (rows.length === 0) return [];
+
+  const ids = rows.map(r => r.id as string);
+  const [{ data: studentRows }, { data: teacherRows }] = await Promise.all([
+    supabase.from("students").select("school_id").in("school_id", ids).eq("status", "ACTIVE"),
+    supabase.from("teachers").select("school_id").in("school_id", ids),
+  ]);
+  const studentCount = new Map<string, number>();
+  for (const r of (studentRows ?? []) as Array<{ school_id: string }>) studentCount.set(r.school_id, (studentCount.get(r.school_id) ?? 0) + 1);
+  const teacherCount = new Map<string, number>();
+  for (const r of (teacherRows ?? []) as Array<{ school_id: string }>) teacherCount.set(r.school_id, (teacherCount.get(r.school_id) ?? 0) + 1);
+
+  return rows.map(r => ({
+    id: r.id as string,
+    name: r.name as string,
+    city: r.city as string | null,
+    province: r.province as string | null,
+    status: r.status as string,
+    students: studentCount.get(r.id as string) ?? 0,
+    teachers: teacherCount.get(r.id as string) ?? 0,
+  }));
+}
+
+function schoolStatusLabel(status: string): { label: string; tone: "success" | "warning" | "danger" } {
+  if (status === "ACTIVE") return { label: "Aktif", tone: "success" };
+  if (status === "REJECTED") return { label: "Ditolak", tone: "danger" };
+  return { label: "Menunggu Persetujuan", tone: "warning" };
+}
+
 function AdminSchools() {
-  const mockSchools = [
-    { id: "s1", name: "SMA Negeri 1 Bandung", level: "SMA", students: 1312, teachers: 48, status: "Aktif" },
-    { id: "s2", name: "SMA Negeri 2 Bandung", level: "SMA", students: 1104, teachers: 41, status: "Aktif" },
-    { id: "s3", name: "SMP Negeri 5 Bandung", level: "SMP", students: 876, teachers: 34, status: "Aktif" },
-    { id: "s4", name: "SMK Negeri 3 Bandung", level: "SMK", students: 960, teachers: 37, status: "Aktif" },
-    { id: "s5", name: "SMA Swasta Al-Ikhlas", level: "SMA", students: 420, teachers: 18, status: "Percobaan" },
-  ];
+  const [schools, setSchools] = useState<RealSchoolRow[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchRealSchools().then(rows => { if (!cancelled) setSchools(rows); });
+    return () => { cancelled = true; };
+  }, []);
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <PageHeader eyebrow="Admin" title="Manajemen Sekolah" />
-        <Button variant="default" className="h-8 text-[12px]"><Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Sekolah</Button>
       </div>
-      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
-        <table className="w-full">
-          <AdminTableHead cols={["Nama Sekolah", "Jenjang", "Siswa", "Guru", "Status", "Aksi"]} />
-          <tbody>
-            {mockSchools.map(s => (
-              <tr key={s.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
-                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{s.name}</span></td>
-                <td className="px-4 py-3 text-[12px]"><Badge tone="neutral">{s.level}</Badge></td>
-                <td className="px-4 py-3 text-[12px] text-ink">{s.students.toLocaleString("id")}</td>
-                <td className="px-4 py-3 text-[12px] text-ink">{s.teachers}</td>
-                <td className="px-4 py-3 text-[12px]"><Badge tone={s.status === "Aktif" ? "success" : "warning"}>{s.status}</Badge></td>
-                <td className="px-4 py-3 text-right">
-                  <div className="flex justify-end gap-1.5">
-                    <Button variant="ghost" className="h-7 px-2 text-[11px]"><Eye className="h-3.5 w-3.5" /></Button>
-                    <Button variant="ghost" className="h-7 px-2 text-[11px]"><Pencil className="h-3.5 w-3.5" /></Button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {schools === null ? (
+        <div className="flex items-center justify-center py-16">
+          <span className="h-5 w-5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+        </div>
+      ) : schools.length === 0 ? (
+        <EmptyState icon={Users} title="Belum ada sekolah" description="Belum ada sekolah yang terdaftar di platform ini." />
+      ) : (
+        <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
+          <table className="w-full">
+            <AdminTableHead cols={["Nama Sekolah", "Kota/Provinsi", "Siswa", "Guru", "Status"]} />
+            <tbody>
+              {schools.map(s => {
+                const st = schoolStatusLabel(s.status);
+                return (
+                  <tr key={s.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
+                    <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{s.name}</span></td>
+                    <td className="px-4 py-3 text-[12px] text-ink-secondary">{[s.city, s.province].filter(Boolean).join(", ") || "-"}</td>
+                    <td className="px-4 py-3 text-[12px] text-ink">{s.students.toLocaleString("id")}</td>
+                    <td className="px-4 py-3 text-[12px] text-ink">{s.teachers}</td>
+                    <td className="px-4 py-3 text-[12px]"><Badge tone={st.tone}>{st.label}</Badge></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

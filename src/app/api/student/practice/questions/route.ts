@@ -2,6 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import Groq from "groq-sdk";
 
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
