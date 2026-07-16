@@ -42,14 +42,8 @@ import {
   assessmentStyles,
   assessments,
   assistantGreeting,
-  classIdByName,
-  classStats,
-  currentSemester,
-  currentTeacher,
-  getClassStats,
   incorrectQuestions,
   leaderboard,
-  materials,
   pastPaperTopics,
   questionBank,
   school,
@@ -75,13 +69,21 @@ import {
   adminNav,
   type ChatMessage,
   type Material,
+  type MaterialType,
   type PendingQuestion,
   type AssessmentStyleCorpus,
   type SimulatorQuestion,
   type QuestionBankEntry,
   type Assessment,
+  type Difficulty,
+  type BloomLevel,
+  type Student,
+  type StudentStatus,
 } from "@/lib/db";
 import { cn } from "@/lib/utils";
+import { supabase } from "@/lib/supabase/client";
+import { getCurrentProfile } from "@/lib/auth/session";
+import { getCurrentTeacher, getCurrentStudent } from "@/lib/auth/authorization";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -89,6 +91,7 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronRight,
+  ClipboardList,
   Clock,
   Database,
   Download,
@@ -189,25 +192,28 @@ export function ProductApp({ path }: { path: string[] }) {
 
 function ClassSelectorBanner() {
   const [activeClass] = useActiveClass();
+  const teacher = useRealTeacher();
+  const classes = teacher?.classes ?? [];
+  const activeClassYear = classes.find(c => c.id === activeClass)?.year;
 
   return (
     <div className="flex items-center gap-2 flex-wrap mb-6 rounded-[10px] border border-border bg-surface px-4 py-2.5 shadow-sm">
       <span className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-tertiary shrink-0 mr-1">Kelas:</span>
-      {currentTeacher.classes.map(cls => (
+      {classes.map(cls => (
         <button
-          key={cls}
-          onClick={() => changeActiveClass(cls)}
+          key={cls.id}
+          onClick={() => changeActiveClass(cls.id)}
           className={cn(
             "px-3 py-1 rounded-full text-[12px] font-semibold border transition-all",
-            activeClass === cls
+            activeClass === cls.id
               ? "bg-primary text-white border-primary shadow-sm"
               : "bg-background text-ink-secondary border-border hover:border-primary/40 hover:text-ink"
           )}
         >
-          {cls}
+          {cls.name}
         </button>
       ))}
-      <span className="ml-auto text-[11px] text-ink-tertiary hidden sm:block">{currentSemester}</span>
+      {activeClassYear && <span className="ml-auto text-[11px] text-ink-tertiary hidden sm:block">Tahun Ajaran {activeClassYear}</span>}
     </div>
   );
 }
@@ -229,7 +235,7 @@ function TeacherApp({ page }: { page: string }) {
     "ai-config": <TeacherAIConfig />,
   };
   return (
-    <AppShell role="teacher" nav={teacherNav} demoData>
+    <AppShell role="teacher" nav={teacherNav} >
       <ClassSelectorBanner />
       {screens[page] ?? <TeacherDashboard />}
     </AppShell>
@@ -239,6 +245,7 @@ function TeacherApp({ page }: { page: string }) {
 // ── Shared Upload Material Modal ──────────────────────────────────────────────
 
 function UploadMaterialModal({ onClose }: { onClose: () => void }) {
+  const teacher = useRealTeacher();
   const [dragOver, setDragOver] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -246,33 +253,35 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
   async function handleUpload() {
-    if (!file) return;
+    if (!file || !teacher) return;
     setUploading(true);
 
-    initMatStore();
-    initReviewStore();
+    // The active class may have more than one subject assigned to this
+    // teacher (unlike the old single-subject mock assumption) - resolved
+    // to the subject actually taught in the active class, not just "the
+    // first subject overall".
+    const activeClassId = getActiveClassId();
+    const activeAssignment = teacher.assignments.find(a => a.classId === activeClassId);
+    const activeSubjectId = activeAssignment?.subjectId;
+    const activeSubjectName = activeAssignment?.subjectName ?? "Umum";
+
+    if (!activeClassId || !activeSubjectId) {
+      setToast({ message: "Pilih kelas aktif terlebih dahulu.", tone: "primary" });
+      setUploading(false);
+      return;
+    }
 
     const title = file.name.replace(/\.[^/.]+$/, "");
-    const matId = `mat-upload-${Date.now()}`;
-    const newMat: Material = {
-      id: matId,
-      title,
-      type: "Modul Ajar",
-      subject: currentTeacher.subject,
-      classId: getActiveClassId(),
-      className: getActiveClassId(),
-      uploadedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
-      pages: 0,
-      status: "Aktif",
-      aiProcessed: false,
-      questionsGenerated: 0,
-    };
-
-    // Save to persistent store immediately
-    const updatedMats = [newMat, ..._matStore.uploadedMaterials];
-    _matStore.uploadedMaterials = updatedMats;
-    _matStore.materialFiles = { ..._matStore.materialFiles, [matId]: file };
-    lsSet("catchup_mats", updatedMats);
+    const matId = await insertMaterial({
+      schoolId: teacher.schoolId, classId: activeClassId, subjectId: activeSubjectId,
+      creatorId: teacher.profileId, title, type: "Modul Ajar",
+    });
+    if (!matId) {
+      setToast({ message: "Gagal menyimpan materi. Coba lagi.", tone: "primary" });
+      setUploading(false);
+      return;
+    }
+    await uploadMaterialFile(file, teacher.schoolId, matId);
 
     setToast({ message: "Mengunggah materi dan memulai analisis AI...", tone: "primary" });
 
@@ -283,7 +292,7 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
       fd.append("file", file);
       fd.append("count", "5");
       fd.append("materialTitle", title);
-      fd.append("subject", currentTeacher.subject);
+      fd.append("subject", activeSubjectName);
       const res = await fetch("/api/extract-and-generate", { method: "POST", body: fd });
       const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
       rawQuestions = data.questions ?? [];
@@ -295,7 +304,7 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
         const res = await fetch("/api/generate-questions", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ materialTitle: title, topic: title, subject: currentTeacher.subject, count: 5, difficulty: "Sedang" }),
+          body: JSON.stringify({ materialTitle: title, topic: title, subject: activeSubjectName, count: 5, difficulty: "Sedang" }),
         });
         const data = await res.json() as { questions?: typeof rawQuestions };
         rawQuestions = data.questions ?? [];
@@ -303,47 +312,12 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
     }
 
     if (rawQuestions.length > 0) {
-      const generated: typeof questionBank = rawQuestions.map((q, i) => ({
-        id: `ai-${matId}-${i}`,
-        question: q.question,
-        topic: q.topic,
-        subtopic: q.topic,
-        bloom: "Menerapkan" as const,
-        difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
-        styleType: "TKA" as const,
-        source: title,
-        usageCount: 0,
-        successRate: 0,
-        status: "Disetujui" as const,
-        isLocked: false,
-        options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
-        correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
-        explanation: q.explanation,
-      }));
+      // Push to the real review queue (status 'pending') so it shows up on
+      // Tinjau Soal AI, linked back to this real material.
+      await insertPendingQuestions(rawQuestions, teacher.schoolId, activeClassId, activeSubjectId, teacher.profileId, title, matId);
+      await markMaterialProcessed(matId);
 
-      // Save questions to mat store
-      const updatedMatQs = { ..._matStore.materialQuestions, [matId]: generated };
-      _matStore.materialQuestions = updatedMatQs;
-      lsSet("catchup_matqs", updatedMatQs);
-
-      // Push to review queue
-      const existingReviewIds = new Set(_reviewStore.questions.map(q => q.id));
-      const newForReview = generated.filter(q => !existingReviewIds.has(q.id)).map(q => toPendingQuestion(q));
-      if (newForReview.length > 0) {
-        const updatedReview = [..._reviewStore.questions, ...newForReview];
-        _reviewStore.questions = updatedReview;
-        lsSet("catchup_review", updatedReview);
-      }
-
-      // Update material as processed
-      const finalMats = _matStore.uploadedMaterials.map(m =>
-        m.id === matId ? { ...m, aiProcessed: true, questionsGenerated: generated.length } : m
-      );
-      _matStore.uploadedMaterials = finalMats;
-      lsSet("catchup_mats", finalMats);
-      lsSet("catchup_pids", [...(_matStore.processedIds ?? new Set()), matId]);
-
-      setToast({ message: `${generated.length} soal berhasil diekstrak dari "${title}"`, tone: "success" });
+      setToast({ message: `${rawQuestions.length} soal berhasil diekstrak dari "${title}"`, tone: "success" });
       setTimeout(() => onClose(), 1500);
     } else {
       setToast({ message: "Materi disimpan. Tidak ada soal yang diekstrak.", tone: "primary" });
@@ -427,33 +401,129 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+// ── Real class roster + stats (students, user_profiles, assessment_attempts) ──
+// The mock model conflated "which students are in this class" with "how did
+// they do in the one subject the mock product pretended to have." Real
+// schema: a student belongs to exactly one class (students.class_id), but a
+// class can have many subjects (teacher_assignments), so performance here is
+// scoped to the active (class, subject) pair - same convention as
+// assessments/questions/materials throughout this migration. xp/streak_days
+// are real per-student columns (migration 007), not derived.
+
+function computeStudentStatus(avgScore: number | null): StudentStatus {
+  if (avgScore == null) return "On Track"; // no attempts yet - benefit of the doubt, not a new status bucket
+  if (avgScore >= 63) return "On Track";
+  if (avgScore >= 50) return "Need Review";
+  return "At Risk";
+}
+
+// Teacher-scoped read: RLS ("Teachers can view students in assigned classes")
+// already restricts to classes this teacher is assigned to - a roster is a
+// property of the whole class, not a specific subject, so unlike
+// materials/questions this is never further narrowed by subject_id.
+async function fetchRealClassStudents(classId: string, subjectId: string | undefined, className: string): Promise<Student[]> {
+  const { data: rosterData } = await supabase
+    .from("students")
+    .select("id, nis, xp, streak_days, user_profiles(full_name)")
+    .eq("class_id", classId)
+    .eq("status", "ACTIVE");
+  type RosterRow = { id: string; nis: string | null; xp: number; streak_days: number; user_profiles: { full_name: string } | null };
+  const roster = (rosterData ?? []) as unknown as RosterRow[];
+  if (roster.length === 0) return [];
+
+  const scoreByStudent = new Map<string, { sum: number; count: number }>();
+  if (subjectId) {
+    const { data: aRows } = await supabase.from("assessments").select("id").eq("class_id", classId).eq("subject_id", subjectId);
+    const assessmentIds = (aRows ?? []).map(r => r.id as string);
+    if (assessmentIds.length > 0) {
+      const { data: attemptRows } = await supabase
+        .from("assessment_attempts")
+        .select("student_id, score")
+        .in("assessment_id", assessmentIds)
+        .in("status", ["submitted", "graded"]);
+      for (const row of (attemptRows ?? []) as Array<{ student_id: string; score: number | null }>) {
+        if (row.score == null) continue;
+        const cur = scoreByStudent.get(row.student_id) ?? { sum: 0, count: 0 };
+        cur.sum += row.score;
+        cur.count += 1;
+        scoreByStudent.set(row.student_id, cur);
+      }
+    }
+  }
+
+  const withScores = roster.map(r => {
+    const stat = scoreByStudent.get(r.id);
+    const avgScore = stat ? Math.round(stat.sum / stat.count) : null;
+    return { r, avgScore, total: stat?.count ?? 0 };
+  });
+  // Rank by real avgScore descending; no-data students rank last (matches
+  // the old buildStudents() rank derivation, just over real scores).
+  const ranked = [...withScores].sort((a, b) => (b.avgScore ?? -1) - (a.avgScore ?? -1));
+  const rankMap = new Map(ranked.map((s, i) => [s.r.id, i + 1]));
+
+  return withScores.map(({ r, avgScore, total }) => {
+    const name = r.user_profiles?.full_name ?? "-";
+    return {
+      id: r.id,
+      name,
+      initials: name.split(" ").slice(0, 2).map(n => n[0]).join("").toUpperCase(),
+      nis: r.nis ?? "-",
+      classId,
+      className,
+      avgScore: avgScore ?? 0,
+      status: computeStudentStatus(avgScore),
+      xp: r.xp,
+      streak: r.streak_days,
+      rank: rankMap.get(r.id) ?? 0,
+      totalAssessments: total,
+    };
+  });
+}
+
+function computeRealClassStats(classStudents: Student[]) {
+  return {
+    total: classStudents.length,
+    onTrack: classStudents.filter(s => s.status === "On Track").length,
+    needReview: classStudents.filter(s => s.status === "Need Review").length,
+    atRisk: classStudents.filter(s => s.status === "At Risk").length,
+    avgScore: classStudents.length ? Math.round(classStudents.reduce((sum, s) => sum + s.avgScore, 0) / classStudents.length) : 0,
+  };
+}
+
 // ── Teacher Dashboard ─────────────────────────────────────────────────────────
 
 function TeacherDashboard() {
   const router = useRouter();
+  const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
+  const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name;
+  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeSubjectName = activeAssignment?.subjectName;
   const [activeTab, setActiveTab] = useState<"semua" | "at-risk" | "need-review">("semua");
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
   const [showAllStudents, setShowAllStudents] = useState(false);
   const [upcomingDetailId, setUpcomingDetailId] = useState<string | null>(null);
-  const [reviewCount, setReviewCount] = useState(0);
+  const { pending: reviewQs } = useQuestionBank(activeClass, activeAssignment?.subjectId);
+  const reviewCount = reviewQs.length;
   const [showUploadModal, setShowUploadModal] = useState(false);
 
-  const activeClassId = classIdByName[activeClass] ?? "cls1";
-  const activeStats = activeClass ? getClassStats(activeClassId) : classStats;
-  const classStudents = students.filter(s => s.classId === activeClassId);
+  const [classStudents, setClassStudents] = useState<Student[]>([]);
+  const activeStats = computeRealClassStats(classStudents);
   const [savedAssessments, setSavedAssessments] = useState<SavedAssessment[]>([]);
 
   const selectedStudent = classStudents.find(s => s.id === selectedStudentId);
-  const upcomingAssessments = savedAssessments.filter(a =>
-    (!a.classId || a.classId === activeClassId) && a.status === "Terjadwal"
-  );
+  const upcomingAssessments = savedAssessments.filter(a => a.status === "Terjadwal");
   const upcomingDetail = savedAssessments.find(a => a.id === upcomingDetailId);
 
   useEffect(() => {
-    initReviewStore(); setReviewCount(_reviewStore.questions.length);
-    initAssessStore(); setSavedAssessments([..._assessStore.list]);
-  }, []);
+    if (!activeClass || !activeAssignment?.subjectId) { setSavedAssessments([]); return; }
+    fetchClassAssessments(activeClass, activeAssignment.subjectId).then(setSavedAssessments);
+  }, [activeClass, activeAssignment?.subjectId]);
+
+  useEffect(() => {
+    if (!activeClass) { setClassStudents([]); return; }
+    fetchRealClassStudents(activeClass, activeAssignment?.subjectId, activeClassName ?? "-").then(setClassStudents);
+  }, [activeClass, activeAssignment?.subjectId, activeClassName]);
 
   const allFiltered = classStudents.filter(s => {
     if (activeTab === "at-risk") return s.status === "At Risk";
@@ -471,10 +541,10 @@ function TeacherDashboard() {
             {new Date().toLocaleDateString('id-ID', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })}
           </p>
           <h1 className="text-2xl font-bold text-ink leading-tight">
-            Selamat pagi, {currentTeacher.name.split(" ").slice(0, 2).join(" ")}! 👋
+            Selamat pagi, {(teacher?.name ?? "").split(" ").slice(0, 2).join(" ")}! 👋
           </h1>
           <p className="text-[13px] text-ink-secondary mt-1">
-            {activeClass || currentTeacher.classes[0]} · {currentTeacher.subject} · {activeStats.total} siswa
+            {activeClassName ?? "…"} · {activeSubjectName ?? "-"} · {activeStats.total} siswa
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -625,11 +695,11 @@ function TeacherDashboard() {
               </div>
               <div>
                 <h3 className="text-[12px] font-bold text-ink mb-2">Riwayat Asesmen Terakhir</h3>
-                {savedAssessments.filter(a => !a.classId || a.classId === activeClassId).length === 0 ? (
+                {savedAssessments.length === 0 ? (
                   <p className="text-[12px] text-ink-tertiary py-2">Belum ada asesmen untuk kelas ini.</p>
                 ) : (
                 <div className="space-y-2">
-                  {savedAssessments.filter(a => !a.classId || a.classId === activeClassId).slice(0, 4).map(r => (
+                  {savedAssessments.slice(0, 4).map(r => (
                     <div key={r.id} className="flex items-center justify-between rounded-[8px] border border-border bg-background px-3 py-2">
                       <div>
                         <div className="text-[12px] font-medium text-ink">{r.title}</div>
@@ -714,13 +784,91 @@ function lsSet(key: string, value: unknown) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
 }
 
-// ── Active class store ────────────────────────────────────────────────────────
+// ── Real current-teacher context (replaces the mock `currentTeacher` const) ───
+// Every `currentTeacher.X` reference in this file now reads from this real,
+// Supabase-backed store instead of a hardcoded mock teacher - populated once
+// per session (module-level cache, same pattern as the *Store objects below)
+// and exposed to components via useRealTeacher().
+type RealTeacherAssignment = { classId: string; className: string; subjectId: string; subjectName: string };
+type RealTeacherContext = {
+  id: string;
+  profileId: string;
+  name: string;
+  schoolId: string;
+  classes: { id: string; name: string; year: number | null }[];
+  subjects: { id: string; name: string }[];
+  assignments: RealTeacherAssignment[];
+};
+
+let _realTeacher: RealTeacherContext | null = null;
+let _realTeacherPromise: Promise<RealTeacherContext | null> | null = null;
+const _teacherListeners = new Set<(t: RealTeacherContext | null) => void>();
+
+async function loadRealTeacher(): Promise<RealTeacherContext | null> {
+  if (_realTeacher) return _realTeacher;
+  if (_realTeacherPromise) return _realTeacherPromise;
+  _realTeacherPromise = (async () => {
+    const profile = await getCurrentProfile();
+    if (!profile) return null;
+    const teacher = await getCurrentTeacher();
+    if (!teacher) return null;
+    const { data } = await supabase
+      .from("teacher_assignments")
+      .select("class_id, subject_id, classes(name, year), subjects(name)")
+      .eq("teacher_id", teacher.id);
+
+    const classMap = new Map<string, { id: string; name: string; year: number | null }>();
+    const subjectMap = new Map<string, { id: string; name: string }>();
+    const assignments: RealTeacherAssignment[] = [];
+    for (const row of (data ?? []) as unknown as Array<{
+      class_id: string;
+      subject_id: string;
+      classes: { name: string; year: number | null } | null;
+      subjects: { name: string } | null;
+    }>) {
+      if (row.classes) classMap.set(row.class_id, { id: row.class_id, name: row.classes.name, year: row.classes.year });
+      if (row.subjects) subjectMap.set(row.subject_id, { id: row.subject_id, name: row.subjects.name });
+      assignments.push({
+        classId: row.class_id,
+        className: row.classes?.name ?? "-",
+        subjectId: row.subject_id,
+        subjectName: row.subjects?.name ?? "-",
+      });
+    }
+
+    const result: RealTeacherContext = {
+      id: teacher.id,
+      profileId: profile.id,
+      name: profile.full_name,
+      schoolId: teacher.school_id,
+      classes: Array.from(classMap.values()),
+      subjects: Array.from(subjectMap.values()),
+      assignments,
+    };
+    _realTeacher = result;
+    _teacherListeners.forEach(fn => fn(result));
+    return result;
+  })();
+  return _realTeacherPromise;
+}
+
+function useRealTeacher(): RealTeacherContext | null {
+  const [teacher, setTeacher] = useState<RealTeacherContext | null>(_realTeacher);
+  useEffect(() => {
+    if (!_realTeacher) loadRealTeacher();
+    _teacherListeners.add(setTeacher);
+    return () => { _teacherListeners.delete(setTeacher); };
+  }, []);
+  return teacher;
+}
+
+// ── Active class store (backed by the real teacher's real assigned classes) ──
 let _activeClassId = "";
 const _classListeners = new Set<(id: string) => void>();
 
 function getActiveClassId(): string {
-  if (!_activeClassId) {
-    _activeClassId = lsGet<string>("catchup_active_class") ?? currentTeacher.classes[0] ?? "";
+  if (!_activeClassId && _realTeacher && _realTeacher.classes.length > 0) {
+    _activeClassId = lsGet<string>("catchup_active_class") ?? _realTeacher.classes[0].id;
   }
   return _activeClassId;
 }
@@ -732,86 +880,548 @@ function changeActiveClass(id: string) {
 }
 
 function useActiveClass(): [string, typeof changeActiveClass] {
+  const teacher = useRealTeacher();
   const [cls, setCls] = useState<string>("");
   useEffect(() => {
-    setCls(getActiveClassId());
+    if (teacher && teacher.classes.length > 0) {
+      setCls(getActiveClassId());
+    }
     _classListeners.add(setCls);
     return () => { _classListeners.delete(setCls); };
-  }, []);
+  }, [teacher]);
   return [cls, changeActiveClass];
 }
 
-// ── Persistent bank store — approved questions ────────────────────────────────
-let _bankStoreInit = false;
-const _bankStore: { questions: typeof questionBank } = { questions: [] };
-function initBankStore() {
-  if (_bankStoreInit) return;
-  _bankStoreInit = true;
-  const saved = lsGet<typeof questionBank>("catchup_bank");
-  if (saved?.length) _bankStore.questions = saved;
-}
+// ── Real question bank + review queue (questions table, class+subject-scoped) ─
+// `questions.class_id` (migration 010) + `questions.subject_id` together
+// match the legacy mock's per-class-per-subject bank exactly - both are
+// required (AND), matching teacher_assignments' own (class_id, subject_id)
+// grain.
+type BankRow = {
+  id: string; source: string;
+  topic: string; subtopic: string | null; difficulty: Difficulty | null; bloom_level: BloomLevel | null;
+  question: string; options: { A: string; B: string; C: string; D: string; E?: string };
+  correct_answer: "A" | "B" | "C" | "D" | "E"; explanation: string | null;
+  source_title: string | null; source_page: number | null;
+  status: string; usage_count: number; success_rate: number | null;
+};
 
-// ── Persistent review store — AI questions pending teacher approval ────────────
-let _reviewStoreInit = false;
-const _reviewStore: { questions: PendingQuestion[] } = { questions: [] };
-function initReviewStore() {
-  if (_reviewStoreInit) return;
-  _reviewStoreInit = true;
-  const saved = lsGet<PendingQuestion[]>("catchup_review");
-  if (saved?.length) _reviewStore.questions = saved;
-}
-
-// Convert QuestionBankEntry → PendingQuestion (for review queue)
-function toPendingQuestion(q: typeof questionBank[number]): PendingQuestion {
+function bankRowToEntry(row: BankRow): QuestionBankEntry {
   return {
-    id: q.id,
-    question: q.question,
-    optionA: q.options.A,
-    optionB: q.options.B,
-    optionC: q.options.C,
-    optionD: q.options.D,
-    correctAnswer: q.correctAnswer as unknown as "A" | "B" | "C" | "D",
-    explanation: q.explanation,
-    topic: q.topic,
-    difficulty: q.difficulty,
-    sourceRef: q.source,
+    id: row.id,
+    question: row.question,
+    topic: row.topic,
+    subtopic: row.subtopic ?? row.topic,
+    bloom: row.bloom_level ?? "Menerapkan",
+    difficulty: row.difficulty ?? "Sedang",
+    styleType: "TKA",
+    source: row.source_title ?? (row.source === "ai_generated" ? "AI Generated" : "Manual Guru"),
+    usageCount: row.usage_count,
+    successRate: row.success_rate == null ? 0 : Math.round(Number(row.success_rate)),
+    status: row.status === "active" ? "Disetujui" : row.status === "rejected" ? "Ditolak" : "Perlu Ditinjau",
+    isLocked: false,
+    options: row.options,
+    correctAnswer: row.correct_answer,
+    explanation: row.explanation ?? "",
+    sourceTitle: row.source_title ?? undefined,
+    sourcePage: row.source_page ?? undefined,
+  };
+}
+
+function bankRowToPending(row: BankRow): PendingQuestion {
+  return {
+    id: row.id,
+    question: row.question,
+    optionA: row.options.A,
+    optionB: row.options.B,
+    optionC: row.options.C,
+    optionD: row.options.D,
+    correctAnswer: row.correct_answer as "A" | "B" | "C" | "D",
+    explanation: row.explanation ?? "",
+    topic: row.topic,
+    difficulty: row.difficulty ?? "Sedang",
+    sourceRef: row.source_title ?? "AI Generated",
     status: "Perlu Ditinjau",
   };
 }
-// Convert PendingQuestion → QuestionBankEntry (when approved)
-function toQuestionBankEntry(q: PendingQuestion): typeof questionBank[number] {
-  return {
-    id: q.id,
-    question: q.question,
-    topic: q.topic,
-    subtopic: q.topic,
-    bloom: "Menerapkan" as const,
-    difficulty: q.difficulty,
-    styleType: "TKA" as const,
-    source: q.sourceRef,
-    usageCount: 0,
-    successRate: 0,
-    status: "Disetujui" as const,
-    isLocked: false,
-    options: { A: q.optionA, B: q.optionB, C: q.optionC, D: q.optionD },
-    correctAnswer: q.correctAnswer,
-    explanation: q.explanation,
-  };
+
+let _bankKey: string | null = null;
+let _bankLoading: Promise<void> | null = null;
+const _bankStore: { questions: QuestionBankEntry[] } = { questions: [] };
+const _reviewStore: { questions: PendingQuestion[] } = { questions: [] };
+const _bankListeners = new Set<() => void>();
+
+async function loadBankAndReview(classId: string, subjectId: string): Promise<void> {
+  const key = `${classId}:${subjectId}`;
+  if (_bankKey === key) return _bankLoading ?? Promise.resolve();
+  _bankKey = key;
+  _bankLoading = (async () => {
+    const { data } = await supabase
+      .from("questions")
+      .select("id, source, topic, subtopic, difficulty, bloom_level, question, options, correct_answer, explanation, source_title, source_page, status, usage_count, success_rate")
+      .eq("class_id", classId)
+      .eq("subject_id", subjectId)
+      .in("status", ["active", "pending"])
+      .order("created_at", { ascending: false });
+    const rows = (data ?? []) as unknown as BankRow[];
+    _bankStore.questions = rows.filter(r => r.status === "active").map(bankRowToEntry);
+    _reviewStore.questions = rows.filter(r => r.status === "pending").map(bankRowToPending);
+    _bankListeners.forEach(fn => fn());
+  })();
+  return _bankLoading;
 }
 
-// ── Persistent assessment store ────────────────────────────────────────────────
+function refreshBankAndReview(classId: string, subjectId: string): Promise<void> {
+  _bankKey = null;
+  return loadBankAndReview(classId, subjectId);
+}
+
+function useQuestionBank(classId: string | undefined, subjectId: string | undefined): { bank: QuestionBankEntry[]; pending: PendingQuestion[] } {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    if (!classId || !subjectId) return;
+    loadBankAndReview(classId, subjectId).then(() => bump(x => x + 1));
+    const listener = () => bump(x => x + 1);
+    _bankListeners.add(listener);
+    return () => { _bankListeners.delete(listener); };
+  }, [classId, subjectId]);
+  return { bank: _bankStore.questions, pending: _reviewStore.questions };
+}
+
+// Insert freshly AI-generated questions straight into the review queue (status 'pending')
+async function insertPendingQuestions(
+  raw: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }>,
+  schoolId: string, classId: string, subjectId: string, creatorId: string, sourceTitle: string,
+  sourceMaterialId?: string,
+): Promise<void> {
+  if (!raw.length) return;
+  const rows = raw.map(q => ({
+    school_id: schoolId,
+    class_id: classId,
+    subject_id: subjectId,
+    creator_id: creatorId,
+    source: "ai_generated" as const,
+    topic: q.topic || "Umum",
+    subtopic: q.topic || "Umum",
+    difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as Difficulty,
+    bloom_level: "Menerapkan" as const,
+    question: q.question,
+    options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
+    correct_answer: (["A", "B", "C", "D", "E"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D" | "E",
+    explanation: q.explanation,
+    status: "pending" as const,
+    source_title: sourceTitle,
+    source_material_id: sourceMaterialId ?? null,
+  }));
+  await supabase.from("questions").insert(rows);
+  await refreshBankAndReview(classId, subjectId);
+}
+
+async function saveManualQToBank(
+  q: typeof EMPTY_MANUAL_Q,
+  schoolId: string, classId: string, subjectId: string, creatorId: string,
+): Promise<boolean> {
+  if (!q.text.trim() || !q.optA.trim() || !q.optB.trim() || !q.optC.trim() || !q.optD.trim() || !q.topic.trim()) return false;
+  await supabase.from("questions").insert({
+    school_id: schoolId,
+    class_id: classId,
+    subject_id: subjectId,
+    creator_id: creatorId,
+    source: "bank",
+    topic: q.topic.trim(),
+    subtopic: q.topic.trim(),
+    difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as Difficulty,
+    bloom_level: "Menerapkan",
+    question: q.text.trim(),
+    options: { A: q.optA.trim(), B: q.optB.trim(), C: q.optC.trim(), D: q.optD.trim() },
+    correct_answer: (["A", "B", "C", "D"].includes(q.correct) ? q.correct : "A") as "A" | "B" | "C" | "D",
+    explanation: q.explanation.trim(),
+    status: "active",
+    source_title: "Manual Guru",
+  });
+  await refreshBankAndReview(classId, subjectId);
+  return true;
+}
+
+async function approveBankQuestion(merged: PendingQuestion, classId: string, subjectId: string): Promise<void> {
+  await supabase.from("questions").update({
+    status: "active",
+    question: merged.question,
+    topic: merged.topic,
+    subtopic: merged.topic,
+    difficulty: merged.difficulty,
+    explanation: merged.explanation,
+    correct_answer: merged.correctAnswer,
+    options: { A: merged.optionA, B: merged.optionB, C: merged.optionC, D: merged.optionD },
+  }).eq("id", merged.id);
+  await refreshBankAndReview(classId, subjectId);
+}
+
+// "Tolak" hard-deletes the row (never a soft status flip) - safe only
+// because this only ever targets 'pending' rows, which by construction
+// have never been approved into an assessment/practice session, so there
+// is nothing for the ON DELETE CASCADE chain to destroy. The RLS DELETE
+// policy (migration 010) enforces status='pending' server-side too.
+async function rejectBankQuestion(id: string, classId: string, subjectId: string): Promise<void> {
+  await supabase.from("questions").delete().eq("id", id).eq("status", "pending");
+  await refreshBankAndReview(classId, subjectId);
+}
+
+async function approveAllBankQuestions(merged: PendingQuestion[], classId: string, subjectId: string): Promise<void> {
+  await Promise.all(merged.map(m => supabase.from("questions").update({
+    status: "active",
+    question: m.question,
+    topic: m.topic,
+    subtopic: m.topic,
+    difficulty: m.difficulty,
+    explanation: m.explanation,
+    correct_answer: m.correctAnswer,
+    options: { A: m.optionA, B: m.optionB, C: m.optionC, D: m.optionD },
+  }).eq("id", m.id)));
+  await refreshBankAndReview(classId, subjectId);
+}
+
+// ── Real assessments (assessments + assessment_questions tables) ──────────────
+// `SavedAssessment` is kept as the shared display shape every consumer in this
+// file already renders against - only its data source changes (real Supabase
+// rows mapped in, instead of a localStorage-backed mock list).
 type SavedAssessment = Assessment & {
   questions: typeof questionBank;
   openAt?: string;
   closeAt?: string;
 };
-let _assessStoreInit = false;
-const _assessStore: { list: SavedAssessment[] } = { list: [] };
-function initAssessStore() {
-  if (_assessStoreInit) return;
-  _assessStoreInit = true;
-  const saved = lsGet<SavedAssessment[]>("catchup_assessments");
-  if (saved?.length) _assessStore.list = saved;
+
+type AssessmentRow = {
+  id: string; title: string; type: string | null; duration_minutes: number | null;
+  open_at: string | null; close_at: string | null; status: string; created_at: string;
+};
+
+function assessmentRowToSaved(row: AssessmentRow, classId: string, questionCount = 0, avgScore?: number, participants?: number): SavedAssessment {
+  return {
+    id: row.id,
+    title: row.title,
+    // Legacy mock never distinguished draft vs. published in this display
+    // field (both were always saved as "Terjadwal") - preserved exactly here.
+    type: (row.type ?? "Kuis Guru") as Assessment["type"],
+    subject: "",
+    classId,
+    totalQuestions: questionCount,
+    duration: row.duration_minutes ?? 0,
+    scheduledFor: row.open_at
+      ? new Date(row.open_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })
+      : new Date(row.created_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+    openAt: row.open_at ?? undefined,
+    closeAt: row.close_at ?? undefined,
+    avgScore,
+    participants,
+    status: "Terjadwal",
+    createdAt: new Date(row.created_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+    questions: [],
+  };
+}
+
+// Teacher-scoped read: RLS already restricts to the caller's own assigned
+// (class, subject) pairs, so this is a safe direct client read (no service
+// route needed), same trust level as the teacher's own materials/bank reads.
+async function fetchClassAssessments(classId: string, subjectId: string): Promise<SavedAssessment[]> {
+  const { data } = await supabase
+    .from("assessments")
+    .select("id, title, type, duration_minutes, open_at, close_at, status, created_at, assessment_questions(count)")
+    .eq("class_id", classId)
+    .eq("subject_id", subjectId)
+    .order("created_at", { ascending: false });
+  type Row = AssessmentRow & { assessment_questions: { count: number }[] };
+  return ((data ?? []) as unknown as Row[]).map(r => assessmentRowToSaved(r, classId, r.assessment_questions?.[0]?.count ?? 0));
+}
+
+// Student-scoped read: RLS on `assessments` already restricts to the
+// caller's own class + status='published' (drafts are never visible), and
+// RLS on `assessment_attempts` already restricts to the caller's own
+// attempts - both safe direct client reads. Per-student status is derived
+// from real attempt state, replacing the mock's always-"Terjadwal" write.
+async function fetchStudentAssessments(): Promise<SavedAssessment[]> {
+  const { data } = await supabase
+    .from("assessments")
+    .select("id, title, type, duration_minutes, open_at, close_at, status, created_at, assessment_questions(count)")
+    .eq("status", "published");
+  type Row = AssessmentRow & { assessment_questions: { count: number }[] };
+  const rows = (data ?? []) as unknown as Row[];
+  if (rows.length === 0) return [];
+
+  const { data: attemptData } = await supabase
+    .from("assessment_attempts")
+    .select("assessment_id, status")
+    .in("assessment_id", rows.map(r => r.id));
+  type AttemptRow = { assessment_id: string; status: string };
+  const attempts = (attemptData ?? []) as AttemptRow[];
+
+  const now = Date.now();
+  return rows.map(r => {
+    const saved = assessmentRowToSaved(r, "", r.assessment_questions?.[0]?.count ?? 0);
+    const done = attempts.some(a => a.assessment_id === r.id && (a.status === "submitted" || a.status === "graded"));
+    const closed = r.close_at ? now > new Date(r.close_at).getTime() : false;
+    saved.status = done ? "Selesai" : closed ? "Berlangsung" : "Terjadwal";
+    return saved;
+  });
+}
+
+type ReviewListItem = { attemptId: string; assessmentId: string; assessmentTitle: string; type: string; date: string; score: number; allowReview: boolean };
+type ReviewQuestionDetail = {
+  question: string; options: Record<string, string>; correctAnswer: string; explanation: string;
+  yourAnswer: string | null; isCorrect: boolean; topic: string; sourceTitle: string | null; sourcePage: number | null;
+};
+
+// Student-scoped read: RLS already restricts assessment_attempts to the
+// caller's own attempts, so this is a safe direct client read.
+async function fetchStudentCompletedAttempts(): Promise<ReviewListItem[]> {
+  const { data } = await supabase
+    .from("assessment_attempts")
+    .select("id, assessment_id, score, submitted_at, assessments(title, type, allow_review)")
+    .in("status", ["submitted", "graded"])
+    .order("submitted_at", { ascending: false });
+  type Row = { id: string; assessment_id: string; score: number | null; submitted_at: string | null; assessments: { title: string; type: string | null; allow_review: boolean } | null };
+  return ((data ?? []) as unknown as Row[]).map(r => ({
+    attemptId: r.id,
+    assessmentId: r.assessment_id,
+    assessmentTitle: r.assessments?.title ?? "Asesmen",
+    type: r.assessments?.type ?? "Asesmen",
+    date: r.submitted_at ? new Date(r.submitted_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }) : "-",
+    score: r.score ?? 0,
+    allowReview: r.assessments?.allow_review ?? false,
+  }));
+}
+
+// Per-question review detail - only ever returns rows when the assessment's
+// allow_review is true, since that's exactly what the "Students can view
+// questions for reviewable completed assessments" RLS policy
+// (supabase/migrations/009_secure_grading.sql) gates on. When allow_review
+// is false the questions SELECT returns nothing and this resolves empty -
+// never a client-side correctness comparison.
+async function fetchAttemptReviewDetail(attemptId: string): Promise<ReviewQuestionDetail[]> {
+  const { data } = await supabase
+    .from("question_attempts")
+    .select("student_answer, is_correct, assessment_questions(question_order, questions(question, options, correct_answer, explanation, topic, source_title, source_page))")
+    .eq("assessment_attempt_id", attemptId);
+  type Row = {
+    student_answer: string | null; is_correct: boolean | null;
+    assessment_questions: {
+      question_order: number;
+      questions: { question: string; options: Record<string, string>; correct_answer: string; explanation: string | null; topic: string; source_title: string | null; source_page: number | null } | null;
+    } | null;
+  };
+  const rows = ((data ?? []) as unknown as Row[]).filter(r => r.assessment_questions?.questions);
+  rows.sort((a, b) => (a.assessment_questions?.question_order ?? 0) - (b.assessment_questions?.question_order ?? 0));
+  return rows.map(r => ({
+    question: r.assessment_questions!.questions!.question,
+    options: r.assessment_questions!.questions!.options,
+    correctAnswer: r.assessment_questions!.questions!.correct_answer,
+    explanation: r.assessment_questions!.questions!.explanation ?? "",
+    yourAnswer: r.student_answer,
+    isCorrect: !!r.is_correct,
+    topic: r.assessment_questions!.questions!.topic,
+    sourceTitle: r.assessment_questions!.questions!.source_title,
+    sourcePage: r.assessment_questions!.questions!.source_page,
+  }));
+}
+
+// ── Real materials (materials table + 'materials' Storage bucket) ─────────────
+// Storage path convention (supabase/migrations/008): {school_id}/{material_id}.{ext}
+// - the row is inserted first to get a real id, then the file is uploaded to
+// that path, matching the RLS policies already in place (no schema change
+// needed here - Phase 1 of the original mock-elimination plan already built
+// this table/bucket/RLS, it just wasn't wired into product-app.tsx yet).
+type MaterialRow = {
+  id: string; title: string; type: string | null; file_url: string | null; file_size: number | null;
+  ai_processed: boolean; status: string; class_id: string | null; subject_id: string | null; created_at: string;
+};
+
+// Extends the shared mock Material shape with the real Storage path -
+// structurally assignable anywhere a plain Material is expected (MaterialCard
+// etc.), while still letting callers that need to download/re-extract the
+// file get at file_url without a parallel lookup structure.
+type MaterialWithFile = Material & { fileUrl: string | null };
+
+function materialRowToMock(row: MaterialRow, className: string | undefined, subjectName: string, questionCount: number): MaterialWithFile {
+  return {
+    id: row.id,
+    title: row.title,
+    type: (row.type ?? "Modul Ajar") as MaterialType,
+    subject: subjectName,
+    classId: row.class_id ?? undefined,
+    className,
+    uploadedAt: new Date(row.created_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+    pages: 0,
+    status: row.status === "archived" ? "Draf" : "Aktif",
+    aiProcessed: row.ai_processed,
+    questionsGenerated: questionCount,
+    fileUrl: row.file_url,
+  };
+}
+
+// Teacher-scoped read: RLS already restricts to the teacher's assigned
+// classes. When classId is given, further narrowed to that class + the
+// active subject, matching the old mock's per-class-per-subject library
+// (materials.subject_id is nullable in the schema, but every material this
+// app creates always sets it, same as the old mock always tagged both).
+// classId=null means "Semua Kelas" - every class this teacher is assigned
+// to, relying on RLS alone (same as the old toggle's full-unfilter view).
+async function fetchTeacherMaterials(classId: string | null, subjectId: string | undefined, classNamesById: Map<string, string>, subjectNamesById: Map<string, string>): Promise<MaterialWithFile[]> {
+  let query = supabase
+    .from("materials")
+    .select("id, title, type, file_url, file_size, ai_processed, status, class_id, subject_id, created_at")
+    .order("created_at", { ascending: false });
+  if (classId) {
+    query = query.eq("class_id", classId);
+    if (subjectId) query = query.eq("subject_id", subjectId);
+  }
+  const { data } = await query;
+  const rows = (data ?? []) as unknown as MaterialRow[];
+  if (rows.length === 0) return [];
+
+  const { data: qData } = await supabase
+    .from("questions")
+    .select("source_material_id")
+    .in("source_material_id", rows.map(r => r.id));
+  const countMap = new Map<string, number>();
+  for (const row of (qData ?? []) as Array<{ source_material_id: string | null }>) {
+    if (!row.source_material_id) continue;
+    countMap.set(row.source_material_id, (countMap.get(row.source_material_id) ?? 0) + 1);
+  }
+  return rows.map(r => materialRowToMock(
+    r,
+    r.class_id ? classNamesById.get(r.class_id) : undefined,
+    (r.subject_id ? subjectNamesById.get(r.subject_id) : undefined) ?? "Umum",
+    countMap.get(r.id) ?? 0,
+  ));
+}
+
+// Student-scoped read: RLS ("Students can view materials for their class")
+// already restricts to the student's own class + school - no classId param
+// needed, unfiltered besides status='active' (archived materials disappear
+// from the student library, same as the teacher-side archive action).
+async function fetchStudentMaterialsReal(): Promise<MaterialWithFile[]> {
+  const { data } = await supabase
+    .from("materials")
+    .select("id, title, type, file_url, file_size, ai_processed, status, class_id, subject_id, created_at, subjects(name)")
+    .eq("status", "active")
+    .order("created_at", { ascending: false });
+  type Row = MaterialRow & { subjects: { name: string } | null };
+  return ((data ?? []) as unknown as Row[]).map(r => materialRowToMock(r, undefined, r.subjects?.name ?? "Umum", 0));
+}
+
+async function insertMaterial(params: { schoolId: string; classId: string; subjectId: string; creatorId: string; title: string; type: string }): Promise<string | null> {
+  const { data, error } = await supabase.from("materials").insert({
+    school_id: params.schoolId,
+    class_id: params.classId,
+    subject_id: params.subjectId,
+    creator_id: params.creatorId,
+    title: params.title,
+    type: params.type,
+    status: "active",
+  }).select("id").single();
+  if (error || !data) return null;
+  return data.id;
+}
+
+async function uploadMaterialFile(file: File, schoolId: string, materialId: string): Promise<void> {
+  const ext = file.name.split(".").pop() || "bin";
+  const path = `${schoolId}/${materialId}.${ext}`;
+  const { error } = await supabase.storage.from("materials").upload(path, file, { upsert: true });
+  if (!error) {
+    await supabase.from("materials").update({ file_url: path, file_size: file.size }).eq("id", materialId);
+  }
+}
+
+async function markMaterialProcessed(materialId: string): Promise<void> {
+  await supabase.from("materials").update({ ai_processed: true, ai_processed_at: new Date().toISOString() }).eq("id", materialId);
+}
+
+// Download always goes through a fresh short-lived signed URL - `materials`
+// is a private bucket (supabase/migrations/008), never a public one.
+async function downloadMaterialFile(fileUrl: string, fallbackName: string): Promise<void> {
+  const { data } = await supabase.storage.from("materials").createSignedUrl(fileUrl, 60);
+  if (!data?.signedUrl) return;
+  const a = document.createElement("a");
+  a.href = data.signedUrl;
+  a.download = fallbackName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+// Pulls the file back down as a real File object for re-extraction (e.g.
+// "Generate 5 Soal Lagi" after a page reload, when nothing is cached
+// in-memory from this session's own upload).
+async function fetchMaterialAsFile(fileUrl: string, fileName: string): Promise<File | null> {
+  const { data, error } = await supabase.storage.from("materials").download(fileUrl);
+  if (error || !data) return null;
+  return new File([data], fileName);
+}
+
+// Publish/save-draft: creates the assessments row, then (for AI-sourced
+// questions, which only exist as an ephemeral local array up to this point)
+// inserts those questions into the real bank first to get real ids, then
+// links the chosen question ids via assessment_questions. Bank-sourced
+// selections already have real ids and skip straight to linking.
+async function createAssessment(params: {
+  schoolId: string; classId: string; subjectId: string; creatorId: string;
+  title: string; type: string; durationMinutes: number;
+  openAt: string; closeAt: string; status: "draft" | "published";
+  questionSource: "ai" | "bank";
+  aiQuestions: typeof questionBank;
+  bankQuestionIds: string[];
+}): Promise<{ id: string } | null> {
+  const { data: assessmentRow, error } = await supabase.from("assessments").insert({
+    school_id: params.schoolId,
+    class_id: params.classId,
+    subject_id: params.subjectId,
+    creator_id: params.creatorId,
+    title: params.title,
+    type: params.type,
+    open_at: params.openAt ? new Date(params.openAt).toISOString() : null,
+    close_at: params.closeAt ? new Date(params.closeAt).toISOString() : null,
+    duration_minutes: params.durationMinutes,
+    status: params.status,
+  }).select("id").single();
+  if (error || !assessmentRow) return null;
+
+  let questionIds: string[] = [];
+  if (params.questionSource === "ai" && params.aiQuestions.length > 0) {
+    const rows = params.aiQuestions.map(q => ({
+      school_id: params.schoolId,
+      class_id: params.classId,
+      subject_id: params.subjectId,
+      creator_id: params.creatorId,
+      source: "ai_generated" as const,
+      topic: q.topic,
+      subtopic: q.topic,
+      difficulty: q.difficulty,
+      bloom_level: "Menerapkan" as const,
+      question: q.question,
+      options: q.options,
+      correct_answer: q.correctAnswer,
+      explanation: q.explanation,
+      status: "active" as const,
+      source_title: q.source,
+    }));
+    const { data: inserted } = await supabase.from("questions").insert(rows).select("id");
+    questionIds = (inserted ?? []).map(r => r.id);
+    await refreshBankAndReview(params.classId, params.subjectId);
+  } else {
+    questionIds = params.bankQuestionIds;
+  }
+
+  if (questionIds.length > 0) {
+    const aqRows = questionIds.map((qid, i) => ({
+      assessment_id: assessmentRow.id,
+      question_id: qid,
+      question_order: i + 1,
+      status: "approved" as const,
+    }));
+    await supabase.from("assessment_questions").insert(aqRows);
+  }
+
+  return { id: assessmentRow.id };
 }
 
 // ── Completed results store (student answers + scores) ─────────────────────────
@@ -877,65 +1487,43 @@ function deleteIncorrectQuestion(id: string) {
   lsSet("catchup_incorrect", updated);
 }
 
-// ── Persistent materials store — survives navigation + reload ─────────────────
-let _matStoreInit = false;
-const _matStore: {
-  uploadedMaterials: Material[];
-  materialFiles: Record<string, File>;
-  materialQuestions: Record<string, typeof questionBank>;
-  processedIds: Set<string>;
-} = {
-  uploadedMaterials: [],
-  materialFiles: {},
-  materialQuestions: {},
-  processedIds: new Set(),
-};
-function initMatStore() {
-  if (_matStoreInit) return;
-  _matStoreInit = true;
-  const mats = lsGet<Material[]>("catchup_mats");
-  if (mats?.length) _matStore.uploadedMaterials = mats;
-  const qs = lsGet<Record<string, typeof questionBank>>("catchup_matqs");
-  if (qs) _matStore.materialQuestions = qs;
-  const pids = lsGet<string[]>("catchup_pids");
-  if (pids?.length) _matStore.processedIds = new Set(pids);
-}
-
 // ── Teacher Materials ─────────────────────────────────────────────────────────
 
 function TeacherMaterials() {
+  const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
+  const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name;
+  // The active class may have more than one subject assigned to this
+  // teacher (unlike the old single-subject mock assumption) - resolved to
+  // the subject actually taught in the active class specifically.
+  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeSubjectName = activeAssignment?.subjectName ?? "Umum";
+  const activeSubjectId = activeAssignment?.subjectId;
   const [showAllClasses, setShowAllClasses] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [dragOver, setDragOver] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadedMaterials, setUploadedMaterials] = useState<Material[]>(() => { initMatStore(); return _matStore.uploadedMaterials; });
+  const [uploadedMaterials, setUploadedMaterials] = useState<MaterialWithFile[]>([]);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
-  const [selectedMaterial, setSelectedMaterial] = useState<Material | null>(null);
+  const [selectedMaterial, setSelectedMaterial] = useState<MaterialWithFile | null>(null);
   const [confirmProcessId, setConfirmProcessId] = useState<string | null>(null);
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
-  const [processedIds, setProcessedIds] = useState<Set<string>>(() => { initMatStore(); return new Set(_matStore.processedIds); });
+  const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
   const [editMeta, setEditMeta] = useState(false);
-  const [materialFiles, setMaterialFiles] = useState<Record<string, File>>(() => _matStore.materialFiles);
-  const [materialQuestions, setMaterialQuestions] = useState<Record<string, typeof questionBank>>(() => { initMatStore(); return _matStore.materialQuestions; });
+  const [materialFiles, setMaterialFiles] = useState<Record<string, File>>({});
+  const [materialQuestions, setMaterialQuestions] = useState<Record<string, typeof questionBank>>({});
   const [generatingMore, setGeneratingMore] = useState<string | null>(null);
 
-  // Sync state → persistent store + localStorage on every change
-  useEffect(() => {
-    _matStore.uploadedMaterials = uploadedMaterials;
-    lsSet("catchup_mats", uploadedMaterials);
-  }, [uploadedMaterials]);
-  useEffect(() => { _matStore.materialFiles = materialFiles; }, [materialFiles]);
-  useEffect(() => {
-    _matStore.materialQuestions = materialQuestions;
-    lsSet("catchup_matqs", materialQuestions);
-  }, [materialQuestions]);
-  useEffect(() => {
-    _matStore.processedIds = new Set(processedIds);
-    lsSet("catchup_pids", [...processedIds]);
-  }, [processedIds]);
+  const reloadMaterials = React.useCallback(() => {
+    if (!teacher) { setUploadedMaterials([]); return; }
+    const classNamesById = new Map(teacher.classes.map(c => [c.id, c.name]));
+    const subjectNamesById = new Map(teacher.subjects.map(s => [s.id, s.name]));
+    fetchTeacherMaterials(showAllClasses ? null : activeClass, activeSubjectId, classNamesById, subjectNamesById).then(setUploadedMaterials);
+  }, [teacher, activeClass, activeSubjectId, showAllClasses]);
+
+  useEffect(() => { reloadMaterials(); }, [reloadMaterials]);
 
   // Cancel pending upload form when teacher switches class
   const prevClassRef = React.useRef<string | null>(null);
@@ -950,10 +1538,10 @@ function TeacherMaterials() {
     prevClassRef.current = activeClass;
   }, [activeClass, showUpload]);
 
-  const allMaterialsRaw = [...uploadedMaterials, ...materials];
-  const allMaterials = showAllClasses || !activeClass
-    ? allMaterialsRaw
-    : allMaterialsRaw.filter(m => !m.classId || m.classId === activeClass);
+  // showAllClasses drives reloadMaterials directly (a real re-fetch across
+  // every class this teacher is assigned to, RLS-scoped) rather than a
+  // client-side filter over an already-fetched list.
+  const allMaterials = uploadedMaterials;
 
   function handleProcessAI(id: string) {
     setConfirmProcessId(id);
@@ -966,7 +1554,10 @@ function TeacherMaterials() {
     matOverride?: { title: string; subject: string },
   ): Promise<number> {
     const mat = matOverride ?? allMaterials.find(m => m.id === id);
-    const file = fileOverride ?? materialFiles[id];
+    let file: File | undefined = fileOverride ?? materialFiles[id];
+    if (!file && mat && "fileUrl" in mat && (mat as MaterialWithFile).fileUrl) {
+      file = (await fetchMaterialAsFile((mat as MaterialWithFile).fileUrl!, mat.title)) ?? undefined;
+    }
 
     let rawQuestions: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> = [];
 
@@ -976,7 +1567,7 @@ function TeacherMaterials() {
       fd.append("file", file);
       fd.append("count", "5");
       fd.append("materialTitle", mat?.title ?? "Materi");
-      fd.append("subject", mat?.subject ?? currentTeacher.subject);
+      fd.append("subject", mat?.subject ?? activeSubjectName);
       try {
         const res = await fetch("/api/extract-and-generate", { method: "POST", body: fd });
         const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
@@ -998,7 +1589,7 @@ function TeacherMaterials() {
           body: JSON.stringify({
             materialTitle: mat?.title ?? "Materi",
             topic: mat?.subject ?? mat?.title ?? "Umum",
-            subject: mat?.subject ?? currentTeacher.subject,
+            subject: mat?.subject ?? activeSubjectName,
             count: 5,
             difficulty: "Sedang",
           }),
@@ -1035,23 +1626,13 @@ function TeacherMaterials() {
       explanation: q.explanation,
     }));
 
-    setMaterialQuestions(prev => {
-      const next = { ...prev, [id]: append ? [...(prev[id] ?? []), ...generated] : generated };
-      _matStore.materialQuestions = next;
-      lsSet("catchup_matqs", next);
-      return next;
-    });
+    setMaterialQuestions(prev => ({ ...prev, [id]: append ? [...(prev[id] ?? []), ...generated] : generated }));
 
-    // Push to review queue (teacher must approve before entering bank)
-    initReviewStore();
-    const existingReviewIds = new Set(_reviewStore.questions.map(q => q.id));
-    const newForReview = generated
-      .filter(q => !existingReviewIds.has(q.id))
-      .map(q => toPendingQuestion(q));
-    if (newForReview.length > 0) {
-      const updatedReview = [..._reviewStore.questions, ...newForReview];
-      _reviewStore.questions = updatedReview;
-      lsSet("catchup_review", updatedReview);
+    // Push to the real review queue (status 'pending') - teacher must approve
+    // on Tinjau Soal AI before these enter the bank. Linked back to this real
+    // material id now that materials are real rows too.
+    if (teacher && activeClass && activeSubjectId) {
+      await insertPendingQuestions(rawQuestions, teacher.schoolId, activeClass, activeSubjectId, teacher.profileId, mat?.title ?? "AI Generated", id);
     }
 
     const total = (append ? existingCount : 0) + generated.length;
@@ -1064,17 +1645,10 @@ function TeacherMaterials() {
     setProcessingIds(prev => new Set([...prev, id]));
     const count = await generateQuestionsFromMaterial(id, false);
     setProcessingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
-    setProcessedIds(prev => {
-      const next = new Set([...prev, id]);
-      _matStore.processedIds = new Set(next);
-      return next;
-    });
+    setProcessedIds(prev => new Set([...prev, id]));
     if (count > 0) {
-      setUploadedMaterials(prev => {
-        const next = prev.map(m => m.id === id ? { ...m, aiProcessed: true, questionsGenerated: count } : m);
-        _matStore.uploadedMaterials = next;
-        return next;
-      });
+      await markMaterialProcessed(id);
+      setUploadedMaterials(prev => prev.map(m => m.id === id ? { ...m, aiProcessed: true, questionsGenerated: count } : m));
     }
   }
 
@@ -1131,13 +1705,13 @@ function TeacherMaterials() {
           )}
           <div className="mt-4 flex items-center gap-2 rounded-[8px] border border-primary/20 bg-primary-soft px-3 py-2">
             <span className="text-[11px] font-semibold text-primary">Materi untuk kelas:</span>
-            <span className="text-[12px] font-bold text-primary">{activeClass || currentTeacher.classes[0]}</span>
+            <span className="text-[12px] font-bold text-primary">{activeClassName ?? "-"}</span>
             <span className="text-[10px] text-primary/60 ml-1">(sesuai kelas aktif di atas)</span>
           </div>
           <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-primary/10 pt-4">
             {[
               { label: "Tipe Materi *", ph: "Buku Teks, PPT, RPP, Modul Ajar..." },
-              { label: "Mata Pelajaran *", ph: currentTeacher.subject },
+              { label: "Mata Pelajaran *", ph: activeSubjectName },
               { label: "Bab/Topik *", ph: "Fungsi Kuadrat" },
               { label: "Tahun Ajaran *", ph: "2025/2026" },
               { label: "Penerbit (opsional)", ph: "Erlangga, Grafindo, dst." },
@@ -1158,40 +1732,46 @@ function TeacherMaterials() {
             <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowUpload(false); setUploadedFile(null); }}>Batal</Button>
             <Button variant="default" className="h-8 text-[12px]" disabled={uploading}
               onClick={async () => {
+                if (!teacher || !activeClass || !activeSubjectId) {
+                  setToast({ message: "Pilih kelas aktif terlebih dahulu.", tone: "primary" });
+                  return;
+                }
                 setUploading(true);
                 const capturedFile = uploadedFile;
                 const fileName = capturedFile?.name ?? "Materi Baru";
                 const title = fileName.replace(/\.[^/.]+$/, "");
-                const matId = `mat-upload-${Date.now()}`;
-                const newMat: Material = {
+
+                const matId = await insertMaterial({
+                  schoolId: teacher.schoolId, classId: activeClass, subjectId: activeSubjectId,
+                  creatorId: teacher.profileId, title, type: "Modul Ajar",
+                });
+                if (!matId) {
+                  setToast({ message: "Gagal menyimpan materi. Coba lagi.", tone: "primary" });
+                  setUploading(false);
+                  return;
+                }
+
+                const newMat: MaterialWithFile = {
                   id: matId,
                   title,
                   type: "Modul Ajar",
-                  subject: currentTeacher.subject,
-                  classId: getActiveClassId(),
-                  className: getActiveClassId(),
+                  subject: activeSubjectName,
+                  classId: activeClass,
+                  className: activeClassName,
                   uploadedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
                   pages: 0,
                   status: "Diproses",
                   aiProcessed: false,
                   questionsGenerated: 0,
+                  fileUrl: null,
                 };
-                setUploadedMaterials(prev => {
-                  const next = [newMat, ...prev];
-                  _matStore.uploadedMaterials = next;
-                  return next;
-                });
+                setUploadedMaterials(prev => [newMat, ...prev]);
 
-                // Store file immediately in both state and persistent store
+                // Keep the file in-memory for this session's immediate
+                // extraction call below, and upload it to real Storage.
                 if (capturedFile) {
                   setMaterialFiles(prev => ({ ...prev, [matId]: capturedFile }));
-                  _matStore.materialFiles = { ..._matStore.materialFiles, [matId]: capturedFile };
-                  // Also persist as data URL so it survives page refresh and cross-tab access
-                  const reader = new FileReader();
-                  reader.onload = () => {
-                    if (typeof reader.result === "string") lsSet(`catchup_file_${matId}`, reader.result);
-                  };
-                  reader.readAsDataURL(capturedFile);
+                  await uploadMaterialFile(capturedFile, teacher.schoolId, matId);
                 }
 
                 // Close upload panel immediately so user sees the list
@@ -1201,20 +1781,13 @@ function TeacherMaterials() {
 
                 // Step 1: Quick summarize for metadata
                 try {
-                  const res = await fetch("/api/summarize", {
+                  await fetch("/api/summarize", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ materialTitle: title, topic: title, subject: currentTeacher.subject }),
+                    body: JSON.stringify({ materialTitle: title, topic: title, subject: activeSubjectName }),
                   });
-                  const data = await res.json() as { error?: string };
-                  if (data.error) {
-                    setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, status: "Aktif" as Material["status"] } : m));
-                  } else {
-                    setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, status: "Aktif" as Material["status"] } : m));
-                  }
-                } catch {
-                  setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, status: "Aktif" as Material["status"] } : m));
-                }
+                } catch { /* metadata summary is best-effort, doesn't block the flow */ }
+                setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, status: "Aktif" as Material["status"] } : m));
 
                 // Step 2: Generate real questions from file content
                 setProcessingIds(prev => new Set([...prev, matId]));
@@ -1222,22 +1795,13 @@ function TeacherMaterials() {
                 const count = await generateQuestionsFromMaterial(
                   matId, false,
                   capturedFile ?? undefined,
-                  { title, subject: currentTeacher.subject },
+                  { title, subject: activeSubjectName },
                 );
                 setProcessingIds(prev => { const next = new Set(prev); next.delete(matId); return next; });
-                setProcessedIds(prev => {
-                  const next = new Set([...prev, matId]);
-                  _matStore.processedIds = new Set(next);
-                  return next;
-                });
-                setUploadedMaterials(prev => {
-                  const next = prev.map(m =>
-                    m.id === matId ? { ...m, aiProcessed: true, questionsGenerated: count } : m
-                  );
-                  _matStore.uploadedMaterials = next;
-                  return next;
-                });
+                setProcessedIds(prev => new Set([...prev, matId]));
                 if (count > 0) {
+                  await markMaterialProcessed(matId);
+                  setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, aiProcessed: true, questionsGenerated: count } : m));
                   setToast({ message: `${count} soal berhasil diekstrak dari materi "${title}"`, tone: "success" });
                 }
 
@@ -1265,7 +1829,7 @@ function TeacherMaterials() {
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="flex items-center justify-between border-b border-border px-5 py-3.5 gap-3 flex-wrap">
           <h2 className="text-[14px] font-bold text-ink">
-            Daftar Materi — {activeClass || "…"} ({allMaterials.length})
+            Daftar Materi — {activeClassName ?? "…"} ({allMaterials.length})
           </h2>
           <button
             onClick={() => setShowAllClasses(v => !v)}
@@ -1282,7 +1846,7 @@ function TeacherMaterials() {
         <div className="p-4 space-y-3">
           {allMaterials.length === 0 && (
             <div className="py-8 text-center text-[13px] text-ink-secondary">
-              Belum ada materi untuk kelas <span className="font-semibold text-ink">{activeClass}</span>.
+              Belum ada materi untuk kelas <span className="font-semibold text-ink">{activeClassName ?? "-"}</span>.
               Unggah materi di atas untuk memulai.
             </div>
           )}
@@ -1332,7 +1896,7 @@ function TeacherMaterials() {
                     { label: "Tipe Dokumen", value: m.type },
                     { label: "Jumlah Halaman", value: `${m.pages} halaman` },
                     { label: "Tanggal Unggah", value: m.uploadedAt },
-                    { label: "Diunggah oleh", value: currentTeacher.name },
+                    { label: "Diunggah oleh", value: teacher?.name ?? "-" },
                     { label: "Status", value: m.status },
                     ...(m.publisher ? [{ label: "Penerbit", value: m.publisher }] : []),
                     ...(m.year ? [{ label: "Tahun Terbit", value: `${m.year}` }] : []),
@@ -1444,7 +2008,7 @@ function TeacherMaterials() {
                 <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setSelectedMaterial(null); setEditMeta(false); }}>Tutup</Button>
                 {editMeta
                   ? <Button variant="default" className="h-8 text-[12px]">Simpan Perubahan</Button>
-                  : <Button variant="outline" className="h-8 text-[12px]" onClick={() => {
+                  : <Button variant="outline" className="h-8 text-[12px]" onClick={async () => {
                       const file = materialFiles[m.id];
                       if (file) {
                         const url = URL.createObjectURL(file);
@@ -1453,11 +2017,8 @@ function TeacherMaterials() {
                         URL.revokeObjectURL(url);
                         return;
                       }
-                      const dataUrl = lsGet<string>(`catchup_file_${m.id}`);
-                      if (dataUrl) {
-                        const a = document.createElement("a");
-                        a.href = dataUrl; a.download = m.title;
-                        document.body.appendChild(a); a.click(); document.body.removeChild(a);
+                      if (m.fileUrl) {
+                        await downloadMaterialFile(m.fileUrl, m.title);
                         return;
                       }
                       setToast({ message: "File tidak tersedia. Unggah ulang materi ini agar bisa diunduh.", tone: "primary" });
@@ -1757,60 +2318,25 @@ function TeacherAssessmentStyles() {
 
 const EMPTY_MANUAL_Q = { text: "", optA: "", optB: "", optC: "", optD: "", correct: "A", difficulty: "Sedang", topic: "", explanation: "" };
 
-function saveManualQToBank(
-  q: typeof EMPTY_MANUAL_Q,
-  setBankQs: React.Dispatch<React.SetStateAction<typeof questionBank>>,
-  classId = "",
-): boolean {
-  if (!q.text.trim() || !q.optA.trim() || !q.optB.trim() || !q.optC.trim() || !q.optD.trim() || !q.topic.trim()) return false;
-  initBankStore();
-  const entry: typeof questionBank[number] = {
-    id: `manual-${Date.now()}`,
-    question: q.text.trim(),
-    topic: q.topic.trim(),
-    subtopic: q.topic.trim(),
-    bloom: "Menerapkan" as const,
-    difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
-    styleType: "TKA" as const,
-    source: "Manual Guru",
-    usageCount: 0,
-    successRate: 0,
-    status: "Disetujui" as const,
-    isLocked: false,
-    options: { A: q.optA.trim(), B: q.optB.trim(), C: q.optC.trim(), D: q.optD.trim() },
-    correctAnswer: (["A","B","C","D"].includes(q.correct) ? q.correct : "A") as "A"|"B"|"C"|"D",
-    explanation: q.explanation.trim(),
-    classId: classId || undefined,
-  };
-  const updated = [..._bankStore.questions, entry];
-  _bankStore.questions = updated;
-  lsSet("catchup_bank", updated);
-  setBankQs([...updated]);
-  return true;
-}
-
 function TeacherQuestionBank() {
+  const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
+  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeSubjectId = activeAssignment?.subjectId;
   const [search, setSearch] = useState("");
   const [showManualAdd, setShowManualAdd] = useState(false);
   const [manualQ, setManualQ] = useState({ ...EMPTY_MANUAL_Q });
   const [manualError, setManualError] = useState("");
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
-  const [bankQs, setBankQs] = useState<typeof questionBank>([]);
-  const [reviewCount, setReviewCount] = useState(0);
+  const { bank: bankQs, pending: reviewQs } = useQuestionBank(activeClass, activeSubjectId);
+  const reviewCount = reviewQs.length;
   const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
   const [selectedStyles, setSelectedStyles] = useState<Set<string>>(new Set());
   const [selectedDifficulty, setSelectedDifficulty] = useState<string | null>(null);
 
-  useEffect(() => {
-    initBankStore();
-    initReviewStore();
-    setBankQs([..._bankStore.questions]);
-    setReviewCount(_reviewStore.questions.length);
-  }, []);
-
-  // Filter by active class (show untagged questions too for backwards compat)
-  const classFilteredQs = bankQs.filter(q => !q.classId || q.classId === activeClass);
+  // Bank/review are scoped by subject (real schema has no per-class column on
+  // `questions`), so this is now the current class's subject's full bank.
+  const classFilteredQs = bankQs;
 
   const topicOptions = [...new Set(classFilteredQs.map(q => q.topic))].filter(Boolean).sort();
   const styleOptions = [...new Set(classFilteredQs.map(q => q.styleType))].filter(Boolean).sort();
@@ -2022,8 +2548,9 @@ function TeacherQuestionBank() {
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
               <Button variant="outline" size="sm" onClick={() => { setShowManualAdd(false); setManualQ({ ...EMPTY_MANUAL_Q }); setManualError(""); }}>Batal</Button>
-              <Button variant="default" size="sm" onClick={() => {
-                const ok = saveManualQToBank(manualQ, setBankQs, activeClass);
+              <Button variant="default" size="sm" onClick={async () => {
+                if (!teacher || !activeClass || !activeSubjectId) { setManualError("Pilih kelas aktif terlebih dahulu."); return; }
+                const ok = await saveManualQToBank(manualQ, teacher.schoolId, activeClass, activeSubjectId, teacher.profileId);
                 if (!ok) { setManualError("Lengkapi semua field bertanda * sebelum menyimpan."); return; }
                 setShowManualAdd(false);
                 setManualQ({ ...EMPTY_MANUAL_Q });
@@ -2044,35 +2571,26 @@ function TeacherQuestionBank() {
 
 function TeacherQuestionReview() {
   const router = useRouter();
-  const [pendingQs, setPendingQs] = useState<PendingQuestion[]>([]);
+  const teacher = useRealTeacher();
+  const [activeClass] = useActiveClass();
+  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeSubjectId = activeAssignment?.subjectId;
+  const { pending: pendingQs } = useQuestionBank(activeClass, activeSubjectId);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmApproveAll, setConfirmApproveAll] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" | "danger" } | null>(null);
   const [edits, setEdits] = useState<Record<string, Partial<PendingQuestion>>>({});
 
-  useEffect(() => { initReviewStore(); setPendingQs([..._reviewStore.questions]); }, []);
-
-  function approveQuestion(q: PendingQuestion) {
+  async function approveQuestion(q: PendingQuestion) {
+    if (!activeClass || !activeSubjectId) return;
     const merged: PendingQuestion = { ...q, ...edits[q.id] };
-    // Remove from review store
-    const updatedReview = _reviewStore.questions.filter(r => r.id !== q.id);
-    _reviewStore.questions = updatedReview;
-    lsSet("catchup_review", updatedReview);
-    setPendingQs([...updatedReview]);
-    // Add to bank store
-    initBankStore();
-    const entry = toQuestionBankEntry(merged);
-    const updatedBank = [..._bankStore.questions, entry];
-    _bankStore.questions = updatedBank;
-    lsSet("catchup_bank", updatedBank);
+    await approveBankQuestion(merged, activeClass, activeSubjectId);
     setToast({ message: "Soal disetujui dan masuk ke bank soal", tone: "success" });
   }
 
-  function rejectQuestion(id: string) {
-    const updatedReview = _reviewStore.questions.filter(r => r.id !== id);
-    _reviewStore.questions = updatedReview;
-    lsSet("catchup_review", updatedReview);
-    setPendingQs([...updatedReview]);
+  async function rejectQuestion(id: string) {
+    if (!activeClass || !activeSubjectId) return;
+    await rejectBankQuestion(id, activeClass, activeSubjectId);
     setToast({ message: "Soal ditolak dan dihapus dari antrian", tone: "danger" });
   }
 
@@ -2213,18 +2731,11 @@ function TeacherQuestionReview() {
         message={`${pending.length} soal AI akan langsung masuk ke bank soal. Tindakan ini tidak dapat dibatalkan.`}
         confirmLabel="Setujui Semua"
         confirmVariant="success"
-        onConfirm={() => {
+        onConfirm={async () => {
           setConfirmApproveAll(false);
-          // Move all pending to bank
-          initBankStore();
+          if (!activeClass || !activeSubjectId) return;
           const merged = pending.map(q => ({ ...q, ...edits[q.id] } as PendingQuestion));
-          const newEntries = merged.map(toQuestionBankEntry);
-          const updatedBank = [..._bankStore.questions, ...newEntries];
-          _bankStore.questions = updatedBank;
-          lsSet("catchup_bank", updatedBank);
-          _reviewStore.questions = [];
-          lsSet("catchup_review", []);
-          setPendingQs([]);
+          await approveAllBankQuestions(merged, activeClass, activeSubjectId);
           setToast({ message: `${merged.length} soal disetujui dan masuk ke bank soal`, tone: "success" });
         }}
         onCancel={() => setConfirmApproveAll(false)}
@@ -2238,6 +2749,7 @@ function TeacherQuestionReview() {
 // ── Teacher Assessment Builder ────────────────────────────────────────────────
 
 function TeacherAssessmentBuilder() {
+  const teacher = useRealTeacher();
   const [step, setStep] = useState(1);
   const steps = ["Info Dasar", "Materi & Soal", "Jadwal & Publikasi"];
   const [confirmPublish, setConfirmPublish] = useState(false);
@@ -2246,8 +2758,8 @@ function TeacherAssessmentBuilder() {
   // Step 1 form fields
   const [formTitle, setFormTitle] = useState("");
   const [formType, setFormType] = useState("");
-  const [formSubject, setFormSubject] = useState(currentTeacher.subject);
-  const [formClass, setFormClass] = useState(currentTeacher.classes[0] ?? "");
+  const [formSubject, setFormSubject] = useState("");
+  const [formClass, setFormClass] = useState("");
   const [formQuestionCount, setFormQuestionCount] = useState(20);
   const [formDuration, setFormDuration] = useState(45);
   // Step 3 schedule
@@ -2275,22 +2787,26 @@ function TeacherAssessmentBuilder() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<typeof questionBank[number] | null>(null);
   const [activeClass] = useActiveClass();
-  const [materials, setMaterials] = useState<Material[]>([]);
-  const [bankQs, setBankQs] = useState<typeof questionBank>([]);
+  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeSubjectId = activeAssignment?.subjectId;
+  const [materials, setMaterials] = useState<MaterialWithFile[]>([]);
+  const { bank: bankQs } = useQuestionBank(activeClass, activeSubjectId);
   const router = useRouter();
-  useEffect(() => {
-    initMatStore();
-    setMaterials([..._matStore.uploadedMaterials]);
-    initBankStore();
-    setBankQs([..._bankStore.questions]);
-  }, []);
 
-  // Re-filter materials when active class changes
+  // Prefill subject/class defaults once the real teacher context loads (still freely editable text fields)
   useEffect(() => {
-    if (activeClass) {
-      setMaterials(_matStore.uploadedMaterials.filter(m => !m.classId || m.classId === activeClass));
-    }
-  }, [activeClass]);
+    if (!teacher) return;
+    setFormSubject(prev => prev || (activeAssignment?.subjectName ?? teacher.subjects[0]?.name ?? ""));
+    setFormClass(prev => prev || (teacher.classes.find(c => c.id === activeClass)?.name ?? teacher.classes[0]?.name ?? ""));
+  }, [teacher, activeClass]);
+
+  // Re-fetch materials when the active class (or its resolved subject) changes
+  useEffect(() => {
+    if (!teacher || !activeClass) { setMaterials([]); return; }
+    const classNamesById = new Map(teacher.classes.map(c => [c.id, c.name]));
+    const subjectNamesById = new Map(teacher.subjects.map(s => [s.id, s.name]));
+    fetchTeacherMaterials(activeClass, activeSubjectId, classNamesById, subjectNamesById).then(setMaterials);
+  }, [teacher, activeClass, activeSubjectId]);
   const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(new Set());
   const [assessmentType, setAssessmentType] = useState<"uniform" | "adaptive">("uniform");
   const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
@@ -2867,8 +3383,10 @@ function TeacherAssessmentBuilder() {
             message="Soal ini akan disimpan permanen ke bank soal dan dapat digunakan pada asesmen lainnya. Apakah kamu yakin?"
             confirmLabel="Ya, Tambahkan"
             confirmVariant="default"
-            onConfirm={() => {
-              saveManualQToBank(newQ, setBankQs, activeClass);
+            onConfirm={async () => {
+              if (teacher && activeClass && activeSubjectId) {
+                await saveManualQToBank(newQ, teacher.schoolId, activeClass, activeSubjectId, teacher.profileId);
+              }
               setConfirmAddToBank(false);
               setNewQ({ ...EMPTY_MANUAL_Q });
               setToast({ message: "Soal berhasil ditambahkan ke bank soal", tone: "success" });
@@ -2944,33 +3462,19 @@ function TeacherAssessmentBuilder() {
         message="Siswa akan menerima notifikasi dan dapat mengakses asesmen sesuai jadwal yang ditentukan. Asesmen yang sudah dipublikasikan tidak dapat diedit."
         confirmLabel="Publikasikan"
         confirmVariant="default"
-        onConfirm={() => {
-          const srcQs = questionSource === "ai" ? aiGeneratedQuestions : bankQs;
-          const chosen = srcQs.filter(q => selectedQuestions.has(q.id));
-          const scheduledLabel = formScheduledFor
-            ? new Date(formScheduledFor).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })
-            : new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
-          const newAssessment: SavedAssessment = {
-            id: `assess-${Date.now()}`,
-            title: formTitle || "Asesmen Tanpa Judul",
-            type: (formType || "Kuis Guru") as Assessment["type"],
-            subject: formSubject,
-            classId: formClass,
-            totalQuestions: chosen.length || formQuestionCount,
-            duration: formDuration,
-            scheduledFor: scheduledLabel,
-            openAt: formOpenAt || undefined,
-            closeAt: formCloseAt || undefined,
-            status: "Terjadwal",
-            createdAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
-            questions: chosen,
-          };
-          initAssessStore();
-          const updated = [newAssessment, ..._assessStore.list];
-          _assessStore.list = updated;
-          lsSet("catchup_assessments", updated);
+        onConfirm={async () => {
+          if (!teacher || !activeClass || !activeSubjectId) { setConfirmPublish(false); return; }
+          const chosenAi = questionSource === "ai" ? aiGeneratedQuestions.filter(q => selectedQuestions.has(q.id)) : [];
+          const chosenBankIds = questionSource === "bank" ? bankQs.filter(q => selectedQuestions.has(q.id)).map(q => q.id) : [];
+          const created = await createAssessment({
+            schoolId: teacher.schoolId, classId: activeClass, subjectId: activeSubjectId, creatorId: teacher.profileId,
+            title: formTitle || "Asesmen Tanpa Judul", type: formType || "Kuis Guru", durationMinutes: formDuration,
+            openAt: formOpenAt, closeAt: formCloseAt, status: "published",
+            questionSource, aiQuestions: chosenAi, bankQuestionIds: chosenBankIds,
+          });
           setConfirmPublish(false);
-          setToast({ message: `Asesmen "${newAssessment.title}" berhasil dipublikasikan`, tone: "success" });
+          if (!created) { setToast({ message: "Gagal mempublikasikan asesmen. Coba lagi.", tone: "danger" }); return; }
+          setToast({ message: `Asesmen "${formTitle || "Asesmen Tanpa Judul"}" berhasil dipublikasikan`, tone: "success" });
           setStep(1);
           setFormTitle(""); setFormType(""); setFormScheduledFor(""); setFormOpenAt(""); setFormCloseAt("");
           setSelectedQuestions(new Set()); setAiGeneratedQuestions([]); setAiGenerated(false);
@@ -2984,28 +3488,19 @@ function TeacherAssessmentBuilder() {
         message="Asesmen disimpan sebagai draf dan belum dapat diakses siswa. Kamu dapat melanjutkan kapan saja."
         confirmLabel="Simpan Draf"
         confirmVariant="default"
-        onConfirm={() => {
-          const srcQs = questionSource === "ai" ? aiGeneratedQuestions : bankQs;
-          const chosen = srcQs.filter(q => selectedQuestions.has(q.id));
-          const newAssessment: SavedAssessment = {
-            id: `assess-draft-${Date.now()}`,
-            title: formTitle || "Draf Asesmen",
-            type: (formType || "Kuis Guru") as Assessment["type"],
-            subject: formSubject,
-            classId: formClass,
-            totalQuestions: chosen.length || formQuestionCount,
-            duration: formDuration,
-            scheduledFor: "—",
-            status: "Terjadwal",
-            createdAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
-            questions: chosen,
-          };
-          initAssessStore();
-          const updated = [newAssessment, ..._assessStore.list];
-          _assessStore.list = updated;
-          lsSet("catchup_assessments", updated);
+        onConfirm={async () => {
+          if (!teacher || !activeClass || !activeSubjectId) { setConfirmSaveDraft(false); return; }
+          const chosenAi = questionSource === "ai" ? aiGeneratedQuestions.filter(q => selectedQuestions.has(q.id)) : [];
+          const chosenBankIds = questionSource === "bank" ? bankQs.filter(q => selectedQuestions.has(q.id)).map(q => q.id) : [];
+          const created = await createAssessment({
+            schoolId: teacher.schoolId, classId: activeClass, subjectId: activeSubjectId, creatorId: teacher.profileId,
+            title: formTitle || "Draf Asesmen", type: formType || "Kuis Guru", durationMinutes: formDuration,
+            openAt: formOpenAt, closeAt: formCloseAt, status: "draft",
+            questionSource, aiQuestions: chosenAi, bankQuestionIds: chosenBankIds,
+          });
           setConfirmSaveDraft(false);
-          setToast({ message: `Draf "${newAssessment.title}" tersimpan`, tone: "primary" });
+          if (!created) { setToast({ message: "Gagal menyimpan draf. Coba lagi.", tone: "danger" }); return; }
+          setToast({ message: `Draf "${formTitle || "Draf Asesmen"}" tersimpan`, tone: "primary" });
         }}
         onCancel={() => setConfirmSaveDraft(false)}
       />
@@ -3017,65 +3512,154 @@ function TeacherAssessmentBuilder() {
 
 // ── Teacher Results ───────────────────────────────────────────────────────────
 
-// Deterministic simulated answer distribution based on question id + difficulty
-function simulateDist(qId: string, correct: string, difficulty: string): Record<string, number> {
-  const opts = ["A","B","C","D"] as const;
-  const h = Math.abs(qId.split("").reduce((a,c) => ((a<<5)-a+c.charCodeAt(0))|0, 0));
-  const correctPct = difficulty === "Mudah" ? 70 : difficulty === "Sedang" ? 52 : 36;
-  const remaining = 100 - correctPct;
-  const wrongOpts = opts.filter(o => o !== correct);
-  const majorityIdx = h % wrongOpts.length;
-  const majorityPct = Math.round(remaining * 0.58);
-  const rest = remaining - majorityPct;
-  const dist: Record<string, number> = { A:0,B:0,C:0,D:0 };
-  dist[correct] = correctPct;
-  wrongOpts.forEach((o, i) => { dist[o] = i === majorityIdx ? majorityPct : Math.round(rest / (wrongOpts.length - 1)); });
-  const total = Object.values(dist).reduce((a,b)=>a+b,0);
-  dist[correct] += 100 - total;
-  return dist;
+type ResultQuestionRow = {
+  assessmentQuestionId: string;
+  question: string;
+  options: { A: string; B: string; C: string; D: string; E?: string };
+  correctAnswer: "A" | "B" | "C" | "D" | "E";
+  topic: string;
+  difficulty: "Mudah" | "Sedang" | "Sulit";
+};
+type ResultStudentRow = { studentId: string; name: string; score: number | null; answers: Record<string, string> };
+type AssessmentResultDetail = { questions: ResultQuestionRow[]; distributions: Record<string, Record<string, number>>; studentRows: ResultStudentRow[] };
+
+// Attach real participant count / average score / completion status
+// (derived from real assessment_attempts, never simulated) to an already
+// class+subject-scoped assessment list.
+async function attachAssessmentStats(rows: SavedAssessment[]): Promise<SavedAssessment[]> {
+  if (rows.length === 0) return rows;
+  const { data } = await supabase
+    .from("assessment_attempts")
+    .select("assessment_id, status, score")
+    .in("assessment_id", rows.map(r => r.id))
+    .in("status", ["submitted", "graded"]);
+  const byAssessment = new Map<string, { count: number; sum: number; scored: number }>();
+  for (const row of (data ?? []) as Array<{ assessment_id: string; status: string; score: number | null }>) {
+    const cur = byAssessment.get(row.assessment_id) ?? { count: 0, sum: 0, scored: 0 };
+    cur.count += 1;
+    if (row.score !== null) { cur.sum += row.score; cur.scored += 1; }
+    byAssessment.set(row.assessment_id, cur);
+  }
+  return rows.map(r => {
+    const stat = byAssessment.get(r.id);
+    return {
+      ...r,
+      participants: stat?.count ?? 0,
+      avgScore: stat && stat.scored > 0 ? Math.round(stat.sum / stat.scored) : undefined,
+      status: (stat?.count ?? 0) > 0 ? "Selesai" : "Terjadwal",
+    } as SavedAssessment;
+  });
 }
 
-function simulateStudentAnswer(studentId: string, qId: string, correctAnswer: "A"|"B"|"C"|"D", avgScore: number): "A"|"B"|"C"|"D" {
-  const h = Math.abs((studentId + qId).split("").reduce((a, c) => ((a << 5) - a + c.charCodeAt(0)) | 0, 0));
-  const wrongProb = Math.max(0, Math.min(0.85, (1 - avgScore / 100) * 1.4));
-  const isWrong = (h % 1000) / 1000 < wrongProb;
-  if (!isWrong) return correctAnswer;
-  const opts = (["A","B","C","D"] as const).filter(o => o !== correctAnswer);
-  return opts[h % 3];
+// Real per-question answer distribution + real per-student answer grid for
+// the detail dialog - replaces simulateDist/simulateStudentAnswer entirely.
+async function loadAssessmentResultDetail(assessmentId: string, classId: string): Promise<AssessmentResultDetail> {
+  const { data: aqRows } = await supabase
+    .from("assessment_questions")
+    .select("id, question_order, questions(question, options, correct_answer, topic, difficulty)")
+    .eq("assessment_id", assessmentId)
+    .order("question_order", { ascending: true });
+  type AQRow = { id: string; question_order: number; questions: { question: string; options: { A: string; B: string; C: string; D: string; E?: string }; correct_answer: string; topic: string; difficulty: string } | null };
+  const questions: ResultQuestionRow[] = ((aqRows ?? []) as unknown as AQRow[])
+    .filter((r): r is AQRow & { questions: NonNullable<AQRow["questions"]> } => !!r.questions)
+    .map(r => ({
+      assessmentQuestionId: r.id,
+      question: r.questions.question,
+      options: r.questions.options,
+      correctAnswer: r.questions.correct_answer as "A" | "B" | "C" | "D" | "E",
+      topic: r.questions.topic,
+      difficulty: r.questions.difficulty as "Mudah" | "Sedang" | "Sulit",
+    }));
+
+  const { data: attemptData } = await supabase
+    .from("assessment_attempts")
+    .select("id, student_id, score")
+    .eq("assessment_id", assessmentId)
+    .in("status", ["submitted", "graded"]);
+  type AttemptRow = { id: string; student_id: string; score: number | null };
+  const attempts = (attemptData ?? []) as AttemptRow[];
+
+  const answersByAttempt: Record<string, Record<string, string>> = {};
+  const distCounts: Record<string, Record<string, number>> = {};
+  if (attempts.length > 0) {
+    const { data: qaRows } = await supabase
+      .from("question_attempts")
+      .select("assessment_attempt_id, assessment_question_id, student_answer")
+      .in("assessment_attempt_id", attempts.map(a => a.id));
+    for (const row of (qaRows ?? []) as Array<{ assessment_attempt_id: string; assessment_question_id: string; student_answer: string | null }>) {
+      if (!row.student_answer) continue;
+      (answersByAttempt[row.assessment_attempt_id] ??= {})[row.assessment_question_id] = row.student_answer;
+      const bucket = (distCounts[row.assessment_question_id] ??= {});
+      bucket[row.student_answer] = (bucket[row.student_answer] ?? 0) + 1;
+    }
+  }
+
+  const distributions: Record<string, Record<string, number>> = {};
+  for (const q of questions) {
+    const counts = distCounts[q.assessmentQuestionId] ?? {};
+    const total = Object.values(counts).reduce((a, b) => a + b, 0);
+    const dist: Record<string, number> = { A: 0, B: 0, C: 0, D: 0 };
+    if (total > 0) (["A", "B", "C", "D"] as const).forEach(o => { dist[o] = Math.round(((counts[o] ?? 0) / total) * 100); });
+    distributions[q.assessmentQuestionId] = dist;
+  }
+
+  const { data: studentData } = await supabase
+    .from("students")
+    .select("id, user_profiles(full_name)")
+    .eq("class_id", classId);
+  type StudentRow = { id: string; user_profiles: { full_name: string } | null };
+  const studentRows: ResultStudentRow[] = ((studentData ?? []) as unknown as StudentRow[]).map(s => {
+    const attempt = attempts.find(a => a.student_id === s.id);
+    return {
+      studentId: s.id,
+      name: s.user_profiles?.full_name ?? "-",
+      score: attempt?.score ?? null,
+      answers: attempt ? (answersByAttempt[attempt.id] ?? {}) : {},
+    };
+  });
+
+  return { questions, distributions, studentRows };
 }
 
 function TeacherResults() {
+  const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
+  const activeSubjectId = teacher?.assignments.find(a => a.classId === activeClass)?.subjectId;
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<"soal" | "siswa">("soal");
-  const [allAssessmentsRaw, setAllAssessmentsRaw] = useState<SavedAssessment[]>([]);
+  const [allAssessments, setAllAssessments] = useState<SavedAssessment[]>([]);
+  const [classSize, setClassSize] = useState(0);
+  const [resultDetail, setResultDetail] = useState<AssessmentResultDetail | null>(null);
   const [aiAnalysis, setAiAnalysis] = useState<{ overallAnalysis: string; questionAnalyses: Array<{index:number;misconception:string;suggestion:string}> } | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
 
-  const activeClassId = classIdByName[activeClass] ?? "cls1";
-  const allAssessments = allAssessmentsRaw.filter(a => !a.classId || a.classId === activeClassId);
-  const classStudents = students.filter(s => s.classId === activeClassId);
+  useEffect(() => {
+    if (!activeClass || !activeSubjectId) { setAllAssessments([]); return; }
+    fetchClassAssessments(activeClass, activeSubjectId).then(attachAssessmentStats).then(setAllAssessments);
+  }, [activeClass, activeSubjectId]);
 
   useEffect(() => {
-    initAssessStore();
-    const hardcoded: SavedAssessment[] = assessments.map(a => ({ ...a, questions: [] }));
-    const userIds = new Set(_assessStore.list.map(a => a.id));
-    setAllAssessmentsRaw([..._assessStore.list, ...hardcoded.filter(a => !userIds.has(a.id))]);
-  }, []);
+    if (!activeClass) { setClassSize(0); return; }
+    supabase.from("students").select("id", { count: "exact", head: true }).eq("class_id", activeClass)
+      .then(({ count }) => setClassSize(count ?? 0));
+  }, [activeClass]);
 
-  // Reset analysis and tab when dialog closes or changes
-  useEffect(() => { setAiAnalysis(null); setAiLoading(false); setDetailTab("soal"); }, [detailId]);
+  // Reset analysis, tab, and detail data when dialog closes or changes
+  useEffect(() => {
+    setAiAnalysis(null); setAiLoading(false); setDetailTab("soal"); setResultDetail(null);
+    if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail);
+  }, [detailId, activeClass]);
 
-  async function loadAIAnalysis(det: SavedAssessment) {
-    if (!det.questions?.length) return;
+  async function loadAIAnalysis() {
+    if (!resultDetail?.questions.length) return;
     setAiLoading(true);
-    const payload = det.questions.map(q => {
-      const dist = simulateDist(q.id, q.correctAnswer, q.difficulty);
+    const payload = resultDetail.questions.map(q => {
+      const dist = resultDetail.distributions[q.assessmentQuestionId] ?? { A: 0, B: 0, C: 0, D: 0 };
       const wrongOpts = (["A","B","C","D"] as const).filter(o => o !== q.correctAnswer);
       const majority = wrongOpts.reduce((a,b) => dist[a] > dist[b] ? a : b);
       return {
         question: q.question, topic: q.topic,
-        correctAnswer: q.correctAnswer, correctOption: q.options[q.correctAnswer],
+        correctAnswer: q.correctAnswer, correctOption: q.options[q.correctAnswer as "A"|"B"|"C"|"D"],
         majorityWrongAnswer: majority, majorityWrongOption: q.options[majority],
         majorityWrongPct: dist[majority],
       };
@@ -3085,7 +3669,7 @@ function TeacherResults() {
       const res = await fetch("/api/analyze-assessment", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ assessmentTitle: det.title, questions: payload }),
+        body: JSON.stringify({ assessmentTitle: detail?.title ?? "", questions: payload }),
       });
       const data = await res.json() as typeof aiAnalysis & { error?: string };
       if (!data?.error) setAiAnalysis(data);
@@ -3094,6 +3678,13 @@ function TeacherResults() {
   }
 
   const detail = allAssessments.find(a => a.id === detailId);
+  const bestAvg = allAssessments.reduce((max, a) => a.avgScore != null && a.avgScore > max ? a.avgScore : max, 0);
+  const participationRate = classSize > 0 && allAssessments.some(a => (a.participants ?? 0) > 0)
+    ? Math.round(
+        (allAssessments.filter(a => (a.participants ?? 0) > 0).reduce((sum, a) => sum + (a.participants ?? 0) / classSize, 0)
+          / allAssessments.filter(a => (a.participants ?? 0) > 0).length) * 100
+      )
+    : 0;
 
   return (
     <div className="space-y-6">
@@ -3101,12 +3692,15 @@ function TeacherResults() {
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {[
           { label: "Asesmen selesai", value: `${allAssessments.filter(a => a.status === "Selesai").length}`, detail: "Semester ini", tone: "primary" as const },
-          { label: "Rata-rata terbaik", value: "82", detail: "Kuis Fungsi Kuadrat", tone: "success" as const },
-          { label: "Partisipasi rata-rata", value: "97%", detail: "Dari total siswa", tone: "neutral" as const },
+          { label: "Rata-rata terbaik", value: bestAvg > 0 ? `${bestAvg}` : "—", detail: "Semua asesmen", tone: "success" as const },
+          { label: "Partisipasi rata-rata", value: classSize > 0 ? `${participationRate}%` : "—", detail: "Dari total siswa", tone: "neutral" as const },
         ].map(s => <StatCard key={s.label} {...s} />)}
       </div>
 
       <div className="space-y-3">
+        {allAssessments.length === 0 && (
+          <EmptyState icon={ClipboardList} title="Belum ada asesmen" description="Buat asesmen baru di halaman Buat Asesmen untuk melihat hasilnya di sini." />
+        )}
         {allAssessments.map(a => (
           <div key={a.id} onClick={() => setDetailId(a.id)}
             className="flex items-center gap-4 rounded-card border border-border bg-surface p-4 hover:border-primary/30 hover:shadow-soft transition-all cursor-pointer">
@@ -3157,7 +3751,7 @@ function TeacherResults() {
               {/* KPI row */}
               <div className="grid grid-cols-3 gap-4">
                 {[
-                  { label: "Peserta", value: `${detail.participants ?? students.length}`, icon: <Users className="h-4 w-4 text-primary" /> },
+                  { label: "Peserta", value: `${detail.participants ?? 0}`, icon: <Users className="h-4 w-4 text-primary" /> },
                   { label: "Rata-rata", value: detail.avgScore ? `${detail.avgScore}` : "—", icon: <CheckCircle2 className="h-4 w-4 text-success" /> },
                   { label: "Status", value: detail.status, icon: <Eye className="h-4 w-4 text-ink-secondary" /> },
                 ].map(k => (
@@ -3175,7 +3769,7 @@ function TeacherResults() {
               )}
 
               {/* Tab switcher — only shown when there are questions */}
-              {detail.questions && detail.questions.length > 0 && (
+              {resultDetail && resultDetail.questions.length > 0 && (
                 <div className="flex gap-1 p-1 bg-background rounded-[8px] border border-border">
                   {([
                     { key: "soal" as const, label: "Analisis Soal" },
@@ -3195,12 +3789,12 @@ function TeacherResults() {
               )}
 
               {/* TAB: Analisis Soal */}
-              {detailTab === "soal" && detail.questions && detail.questions.length > 0 && (
+              {detailTab === "soal" && resultDetail && resultDetail.questions.length > 0 && (
                 <div>
                   <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-[13px] font-bold text-ink">Soal & Distribusi Jawaban ({detail.questions.length})</h3>
+                    <h3 className="text-[13px] font-bold text-ink">Soal & Distribusi Jawaban ({resultDetail.questions.length})</h3>
                     {!aiAnalysis && !aiLoading && (
-                      <Button variant="outline" className="h-7 text-[11px]" onClick={() => loadAIAnalysis(detail)}>
+                      <Button variant="outline" className="h-7 text-[11px]" onClick={() => loadAIAnalysis()}>
                         <Sparkles className="mr-1 h-3 w-3" />Analisis AI
                       </Button>
                     )}
@@ -3219,14 +3813,14 @@ function TeacherResults() {
                   )}
 
                   <div className="space-y-3 mt-3">
-                    {detail.questions.map((q, i) => {
-                      const dist = simulateDist(q.id, q.correctAnswer, q.difficulty);
+                    {resultDetail.questions.map((q, i) => {
+                      const dist = resultDetail.distributions[q.assessmentQuestionId] ?? { A: 0, B: 0, C: 0, D: 0 };
                       const wrongOpts = (["A","B","C","D"] as const).filter(o => o !== q.correctAnswer);
                       const majorityWrong = wrongOpts.reduce((a,b) => dist[a] > dist[b] ? a : b);
                       const qAnalysis = aiAnalysis?.questionAnalyses?.find(a => a.index === i + 1);
 
                       return (
-                        <div key={q.id} className="rounded-[10px] border border-border bg-background p-4 space-y-3">
+                        <div key={q.assessmentQuestionId} className="rounded-[10px] border border-border bg-background p-4 space-y-3">
                           <div className="flex items-start gap-2">
                             <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[10px] font-bold text-primary mt-0.5">{i+1}</span>
                             <p className="text-[12px] font-medium text-ink leading-snug">{q.question}</p>
@@ -3285,12 +3879,12 @@ function TeacherResults() {
               )}
 
               {/* TAB: Jawaban Siswa */}
-              {detailTab === "siswa" && detail.questions && detail.questions.length > 0 && (
+              {detailTab === "siswa" && resultDetail && resultDetail.questions.length > 0 && (
                 <div>
                   <p className="text-[11px] text-ink-secondary mb-3">
                     Jawaban setiap siswa per soal. <span className="text-success font-semibold">Hijau = benar</span>, <span className="text-danger font-semibold">merah = salah</span>.
                   </p>
-                  {classStudents.length === 0 ? (
+                  {resultDetail.studentRows.length === 0 ? (
                     <p className="text-[12px] text-ink-tertiary">Tidak ada data siswa untuk kelas ini.</p>
                   ) : (
                     <div className="overflow-x-auto rounded-[10px] border border-border">
@@ -3298,8 +3892,8 @@ function TeacherResults() {
                         <thead>
                           <tr className="bg-background border-b border-border">
                             <th className="text-left px-3 py-2 font-semibold text-ink sticky left-0 bg-background z-10 min-w-[120px]">Siswa</th>
-                            {(detail.questions as QuestionBankEntry[]).map((q, i) => (
-                              <th key={q.id} className="px-2 py-2 font-semibold text-ink-secondary text-center min-w-[36px]" title={q.question}>
+                            {resultDetail.questions.map((q, i) => (
+                              <th key={q.assessmentQuestionId} className="px-2 py-2 font-semibold text-ink-secondary text-center min-w-[36px]" title={q.question}>
                                 Q{i+1}
                               </th>
                             ))}
@@ -3307,76 +3901,45 @@ function TeacherResults() {
                           </tr>
                         </thead>
                         <tbody>
-                          {classStudents.map(s => {
-                            const qs = detail.questions as QuestionBankEntry[];
-                            const answers: ("A"|"B"|"C"|"D")[] = qs.map(q =>
-                              simulateStudentAnswer(s.id, q.id, q.correctAnswer as "A"|"B"|"C"|"D", s.avgScore)
-                            );
-                            const correctCount = answers.filter((ans, qi) => ans === qs[qi].correctAnswer).length;
-                            const score = Math.round((correctCount / qs.length) * 100);
-                            return (
-                              <tr key={s.id} className="border-b border-border/50 hover:bg-background/60">
-                                <td className="px-3 py-1.5 font-medium text-ink sticky left-0 bg-surface">{s.name}</td>
-                                {qs.map((q, qi) => {
-                                  const ans = answers[qi];
-                                  const isCorrect = ans === q.correctAnswer;
-                                  return (
-                                    <td key={q.id} className="px-2 py-1.5 text-center">
+                          {resultDetail.studentRows.map(s => (
+                            <tr key={s.studentId} className="border-b border-border/50 hover:bg-background/60">
+                              <td className="px-3 py-1.5 font-medium text-ink sticky left-0 bg-surface">{s.name}</td>
+                              {resultDetail.questions.map(q => {
+                                const ans = s.answers[q.assessmentQuestionId];
+                                const isCorrect = ans === q.correctAnswer;
+                                return (
+                                  <td key={q.assessmentQuestionId} className="px-2 py-1.5 text-center">
+                                    {ans ? (
                                       <span className={cn(
                                         "inline-flex h-5 w-5 items-center justify-center rounded-full text-[9px] font-bold",
                                         isCorrect ? "bg-success/15 text-success" : "bg-danger/15 text-danger"
                                       )}>{ans}</span>
-                                    </td>
-                                  );
-                                })}
-                                <td className="px-3 py-1.5 text-center font-bold tabular-nums">
-                                  <span className={cn(score >= 80 ? "text-success" : score >= 65 ? "text-primary" : "text-warning")}>{score}</span>
-                                </td>
-                              </tr>
-                            );
-                          })}
+                                    ) : (
+                                      <span className="text-ink-tertiary">—</span>
+                                    )}
+                                  </td>
+                                );
+                              })}
+                              <td className="px-3 py-1.5 text-center font-bold tabular-nums">
+                                <span className={cn(s.score == null ? "text-ink-tertiary" : s.score >= 80 ? "text-success" : s.score >= 65 ? "text-primary" : "text-warning")}>
+                                  {s.score ?? "—"}
+                                </span>
+                              </td>
+                            </tr>
+                          ))}
                         </tbody>
                       </table>
                     </div>
                   )}
                 </div>
               )}
-
-              {/* Seed assessments without question data: show student score list */}
-              {(!detail.questions || detail.questions.length === 0) && detail.avgScore && (
-                <div>
-                  <h3 className="text-[12px] font-bold text-ink mb-2">Nilai Siswa</h3>
-                  <div className="space-y-1.5">
-                    {students.map((s, i) => {
-                      const score = Math.min(100, Math.max(30, detail.avgScore! + (((i * 7 + 3) % 31) - 15)));
-                      return (
-                        <div key={s.id} className="flex items-center gap-3 rounded-[8px] border border-border bg-background px-3 py-2">
-                          <div className="flex-1 text-[12px] font-medium text-ink">{s.name}</div>
-                          <div className={cn("text-[13px] font-bold tabular-nums",
-                            score >= 80 ? "text-success" : score >= 65 ? "text-primary" : "text-warning"
-                          )}>{score}</div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-6 py-4 shrink-0">
               <Button variant="outline" className="h-8 text-[12px]" onClick={() => setDetailId(null)}>Tutup</Button>
-              <Button variant="default" className="h-8 text-[12px]" onClick={() => {
+              <Button variant="default" className="h-8 text-[12px]" disabled={!resultDetail} onClick={() => {
+                if (!resultDetail) return;
                 const bom = "﻿";
-                const scoreList = detail.questions?.length
-                  ? students.map((s, i) => {
-                      const base = detail.avgScore ?? 70;
-                      const score = Math.min(100, Math.max(30, base + (((i * 7 + 3) % 31) - 15)));
-                      return [s.name, score.toString()];
-                    })
-                  : students.map((s, i) => {
-                      const base = detail.avgScore ?? 70;
-                      const score = Math.min(100, Math.max(30, base + (((i * 7 + 3) % 31) - 15)));
-                      return [s.name, score.toString()];
-                    });
+                const scoreList = resultDetail.studentRows.map(s => [s.name, s.score != null ? s.score.toString() : "—"]);
                 const rows = [["Nama Siswa", "Nilai"], ...scoreList];
                 const csv = bom + rows.map(r => r.map(cell => `"${cell}"`).join(",")).join("\n");
                 const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
@@ -3398,13 +3961,20 @@ function TeacherResults() {
 // ── Teacher Analytics ─────────────────────────────────────────────────────────
 
 function TeacherAnalytics() {
+  const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
+  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
   const [topicPopup, setTopicPopup] = useState<string | null>(null);
   const [showAllStudents, setShowAllStudents] = useState(false);
 
-  const activeClassId = classIdByName[activeClass] ?? "cls1";
-  const activeStats = activeClass ? getClassStats(activeClassId) : classStats;
-  const classStudents = students.filter(s => s.classId === activeClassId);
+  const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name ?? teacher?.classes[0]?.name ?? "-";
+  const [classStudents, setClassStudents] = useState<Student[]>([]);
+  const activeStats = computeRealClassStats(classStudents);
+
+  useEffect(() => {
+    if (!activeClass) { setClassStudents([]); return; }
+    fetchRealClassStudents(activeClass, activeAssignment?.subjectId, activeClassName).then(setClassStudents);
+  }, [activeClass, activeAssignment?.subjectId, activeClassName]);
 
   const popupTopic = topicAccuracy.find(t => t.label === topicPopup);
   const popupRec = topicPopup
@@ -3413,7 +3983,7 @@ function TeacherAnalytics() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Analitik Kelas" title={`Analitik ${activeClass || currentTeacher.classes[0]}`} description={`Performa ${activeStats.total} siswa berdasarkan data asesmen semester ini.`} />
+      <PageHeader eyebrow="Analitik Kelas" title={`Analitik ${activeClassName}`} description={`Performa ${activeStats.total} siswa berdasarkan data asesmen semester ini.`} />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {teacherAnalyticsStats.map(s => <StatCard key={s.label} {...s} />)}
@@ -3469,7 +4039,7 @@ function TeacherAnalytics() {
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="border-b border-border px-5 py-3.5 flex items-center justify-between">
           <h3 className="text-[14px] font-bold text-ink">Performa Siswa</h3>
-          <span className="text-[11px] text-ink-secondary">{classStudents.length} siswa · {activeClass}</span>
+          <span className="text-[11px] text-ink-secondary">{classStudents.length} siswa · {activeClassName}</span>
         </div>
         <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
           {(showAllStudents ? classStudents : classStudents.slice(0, 6)).map(s => <StudentPerformanceCard key={s.id} student={s} />)}
@@ -3546,19 +4116,20 @@ function saveRecDone(map: Map<string, number>) {
 }
 
 function TeacherRecommendations() {
+  const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
+  const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name ?? teacher?.classes[0]?.name ?? "-";
+  const activeSubjectId = teacher?.assignments.find(a => a.classId === activeClass)?.subjectId;
+  const { bank: bankQs } = useQuestionBank(activeClass, activeSubjectId);
   const [recs, setRecs] = useState<typeof teachingRecommendations>([]);
   const [summary, setSummary] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
-  const [bankQs, setBankQs] = useState<typeof questionBank>([]);
   // Map of id → timestamp when marked done
   const [doneMap, setDoneMap] = useState<Map<string, number>>(new Map());
 
   useEffect(() => {
     setDoneMap(loadRecDone());
-    initBankStore();
-    setBankQs([..._bankStore.questions]);
   }, []);
 
   // Reset recommendations when class changes so stale data isn't shown
@@ -3589,10 +4160,9 @@ function TeacherRecommendations() {
   useEffect(() => {
     if (bankQs.length === 0) return;
 
-    // Filter bank questions for active class
-    const classQs = bankQs.filter(q => !q.classId || q.classId === activeClass);
+    // bankQs is already subject-scoped (the active class's subject) via useQuestionBank
     const topicMap = new Map<string, { total: number; sumRate: number }>();
-    for (const q of classQs) {
+    for (const q of bankQs) {
       const t = q.topic || "Umum";
       const cur = topicMap.get(t) ?? { total: 0, sumRate: 0 };
       topicMap.set(t, { total: cur.total + 1, sumRate: cur.sumRate + q.successRate });
@@ -3606,7 +4176,7 @@ function TeacherRecommendations() {
     fetch("/api/recommendations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topicStats, className: activeClass }),
+      body: JSON.stringify({ topicStats, className: activeClassName }),
     })
       .then(r => r.json())
       .then((data: { summary?: string; recommendations?: typeof teachingRecommendations; error?: string }) => {
@@ -3626,7 +4196,7 @@ function TeacherRecommendations() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Rekomendasi AI" title={`Rekomendasi — ${activeClass || currentTeacher.classes[0]}`}
+      <PageHeader eyebrow="Rekomendasi AI" title={`Rekomendasi — ${activeClassName}`}
         description="Berdasarkan analisis soal di bank soal, AI merekomendasikan intervensi pengajaran berikut." />
 
       {bankQs.length === 0 && !loading && (
@@ -3785,7 +4355,7 @@ function StudentApp({ page }: { page: string }) {
   }
 
   return (
-    <AppShell role="student" nav={studentNav} demoData>
+    <AppShell role="student" nav={studentNav} >
       {screens[page] ?? <StudentDashboard />}
     </AppShell>
   );
@@ -3794,45 +4364,24 @@ function StudentApp({ page }: { page: string }) {
 // ── Student Materials ─────────────────────────────────────────────────────────
 
 function StudentMaterials() {
-  const [mats, setMats] = useState<Material[]>([]);
+  const [mats, setMats] = useState<MaterialWithFile[]>([]);
   const [search, setSearch] = useState("");
 
   useEffect(() => {
-    initMatStore();
-    setMats([..._matStore.uploadedMaterials]);
+    fetchStudentMaterialsReal().then(setMats);
   }, []);
 
-  // Only show materials for student's own class (or unclassified)
+  // RLS already scopes the fetch to the student's own class - only text
+  // search is applied client-side now.
   const filtered = mats.filter(m => {
-    const matchClass = !m.className || m.className === studentProfile.className;
-    const matchSearch = !search ||
+    return !search ||
       m.title.toLowerCase().includes(search.toLowerCase()) ||
       (m.subject ?? "").toLowerCase().includes(search.toLowerCase());
-    return matchClass && matchSearch;
   });
 
-  function downloadMaterial(mat: Material) {
-    const file = _matStore.materialFiles[mat.id];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = file.name || mat.title;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      return;
-    }
-    // Fallback: try data URL stored in localStorage (persists across tabs/refresh)
-    const dataUrl = lsGet<string>(`catchup_file_${mat.id}`);
-    if (dataUrl) {
-      const a = document.createElement("a");
-      a.href = dataUrl;
-      a.download = mat.title;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+  async function downloadMaterial(mat: MaterialWithFile) {
+    if (mat.fileUrl) {
+      await downloadMaterialFile(mat.fileUrl, mat.title);
       return;
     }
     alert("File tidak tersedia untuk diunduh. Hubungi gurumu untuk informasi lebih lanjut.");
@@ -3843,7 +4392,7 @@ function StudentMaterials() {
       <PageHeader
         eyebrow="Ruang Belajar"
         title="Materi dari Guru"
-        description={`Materi untuk kelas ${studentProfile.className} yang sudah diunggah gurumu.`}
+        description="Materi yang sudah diunggah gurumu untuk kelasmu."
       />
 
       <div className="flex items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-2 max-w-sm">
@@ -3904,8 +4453,7 @@ function StudentAssessmentTabs() {
   const [tab, setTab] = useState<"mendatang" | "selesai" | "tertinggal">("mendatang");
   const [all, setAll] = useState<SavedAssessment[]>([]);
   useEffect(() => {
-    initAssessStore();
-    setAll([..._assessStore.list]);
+    fetchStudentAssessments().then(setAll);
   }, []);
 
   const mendatang = all.filter(a => a.status === "Terjadwal");
@@ -4086,8 +4634,7 @@ function StudentDashboard() {
 function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
   const [items, setItems] = useState<SavedAssessment[]>([]);
   useEffect(() => {
-    initAssessStore();
-    setItems(_assessStore.list.filter(a => a.status === "Terjadwal"));
+    fetchStudentAssessments().then(rows => setItems(rows.filter(a => a.status === "Terjadwal")));
   }, []);
   if (items.length === 0) return (
     <div className="flex items-center justify-center rounded-card border border-dashed border-border py-10">
@@ -4098,7 +4645,7 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       {items.map(a => {
-        const hasQuestions = (a.questions?.length ?? 0) > 0;
+        const hasQuestions = a.totalQuestions > 0;
         const notYetOpen = a.openAt ? now < new Date(a.openAt).getTime() : false;
         const alreadyClosed = a.closeAt ? now > new Date(a.closeAt).getTime() : false;
         const accessible = hasQuestions && !notYetOpen && !alreadyClosed;
@@ -4115,7 +4662,7 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
               </div>
               <div className="flex-1">
                 <div className="text-[13px] font-bold text-ink">{a.title}</div>
-                <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.questions?.length ?? 0} soal · {a.duration} mnt</div>
+                <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.totalQuestions} soal · {a.duration} mnt</div>
                 <div className="flex items-center gap-2 mt-2 flex-wrap">
                   {a.openAt && <Badge tone="neutral">Buka: {new Date(a.openAt).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}</Badge>}
                   {a.closeAt && <Badge tone="neutral">Tutup: {new Date(a.closeAt).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}</Badge>}
@@ -4133,16 +4680,23 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
   );
 }
 
+type ExamQuestion = {
+  assessmentQuestionId: string; topic: string; difficulty: string; question: string; points: number;
+  displayOptions: { key: string; text: string }[];
+};
+type ExamSession = { attemptId: string; assessmentId: string; title: string; deadlineAt: number | null; allowReview: boolean; questions: ExamQuestion[] };
+
 function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: (p: string) => void }) {
-  const [examAssessment, setExamAssessment] = useState<SavedAssessment | null>(null);
+  const [examSession, setExamSession] = useState<ExamSession | null>(null);
   const [noQuestionsAlert, setNoQuestionsAlert] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
   const [current, setCurrent] = useState(0);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [confidence, setConfidence] = useState<Record<number, "yakin" | "cukup" | "ragu">>({});
   const [finished, setFinished] = useState(false);
   const [finalScore, setFinalScore] = useState(0);
   const [finalCorrect, setFinalCorrect] = useState(0);
-  const [timeLeft, setTimeLeft] = useState(45 * 60);
+  const [timeLeft, setTimeLeft] = useState(0);
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [kioskWarning, setKioskWarning] = useState(false);
   const [isOnline, setIsOnline] = useState(true);
@@ -4150,8 +4704,8 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   finishedRef.current = finished;
   const answersRef = React.useRef(answers);
   answersRef.current = answers;
-  const examAssessmentRef = React.useRef(examAssessment);
-  examAssessmentRef.current = examAssessment;
+  const examSessionRef = React.useRef(examSession);
+  examSessionRef.current = examSession;
   const warningShownRef = React.useRef(false);
 
   function triggerKioskWarning() {
@@ -4167,74 +4721,130 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
   }
 
-  function autoSubmit() {
+  // Grading is entirely server-side (correct_answer is never sent to the
+  // client before this point, per supabase/migrations/009_secure_grading.sql)
+  // - the client submits raw answers and the /submit route computes score.
+  async function autoSubmit() {
     if (finishedRef.current) return;
     finishedRef.current = true;
-    try { localStorage.removeItem("catchup_exam_session"); } catch {}
+    try { localStorage.removeItem("catchup_exam_session"); localStorage.removeItem("catchup_exam_active_id"); } catch {}
     exitFullscreen();
-    const assessment = examAssessmentRef.current;
+    const session = examSessionRef.current;
     const ans = answersRef.current;
-    if (assessment?.questions?.length) {
-      const qs = assessment.questions as QuestionBankEntry[];
-      const correctCount = qs.filter((q, i) => ans[i] === q.correctAnswer).length;
-      const score = Math.round((correctCount / qs.length) * 100);
+    if (session) {
+      const answersByQid: Record<string, string> = {};
+      session.questions.forEach((q, i) => { if (ans[i]) answersByQid[q.assessmentQuestionId] = ans[i]; });
+      const data = await authedFetch(`/api/student/assessment/${session.assessmentId}/submit`, {
+        attemptId: session.attemptId, answers: answersByQid,
+      }) as {
+        score?: number; correctCount?: number; totalQuestions?: number; allowReview?: boolean;
+        review?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; yourAnswer: string | null; isCorrect: boolean }>;
+      } | null;
+      const score = data?.score ?? 0;
+      const correctCount = data?.correctCount ?? 0;
       setFinalScore(score);
       setFinalCorrect(correctCount);
       const resultId = `result_${Date.now()}`;
       saveResult({
         id: resultId,
-        assessmentId: assessment.id,
-        assessmentTitle: assessment.title,
-        type: assessment.type ?? "Asesmen",
+        assessmentId: session.assessmentId,
+        assessmentTitle: session.title,
+        type: "Asesmen",
         date: new Date().toLocaleDateString("id-ID"),
         score,
-        totalQuestions: qs.length,
+        totalQuestions: data?.totalQuestions ?? session.questions.length,
         correctCount,
         answers: Object.fromEntries(Object.entries(ans).map(([k, v]) => [k, v])),
       });
-      const incorrectQs: StoredIncorrectQ[] = qs
-        .map((q, qi) => ({ q, qi, studentAns: ans[qi] }))
-        .filter((item): item is { q: QuestionBankEntry; qi: number; studentAns: string } =>
-          item.studentAns !== undefined && item.studentAns !== item.q.correctAnswer)
-        .map(({ q, studentAns }) => ({
-          id: `${resultId}_${q.id}`,
-          assessmentId: assessment.id,
-          assessmentTitle: assessment.title,
-          topic: q.topic ?? "",
-          question: q.question,
-          yourAnswer: studentAns,
-          correctAnswer: q.correctAnswer,
-          explanation: q.explanation ?? "",
-          date: new Date().toLocaleDateString("id-ID"),
-          options: { A: q.options.A, B: q.options.B, C: q.options.C, D: q.options.D, ...(q.options.E ? { E: q.options.E } : {}) },
-        }));
-      if (incorrectQs.length > 0) saveIncorrectQuestions(incorrectQs);
+      // Only surfaced when the teacher enabled allow_review - matches the
+      // same allow_review-gated reveal enforced server-side (migration 009),
+      // never a client-side correctness comparison.
+      if (data?.allowReview && data.review) {
+        const incorrectQs: StoredIncorrectQ[] = data.review
+          .map((r, i) => ({ r, i }))
+          .filter((item): item is { r: NonNullable<typeof data.review>[number]; i: number } => !item.r.isCorrect && !!item.r.yourAnswer)
+          .map(({ r, i }) => ({
+            id: `${resultId}_${i}`,
+            assessmentId: session.assessmentId,
+            assessmentTitle: session.title,
+            topic: session.questions[i]?.topic ?? "",
+            question: r.question,
+            yourAnswer: r.yourAnswer!,
+            correctAnswer: r.correctAnswer,
+            explanation: r.explanation ?? "",
+            date: new Date().toLocaleDateString("id-ID"),
+            options: r.options,
+          }));
+        if (incorrectQs.length > 0) saveIncorrectQuestions(incorrectQs);
+      }
     }
     setFinished(true);
   }
 
-  // On exam start: fullscreen + restore session
+  async function startExam(assessmentId: string) {
+    const data = await authedFetch(`/api/student/assessment/${assessmentId}/start`, {}) as {
+      attemptId?: string; title?: string; deadlineAt?: number | null; allowReview?: boolean; questions?: ExamQuestion[]; error?: string;
+    } | null;
+    if (!data || data.error || !data.attemptId || !data.questions?.length) {
+      setStartError(data?.error ?? null);
+      setNoQuestionsAlert(true);
+      return;
+    }
+    try { localStorage.setItem("catchup_exam_active_id", assessmentId); } catch {}
+    setExamSession({
+      attemptId: data.attemptId, assessmentId, title: data.title ?? "Asesmen",
+      deadlineAt: data.deadlineAt ?? null, allowReview: !!data.allowReview, questions: data.questions,
+    });
+    setCurrent(0);
+    setAnswers({});
+    setConfidence({});
+    onPageChange("exam");
+  }
+
+  // On exam start: fullscreen + restore session (resuming after a refresh
+  // re-calls /start, which is idempotent for an already in-progress attempt)
   React.useEffect(() => {
     if (page !== "exam") return;
     enterFullscreen();
+    if (!examSessionRef.current) {
+      const savedId = (() => { try { return localStorage.getItem("catchup_exam_active_id"); } catch { return null; } })();
+      if (savedId) startExam(savedId);
+      else onPageChange("pick");
+    }
     try {
       const saved = localStorage.getItem("catchup_exam_session");
       if (saved) {
-        const s = JSON.parse(saved) as { answers?: Record<number, string>; confidence?: Record<number, "yakin" | "cukup" | "ragu">; current?: number; timeLeft?: number };
+        const s = JSON.parse(saved) as { answers?: Record<number, string>; confidence?: Record<number, "yakin" | "cukup" | "ragu">; current?: number };
         if (s.answers) setAnswers(s.answers);
         if (s.confidence) setConfidence(s.confidence);
         if (typeof s.current === "number") setCurrent(s.current);
-        if (typeof s.timeLeft === "number") setTimeLeft(s.timeLeft);
       }
     } catch {}
     return () => { exitFullscreen(); };
   }, [page]);
 
-  // Persist session to localStorage
+  // Persist in-progress answers to localStorage (survives refresh; the
+  // deadline itself is always re-derived from the server, never trusted
+  // from this local cache)
   React.useEffect(() => {
     if (page !== "exam") return;
-    try { localStorage.setItem("catchup_exam_session", JSON.stringify({ answers, confidence, current, timeLeft })); } catch {}
-  }, [answers, confidence, current, timeLeft, page]);
+    try { localStorage.setItem("catchup_exam_session", JSON.stringify({ answers, confidence, current })); } catch {}
+  }, [answers, confidence, current, page]);
+
+  // Countdown timer, driven by the server-computed deadline (duration_minutes
+  // / close_at) rather than a hardcoded 45-minute constant
+  React.useEffect(() => {
+    if (finished || page !== "exam" || !examSession?.deadlineAt) return;
+    const deadline = examSession.deadlineAt;
+    function tick() {
+      const remaining = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+      setTimeLeft(remaining);
+      if (remaining <= 0) autoSubmit();
+    }
+    tick();
+    const timer = setInterval(tick, 1000);
+    return () => clearInterval(timer);
+  }, [finished, page, examSession?.deadlineAt]);
 
   // KIOSK: Block ESC and F11 keys (capture phase)
   React.useEffect(() => {
@@ -4284,18 +4894,6 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     return () => { window.removeEventListener("online", goOnline); window.removeEventListener("offline", goOffline); };
   }, []);
 
-  // Countdown timer
-  React.useEffect(() => {
-    if (finished || page !== "exam") return;
-    const timer = setInterval(() => {
-      setTimeLeft(prev => {
-        if (prev <= 1) { clearInterval(timer); setFinished(true); return 0; }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(timer);
-  }, [finished, page]);
-
   // ── Pick screen ──
   if (page === "pick") {
     return (
@@ -4306,28 +4904,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
           <AlertPanel tone="danger" title="Perhatian: Mode Ujian Ketat">
             Berpindah tab, meminimalkan jendela, atau keluar layar penuh akan otomatis menyelesaikan dan mengumpulkan jawaban kamu.
           </AlertPanel>
-          <SimulatorPickList onStart={(id) => {
-            initAssessStore();
-            const a = _assessStore.list.find(x => x.id === id) ?? null;
-            if (!a || !a.questions?.length) {
-              setNoQuestionsAlert(true);
-              return;
-            }
-            const now = Date.now();
-            if (a.openAt && now < new Date(a.openAt).getTime()) {
-              setNoQuestionsAlert(true);
-              return;
-            }
-            if (a.closeAt && now > new Date(a.closeAt).getTime()) {
-              setNoQuestionsAlert(true);
-              return;
-            }
-            setExamAssessment(a);
-            setCurrent(0);
-            setAnswers({});
-            setConfidence({});
-            onPageChange("exam");
-          }} />
+          <SimulatorPickList onStart={(id) => { startExam(id); }} />
           {noQuestionsAlert && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
               <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setNoQuestionsAlert(false)} />
@@ -4335,7 +4912,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
                 <AlertCircle className="h-10 w-10 text-warning mx-auto" />
                 <div>
                   <p className="text-[15px] font-bold text-ink">Asesmen Belum Bisa Diakses</p>
-                  <p className="text-[13px] text-ink-secondary mt-1">Asesmen ini belum tersedia — mungkin belum waktunya, sudah berakhir, atau belum ada soal. Hubungi gurumu untuk info lebih lanjut.</p>
+                  <p className="text-[13px] text-ink-secondary mt-1">{startError ?? "Asesmen ini belum tersedia — mungkin belum waktunya, sudah berakhir, atau belum ada soal. Hubungi gurumu untuk info lebih lanjut."}</p>
                 </div>
                 <Button variant="default" className="w-full h-9" onClick={() => setNoQuestionsAlert(false)}>Tutup</Button>
               </div>
@@ -4371,10 +4948,10 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
           </div>
           <div>
             <h2 className="text-2xl font-bold text-ink">Asesmen Selesai!</h2>
-            <p className="text-[14px] text-ink-secondary mt-1">{finalCorrect} dari {examAssessment?.questions?.length ?? 0} soal benar</p>
+            <p className="text-[14px] text-ink-secondary mt-1">{finalCorrect} dari {examSession?.questions.length ?? 0} soal benar</p>
           </div>
           <ScoreCircle score={finalScore} size={96} />
-          <Button variant="default" onClick={() => { onPageChange("pick"); setFinished(false); setCurrent(0); setAnswers({}); setTimeLeft(45 * 60); }}>
+          <Button variant="default" onClick={() => { onPageChange("pick"); setFinished(false); setCurrent(0); setAnswers({}); setTimeLeft(0); setExamSession(null); }}>
             Kembali ke Beranda
           </Button>
         </div>
@@ -4382,8 +4959,8 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     );
   }
 
-  const examQuestions = (examAssessment?.questions ?? []) as QuestionBankEntry[];
-  const examTitle = examAssessment?.title ?? "Asesmen";
+  const examQuestions = examSession?.questions ?? [];
+  const examTitle = examSession?.title ?? "Asesmen";
   const total = examQuestions.length;
 
   // Guard: if page is exam but no questions loaded, go back to pick
@@ -4400,9 +4977,6 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   }
 
   const currentQ = examQuestions[current];
-  const currentOpts = currentQ ? [
-    currentQ.options.A, currentQ.options.B, currentQ.options.C, currentQ.options.D, currentQ.options.E ?? ""
-  ] : ["","","","",""];
   const answeredCount = Object.keys(answers).length;
   const timerMins = String(Math.floor(timeLeft / 60)).padStart(2, "0");
   const timerSecs = String(timeLeft % 60).padStart(2, "0");
@@ -4463,18 +5037,17 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3">
-            {["A", "B", "C", "D", "E"].map((opt, i) => {
-              if (!currentOpts[i]) return null;
-              const sel = answers[current] === opt;
+            {currentQ.displayOptions.map((opt) => {
+              const sel = answers[current] === opt.key;
               return (
-                <button key={opt} onClick={() => setAnswers(prev => ({ ...prev, [current]: opt }))}
+                <button key={opt.key} onClick={() => setAnswers(prev => ({ ...prev, [current]: opt.key }))}
                   className={cn("flex items-center gap-3 rounded-[10px] border p-3.5 sm:p-4 text-left transition-all",
                     sel ? "border-primary/40 bg-primary-soft" : "border-border bg-surface hover:border-primary/20 hover:bg-background"
                   )}>
                   <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-bold transition-colors",
                     sel ? "bg-primary text-white" : "bg-background border border-border text-ink-secondary"
-                  )}>{opt}</span>
-                  <span className="text-[13px] font-medium text-ink">{currentOpts[i]}</span>
+                  )}>{opt.key}</span>
+                  <span className="text-[13px] font-medium text-ink">{opt.text}</span>
                 </button>
               );
             })}
@@ -4561,10 +5134,25 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
 
 // ── Student Adaptive ──────────────────────────────────────────────────────────
 
-function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions: QuestionBankEntry[]; difficulty: string; topic?: string; onFinish: () => void }) {
+type PracticeQuestion = { id: string; question: string; options: { A: string; B: string; C: string; D: string; E?: string }; topic: string; difficulty: string };
+
+async function authedFetch(path: string, body: unknown) {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return null;
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions: PracticeQuestion[]; difficulty: string; topic?: string; onFinish: () => void }) {
   const [current, setCurrent] = useState(0);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [done, setDone] = useState(false);
+  const [grading, setGrading] = useState(false);
+  const [graded, setGraded] = useState<{ correct: number; results: Array<{ isCorrect: boolean; correctAnswer: string; explanation: string }> } | null>(null);
 
   if (questions.length === 0) {
     return (
@@ -4579,28 +5167,43 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
   const currentQ = questions[current];
   const isLast = current === questions.length - 1;
 
-  if (done) {
-    const correct = questions.filter((q, i) => answers[i] === q.correctAnswer).length;
-    const score = Math.round((correct / questions.length) * 100);
+  async function finishSession() {
+    setGrading(true);
+    // Grading is server-side (correct_answer is never sent to the client
+    // before this point) - each answer is submitted and graded independently,
+    // then tallied here once every question has been graded.
+    const results = await Promise.all(
+      questions.map((q, i) => authedFetch("/api/student/practice/submit", { questionId: q.id, answer: answers[i] ?? "" }))
+    );
+    const typed = results as Array<{ isCorrect: boolean; correctAnswer: string; explanation: string } | null>;
+    const correct = typed.filter(r => r?.isCorrect).length;
 
-    // Save incorrect questions from adaptive session
     const incorrectQs: StoredIncorrectQ[] = questions
-      .map((q, i) => ({ q, i, studentAns: answers[i] }))
-      .filter((item): item is { q: QuestionBankEntry; i: number; studentAns: string } =>
-        item.studentAns !== undefined && item.studentAns !== item.q.correctAnswer)
-      .map(({ q, studentAns }) => ({
+      .map((q, i) => ({ q, i, r: typed[i] }))
+      .filter((item): item is { q: PracticeQuestion; i: number; r: { isCorrect: boolean; correctAnswer: string; explanation: string } } =>
+        !!item.r && !item.r.isCorrect)
+      .map(({ q, i, r }) => ({
         id: `adaptive_${Date.now()}_${q.id}`,
         assessmentId: "adaptive",
         assessmentTitle: `Latihan Adaptif${topic && topic !== "Semua" ? ` – ${topic}` : ""}`,
         topic: q.topic ?? "",
         question: q.question,
-        yourAnswer: studentAns,
-        correctAnswer: q.correctAnswer,
-        explanation: q.explanation ?? "",
+        yourAnswer: answers[i] ?? "",
+        correctAnswer: r.correctAnswer,
+        explanation: r.explanation ?? "",
         date: new Date().toLocaleDateString("id-ID"),
         options: { A: q.options.A, B: q.options.B, C: q.options.C, D: q.options.D, ...(q.options.E ? { E: q.options.E } : {}) },
       }));
     if (incorrectQs.length > 0) saveIncorrectQuestions(incorrectQs);
+
+    setGraded({ correct, results: typed.map(r => r ?? { isCorrect: false, correctAnswer: "A", explanation: "" }) });
+    setGrading(false);
+    setDone(true);
+  }
+
+  if (done) {
+    const correct = graded?.correct ?? 0;
+    const score = Math.round((correct / questions.length) * 100);
 
     return (
       <div className="flex flex-col items-center gap-6 py-16 text-center">
@@ -4663,8 +5266,8 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
           ← Sebelumnya
         </Button>
         {isLast ? (
-          <Button variant="success" className="h-9" onClick={() => setDone(true)}>
-            Selesai &amp; Lihat Nilai
+          <Button variant="success" className="h-9" disabled={grading} onClick={finishSession}>
+            {grading ? "Menilai..." : "Selesai & Lihat Nilai"}
           </Button>
         ) : (
           <Button variant="default" className="h-9" onClick={() => setCurrent(c => c + 1)}>
@@ -4679,81 +5282,82 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
 function StudentAdaptive() {
   const [difficulty, setDifficulty] = useState<"Mudah" | "Sedang" | "Sulit" | "Campur">("Campur");
   const [selectedTopic, setSelectedTopic] = useState<string>("Semua");
-  const [sessionQs, setSessionQs] = useState<QuestionBankEntry[] | null>(null);
+  const [sessionQs, setSessionQs] = useState<PracticeQuestion[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [bankQs, setBankQs] = useState<QuestionBankEntry[]>([]);
+  const [subjects, setSubjects] = useState<{ id: string; name: string }[]>([]);
+  const [selectedSubjectId, setSelectedSubjectId] = useState<string>("");
+  const [topics, setTopics] = useState<string[]>(["Semua"]);
 
-  useEffect(() => { initBankStore(); setBankQs([..._bankStore.questions]); }, []);
+  // Real schema note: `questions` is scoped by school+subject, not per-class,
+  // and students have no direct RLS SELECT on it at all - subjects/topics are
+  // resolved through the class's real teacher_assignments and a narrow
+  // service route, never a raw client-side questions query.
+  useEffect(() => {
+    (async () => {
+      const student = await getCurrentStudent();
+      if (!student?.class_id) return;
+      const { data } = await supabase
+        .from("teacher_assignments")
+        .select("subject_id, subjects(name)")
+        .eq("class_id", student.class_id);
+      const map = new Map<string, string>();
+      for (const row of (data ?? []) as unknown as Array<{ subject_id: string; subjects: { name: string } | null }>) {
+        if (row.subjects) map.set(row.subject_id, row.subjects.name);
+      }
+      const list = Array.from(map, ([id, name]) => ({ id, name }));
+      setSubjects(list);
+      if (list.length === 1) setSelectedSubjectId(list[0].id);
+    })();
+  }, []);
 
-  const topics = ["Semua", ...Array.from(new Set(bankQs.map(q => q.topic).filter(Boolean)))];
+  useEffect(() => {
+    if (!selectedSubjectId) { setTopics(["Semua"]); return; }
+    (async () => {
+      const data = await authedFetch("/api/student/practice/topics", { subjectId: selectedSubjectId }) as { topics?: string[] } | null;
+      setTopics(["Semua", ...(data?.topics ?? [])]);
+    })();
+  }, [selectedSubjectId]);
 
   async function startSession(overrideTopic?: string) {
+    if (!selectedSubjectId) return;
     const topic = overrideTopic ?? selectedTopic;
     setLoading(true);
-    let filtered = bankQs.filter(q => {
-      const matchTopic = topic === "Semua" || q.topic === topic;
-      const matchDiff = difficulty === "Campur" || q.difficulty === difficulty;
-      return matchTopic && matchDiff;
-    });
-
-    if (filtered.length < 5) {
-      try {
-        const res = await fetch("/api/generate-questions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            materialTitle: "Latihan Adaptif",
-            topic: topic === "Semua" ? "Matematika Umum" : topic,
-            subject: topic === "Semua" ? "Umum" : topic,
-            count: Math.max(10, 10 - filtered.length),
-            difficulty: difficulty === "Campur" ? "Sedang" : difficulty,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json() as { questions?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> };
-          if (data.questions?.length) {
-            const generated: QuestionBankEntry[] = data.questions.map((q, i) => ({
-              id: `adaptive_gen_${Date.now()}_${i}`,
-              question: q.question,
-              options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
-              correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
-              explanation: q.explanation ?? "",
-              topic: q.topic ?? (topic === "Semua" ? "Umum" : topic),
-              subtopic: "",
-              bloom: "Menerapkan" as const,
-              difficulty: (["Mudah","Sedang","Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
-              styleType: "TKA" as const,
-              source: "AI Generated",
-              usageCount: 0,
-              successRate: 0,
-              status: "Disetujui" as const,
-              isLocked: false,
-            }));
-            filtered = [...filtered, ...generated];
-          }
-        }
-      } catch { /* continue with what we have */ }
+    try {
+      const data = await authedFetch("/api/student/practice/questions", {
+        subjectId: selectedSubjectId,
+        topic: topic === "Semua" ? undefined : topic,
+        difficulty: difficulty === "Campur" ? undefined : difficulty,
+        count: 10,
+      }) as { questions?: PracticeQuestion[] } | null;
+      setSessionQs(data?.questions ?? []);
+    } finally {
+      setLoading(false);
     }
-
-    const shuffled = [...filtered].sort(() => Math.random() - 0.5).slice(0, 10);
-    setLoading(false);
-    setSessionQs(shuffled);
   }
 
   if (sessionQs !== null) {
     return <AdaptiveSession questions={sessionQs} difficulty={difficulty} topic={selectedTopic} onFinish={() => setSessionQs(null)} />;
   }
 
-  const availableCount = bankQs.filter(q => {
-    const matchTopic = selectedTopic === "Semua" || q.topic === selectedTopic;
-    const matchDiff = difficulty === "Campur" || q.difficulty === difficulty;
-    return matchTopic && matchDiff;
-  }).length;
-
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Latihan Adaptif" title="Latihan Disesuaikan AI"
         description="Pilih topik dan tingkat kesulitan. AI akan menyiapkan soal dari bank soal atau men-generate soal baru jika perlu." />
+
+      {subjects.length > 1 && (
+        <div>
+          <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Mata Pelajaran</label>
+          <div className="flex gap-2 flex-wrap">
+            {subjects.map(s => (
+              <button key={s.id} onClick={() => setSelectedSubjectId(s.id)}
+                className={cn("rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors border",
+                  selectedSubjectId === s.id ? "bg-primary text-white border-primary" : "bg-background text-ink-secondary border-border hover:border-primary/30")}>
+                {s.name}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         <div>
@@ -4784,11 +5388,9 @@ function StudentAdaptive() {
 
       <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
         <p className="text-[12px] text-ink-secondary mb-4">
-          {availableCount > 0
-            ? `${availableCount} soal tersedia di bank soal · AI akan melengkapi jika perlu`
-            : "Belum ada soal di bank soal · AI akan generate soal baru secara otomatis"}
+          AI akan menyiapkan soal dari bank soal atau men-generate soal baru jika perlu.
         </p>
-        <Button variant="default" className="w-full h-10" onClick={() => startSession()} disabled={loading}>
+        <Button variant="default" className="w-full h-10" onClick={() => startSession()} disabled={loading || !selectedSubjectId}>
           {loading ? "AI sedang menyiapkan soal..." : <><Zap className="mr-2 h-4 w-4" />Mulai Latihan Sekarang</>}
         </Button>
       </div>
@@ -4821,21 +5423,22 @@ function StudentAdaptive() {
 
 function StudentReview() {
   const router = useRouter();
-  const [results, setResults] = useState<CompletedResult[]>([]);
+  const [results, setResults] = useState<ReviewListItem[]>([]);
   const [reviewDetailId, setReviewDetailId] = useState<string | null>(null);
-  const [materials, setMaterials] = useState<Material[]>([]);
+  const [reviewQs, setReviewQs] = useState<ReviewQuestionDetail[]>([]);
+  const [materials, setMaterials] = useState<MaterialWithFile[]>([]);
 
   useEffect(() => {
-    initResultStore();
-    initAssessStore();
-    initMatStore();
-    setResults([..._resultStore.list]);
-    setMaterials([..._matStore.uploadedMaterials]);
+    fetchStudentMaterialsReal().then(setMaterials);
+    fetchStudentCompletedAttempts().then(setResults);
   }, []);
 
-  const reviewResult = results.find(r => r.id === reviewDetailId) ?? null;
-  const reviewAssessment = reviewResult ? (_assessStore.list.find(a => a.id === reviewResult.assessmentId) ?? null) : null;
-  const reviewQs = (reviewAssessment?.questions ?? []) as QuestionBankEntry[];
+  const reviewResult = results.find(r => r.attemptId === reviewDetailId) ?? null;
+
+  useEffect(() => {
+    setReviewQs([]);
+    if (reviewResult?.allowReview) fetchAttemptReviewDetail(reviewResult.attemptId).then(setReviewQs);
+  }, [reviewResult?.attemptId, reviewResult?.allowReview]);
 
   return (
     <div className="space-y-6">
@@ -4859,8 +5462,8 @@ function StudentReview() {
               </div>
             </div>
           ) : results.map(r => (
-            <RecentAssessmentRow key={r.id} title={r.assessmentTitle} type={r.type} date={r.date}
-              score={r.score} onClick={() => setReviewDetailId(r.id)} />
+            <RecentAssessmentRow key={r.attemptId} title={r.assessmentTitle} type={r.type} date={r.date}
+              score={r.score} onClick={() => setReviewDetailId(r.attemptId)} />
           ))}
         </div>
       </div>
@@ -4884,11 +5487,11 @@ function StudentReview() {
               {reviewQs.length === 0 ? (
                 <p className="text-[13px] text-ink-secondary text-center py-8">Detail soal tidak tersedia</p>
               ) : reviewQs.map((q, idx) => {
-                const studentAns = reviewResult.answers[String(idx)];
-                const isWrong = studentAns !== undefined && studentAns !== q.correctAnswer;
-                const opts: Record<string, string> = { A: q.options.A, B: q.options.B, C: q.options.C, D: q.options.D, ...(q.options.E ? { E: q.options.E } : {}) };
+                const studentAns = q.yourAnswer ?? undefined;
+                const isWrong = studentAns !== undefined && !q.isCorrect;
+                const opts = q.options;
                 return (
-                  <div key={q.id} className={cn("rounded-card border p-4", isWrong ? "border-danger/20 bg-danger-light/30" : "border-border bg-surface")}>
+                  <div key={idx} className={cn("rounded-card border p-4", isWrong ? "border-danger/20 bg-danger-light/30" : "border-border bg-surface")}>
                     <div className="flex items-center gap-2 mb-2">
                       <span className="text-[11px] font-bold text-ink-secondary">Soal {idx + 1}</span>
                       <Badge tone={studentAns === undefined ? "neutral" : isWrong ? "danger" : "success"}>
@@ -4924,27 +5527,9 @@ function StudentReview() {
                       <div className="rounded-[6px] bg-background border border-border p-2.5">
                         <p className="text-[11px] text-ink leading-relaxed">{q.explanation}</p>
                         {q.sourceTitle && (
-                          <button onClick={() => {
+                          <button onClick={async () => {
                             const mat = materials.find(m => m.title.toLowerCase() === q.sourceTitle?.toLowerCase());
-                            if (mat) {
-                              const file = _matStore.materialFiles[mat.id];
-                              if (file) {
-                                const url = URL.createObjectURL(file);
-                                const a = document.createElement("a");
-                                a.href = url; a.download = file.name || mat.title;
-                                document.body.appendChild(a); a.click();
-                                document.body.removeChild(a);
-                                URL.revokeObjectURL(url);
-                              } else {
-                                const dataUrl = lsGet<string>(`catchup_file_${mat.id}`);
-                                if (dataUrl) {
-                                  const a = document.createElement("a");
-                                  a.href = dataUrl; a.download = mat.title;
-                                  document.body.appendChild(a); a.click();
-                                  document.body.removeChild(a);
-                                }
-                              }
-                            }
+                            if (mat?.fileUrl) await downloadMaterialFile(mat.fileUrl, mat.title);
                           }}
                             className="inline-flex items-center gap-1 mt-2 rounded-[4px] border border-primary/30 bg-primary-soft px-1.5 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/10 transition-colors cursor-pointer">
                             <BookOpen className="h-3 w-3 shrink-0" />
@@ -5058,33 +5643,18 @@ function StudentTutor() {
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
-  const [localMats, setLocalMats] = useState<Material[]>([]);
+  const [localMats, setLocalMats] = useState<MaterialWithFile[]>([]);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
 
-  useEffect(() => { initMatStore(); setLocalMats([..._matStore.uploadedMaterials]); }, []);
+  useEffect(() => { fetchStudentMaterialsReal().then(setLocalMats); }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  function downloadMat(mat: Material) {
-    const file = _matStore.materialFiles[mat.id];
-    if (file) {
-      const url = URL.createObjectURL(file);
-      const a = document.createElement("a");
-      a.href = url; a.download = file.name || mat.title;
-      document.body.appendChild(a); a.click();
-      document.body.removeChild(a); URL.revokeObjectURL(url);
-      return;
-    }
-    const dataUrl = lsGet<string>(`catchup_file_${mat.id}`);
-    if (dataUrl) {
-      const a = document.createElement("a");
-      a.href = dataUrl; a.download = mat.title;
-      document.body.appendChild(a); a.click();
-      document.body.removeChild(a);
-    }
+  async function downloadMat(mat: MaterialWithFile) {
+    if (mat.fileUrl) await downloadMaterialFile(mat.fileUrl, mat.title);
   }
 
   function renderContent(content: string) {
@@ -5419,7 +5989,7 @@ function ParentDashboard() {
           </div>
         </div>
         <div className="space-y-4">
-          <AIInsightPanel title={`Pesan dari ${currentTeacher.name} (AI)`}>
+          <AIInsightPanel title="Pesan dari Guru Kelas (AI)">
             <p className="mb-2">{studentProfile.name.split(" ")[0]} menunjukkan perkembangan positif di Fungsi Kuadrat. Namun, <strong className="text-ink">Diskriminan</strong> masih memerlukan latihan tambahan.</p>
             <p>Mohon dorong {studentProfile.name.split(" ")[0]} untuk latihan adaptif 15 menit setiap hari.</p>
           </AIInsightPanel>
@@ -5490,7 +6060,7 @@ function ParentRecommendations() {
   const parentRecs = [...teachingRecommendations].sort((a, b) => b.wrongCount - a.wrongCount);
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Rekomendasi Pengajaran" title={`Saran Belajar dari ${currentTeacher.name}`}
+      <PageHeader eyebrow="Rekomendasi Pengajaran" title="Saran Belajar dari Guru Kelas"
         description={`Rekomendasi pengajaran untuk ${studentProfile.name} berdasarkan analisis AI dan penilaian guru.`} />
       {parentRecs.length >= 2 && (
         <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
@@ -5568,7 +6138,7 @@ function AdminDashboard() {
       <div>
         <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-ink-secondary mb-1">Admin Platform</p>
         <h1 className="text-2xl font-bold text-ink">Dasbor {school.name}</h1>
-        <p className="text-[13px] text-ink-secondary mt-1">{currentSemester} · 48 Guru · 1.312 Siswa</p>
+        <p className="text-[13px] text-ink-secondary mt-1">Semester Ganjil 2025/2026 · 48 Guru · 1.312 Siswa</p>
       </div>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">

@@ -48,7 +48,7 @@ function initialsFromName(name: string): string {
  * legacy demo screens, which remain reachable without login.
  */
 function useCurrentIdentity() {
-  const [identity, setIdentity] = useState<{ name: string; initials: string } | null>(null);
+  const [identity, setIdentity] = useState<{ name: string; initials: string; role: string } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -56,7 +56,7 @@ function useCurrentIdentity() {
       .then((profile) => {
         if (cancelled) return;
         if (profile) {
-          setIdentity({ name: profile.full_name, initials: initialsFromName(profile.full_name) });
+          setIdentity({ name: profile.full_name, initials: initialsFromName(profile.full_name), role: profile.role });
         } else {
           setIdentity(null);
         }
