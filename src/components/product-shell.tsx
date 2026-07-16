@@ -111,8 +111,14 @@ export function AppShell({
 }) {
   const pathname = usePathname();
   const router = useRouter();
-  const meta = roleMeta[role];
   const identity = useCurrentIdentity();
+  // "admin" is a single UI-level bucket covering two real, distinct DB
+  // roles (SCHOOL_ADMIN and PLATFORM_ADMIN) - the static roleMeta label
+  // can't tell them apart, so resolve the real one from the signed-in
+  // session for that case specifically.
+  const meta = role === "admin" && identity?.role === "SCHOOL_ADMIN"
+    ? { ...roleMeta.admin, label: "Admin Sekolah" }
+    : roleMeta[role];
   const displayName = identity?.name ?? "Tamu";
   const displayInitials = identity?.initials ?? "?";
 
