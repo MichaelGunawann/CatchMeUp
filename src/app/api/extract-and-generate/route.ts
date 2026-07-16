@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { supabaseAdmin } from "@/lib/supabase/server";
+import { groqErrorResponse } from "@/lib/groq-error";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -124,7 +125,7 @@ Pastikan:
     if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal. Coba lagi.", questions: [] }, { status: 500 });
     return Response.json({ questions });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    return Response.json({ error: msg, questions: [] }, { status: 500 });
+    const { message, status } = groqErrorResponse(err);
+    return Response.json({ error: message, questions: [] }, { status });
   }
 }

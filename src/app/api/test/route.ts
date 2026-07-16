@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
+import { groqErrorResponse } from "@/lib/groq-error";
 
 export async function GET() {
   const key = process.env.GROQ_API_KEY;
@@ -16,7 +17,7 @@ export async function GET() {
     const text = completion.choices[0].message.content ?? "";
     return Response.json({ success: true, response: text });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return Response.json({ success: false, error: msg });
+    const { message } = groqErrorResponse(err);
+    return Response.json({ success: false, error: message });
   }
 }

@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
+import { groqErrorResponse } from "@/lib/groq-error";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -68,8 +69,8 @@ ${materialList}`;
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unknown error";
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: msg })}\n\n`));
+        const { message } = groqErrorResponse(err);
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: message })}\n\n`));
         controller.close();
       }
     },

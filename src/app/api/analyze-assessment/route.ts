@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
+import { groqErrorResponse } from "@/lib/groq-error";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -64,7 +65,7 @@ Jawab HANYA dengan JSON berikut (tanpa teks lain):
     const result = jsonMatch ? JSON.parse(jsonMatch[0]) : { overallAnalysis: "", questionAnalyses: [] };
     return Response.json(result);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    return Response.json({ error: msg }, { status: 500 });
+    const { message, status } = groqErrorResponse(err);
+    return Response.json({ error: message }, { status });
   }
 }
