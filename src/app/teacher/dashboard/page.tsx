@@ -41,6 +41,7 @@ export default function TeacherDashboardPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [accountStatus, setAccountStatus] = useState<"PENDING" | "REJECTED" | null>(null);
   const [teacherName, setTeacherName] = useState("");
   const [assignments, setAssignments] = useState<AssignmentRow[]>([]);
   const [studentCount, setStudentCount] = useState(0);
@@ -69,6 +70,17 @@ export default function TeacherDashboardPage() {
       if (cancelled) return;
       if (!teacher) {
         setError("No teacher record is linked to this account yet.");
+        setLoading(false);
+        return;
+      }
+
+      // Pending/rejected accounts must not reach dashboard content, even
+      // though RLS would already return empty results for every query
+      // below - this check makes that explicit and skips the queries
+      // entirely rather than relying on them silently coming back empty.
+      if (teacher.status !== "ACTIVE") {
+        setTeacherName(profile.full_name);
+        setAccountStatus(teacher.status);
         setLoading(false);
         return;
       }
@@ -145,6 +157,16 @@ export default function TeacherDashboardPage() {
 
         {loading ? (
           <LoadingPanel message="Memuat dasbor..." />
+        ) : accountStatus === "PENDING" ? (
+          <AlertPanel tone="warning" title="Menunggu persetujuan admin sekolah">
+            Akun kamu sudah terdaftar tapi belum disetujui oleh admin sekolah. Kamu belum bisa mengakses
+            data atau fitur apa pun sampai akun ini disetujui.
+          </AlertPanel>
+        ) : accountStatus === "REJECTED" ? (
+          <AlertPanel tone="danger" title="Pendaftaran ditolak">
+            Pendaftaran akun guru ini ditolak oleh admin sekolah. Hubungi admin sekolahmu jika menurutmu
+            ini keliru.
+          </AlertPanel>
         ) : !error ? (
           <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">

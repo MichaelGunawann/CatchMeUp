@@ -23,6 +23,55 @@ ALTER TABLE question_attempts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE student_wrong_answers ENABLE ROW LEVEL SECURITY;
 
 -- ═══════════════════════════════════════════════════════════════════════
+-- HELPER FUNCTIONS
+-- ═══════════════════════════════════════════════════════════════════════
+
+-- Returns every school_id the currently authenticated user administers.
+-- Used by every "school admin scope" policy below instead of a raw
+-- subquery on school_admins. A raw subquery on school_admins inside a
+-- policy that is itself attached to school_admins (or referenced from
+-- many other tables' policies) causes Postgres to re-evaluate that same
+-- policy recursively ("infinite recursion detected in policy for
+-- relation school_admins", error 42P17) the moment a genuine multi-school
+-- admin exists. SECURITY DEFINER makes this function run with the
+-- privileges of its owner (the migration-running role, which has
+-- BYPASSRLS in Supabase), so its internal query does not re-trigger RLS
+-- on school_admins and the recursion cannot occur.
+CREATE OR REPLACE FUNCTION get_my_school_admin_school_ids()
+RETURNS SETOF UUID
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = public
+AS $$
+  SELECT school_id FROM school_admins
+  WHERE user_profile_id = (
+    SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
+  );
+$$;
+
+-- Same recursion problem, one level removed: students' own "Parents can
+-- view linked students" policy queries parent_student_links, and
+-- parent_student_links' "School admins can manage links" policy queried
+-- students right back - a two-table cycle ("infinite recursion detected
+-- in policy for relation students"). This function lets the
+-- parent_student_links policy check school membership without
+-- re-triggering RLS evaluation on students.
+CREATE OR REPLACE FUNCTION is_student_in_my_admin_schools(sid UUID)
+RETURNS BOOLEAN
+LANGUAGE sql
+SECURITY DEFINER
+STABLE
+SET search_path = public
+AS $$
+  SELECT EXISTS (
+    SELECT 1 FROM students
+    WHERE id = sid
+    AND school_id IN (SELECT get_my_school_admin_school_ids())
+  );
+$$;
+
+-- ═══════════════════════════════════════════════════════════════════════
 -- USER PROFILES RLS
 -- ═══════════════════════════════════════════════════════════════════════
 
@@ -58,12 +107,7 @@ CREATE POLICY "School admins can view their own admin record"
 CREATE POLICY "School admins can view admins in their school"
   ON school_admins FOR SELECT
   USING (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   );
 
 -- CRITICAL: No INSERT allowed via RLS
@@ -98,12 +142,7 @@ CREATE POLICY "Teachers can view their own record"
 CREATE POLICY "School admins can view teachers in their school"
   ON teachers FOR SELECT
   USING (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   );
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -138,12 +177,7 @@ CREATE POLICY "Teachers can view students in assigned classes"
 CREATE POLICY "School admins can view students in their school"
   ON students FOR SELECT
   USING (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   );
 
 -- Parents can view explicitly linked students only
@@ -170,20 +204,10 @@ CREATE POLICY "Parents can view linked students only"
 CREATE POLICY "School admins can manage classes in their school"
   ON classes FOR ALL
   USING (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   )
   WITH CHECK (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   );
 
 -- Teachers can view classes they teach
@@ -209,20 +233,10 @@ CREATE POLICY "Teachers can view their classes"
 CREATE POLICY "School admins can manage subjects in their school"
   ON subjects FOR ALL
   USING (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   )
   WITH CHECK (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   );
 
 -- Teachers can view subjects they teach
@@ -260,20 +274,10 @@ CREATE POLICY "Teachers can view their own assignments"
 CREATE POLICY "School admins can manage assignments in their school"
   ON teacher_assignments FOR ALL
   USING (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   )
   WITH CHECK (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   );
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -286,12 +290,7 @@ CREATE POLICY "School admins can create invitations for their students"
   WITH CHECK (
     student_id IN (
       SELECT id FROM students
-      WHERE school_id = (
-        SELECT school_id FROM school_admins
-        WHERE user_profile_id = (
-          SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-        )
-      )
+      WHERE school_id IN (SELECT get_my_school_admin_school_ids())
     )
     AND created_by = (
       SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
@@ -373,26 +372,10 @@ CREATE POLICY "Parents can view their own links"
 CREATE POLICY "School admins can manage links for their students"
   ON parent_student_links FOR ALL
   USING (
-    student_id IN (
-      SELECT id FROM students
-      WHERE school_id = (
-        SELECT school_id FROM school_admins
-        WHERE user_profile_id = (
-          SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-        )
-      )
-    )
+    is_student_in_my_admin_schools(student_id)
   )
   WITH CHECK (
-    student_id IN (
-      SELECT id FROM students
-      WHERE school_id = (
-        SELECT school_id FROM school_admins
-        WHERE user_profile_id = (
-          SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-        )
-      )
-    )
+    is_student_in_my_admin_schools(student_id)
   );
 
 -- ═══════════════════════════════════════════════════════════════════════
@@ -418,12 +401,7 @@ CREATE POLICY "Teachers can view questions for assigned subjects"
 CREATE POLICY "School admins can view questions in their school"
   ON questions FOR SELECT
   USING (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   );
 
 -- Teachers can create questions ONLY for subjects in their assignments
@@ -506,12 +484,7 @@ CREATE POLICY "Teachers can create materials for assigned classes"
 CREATE POLICY "School admins can view materials in their school"
   ON materials FOR SELECT
   USING (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   );
 
 -- Parents can view materials for linked children's classes
@@ -601,12 +574,7 @@ CREATE POLICY "Teachers can update their own assessments"
 CREATE POLICY "School admins can view assessments in their school"
   ON assessments FOR SELECT
   USING (
-    school_id IN (
-      SELECT school_id FROM school_admins
-      WHERE user_profile_id = (
-        SELECT id FROM user_profiles WHERE auth_user_id = auth.uid()
-      )
-    )
+    school_id IN (SELECT get_my_school_admin_school_ids())
   );
 
 -- Parents can view assessments for linked children

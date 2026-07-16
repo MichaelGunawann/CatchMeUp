@@ -47,6 +47,7 @@ export type Teacher = {
   user_profile_id: string;
   school_id: string;
   nip: string | null;
+  status: "PENDING" | "ACTIVE" | "REJECTED";
   created_at: string;
   updated_at: string;
 };
@@ -65,8 +66,9 @@ export type Student = {
   id: string;
   user_profile_id: string;
   school_id: string;
-  class_id: string;
+  class_id: string | null;
   nis: string | null;
+  status: "PENDING" | "ACTIVE" | "REJECTED";
   created_at: string;
   updated_at: string;
 };

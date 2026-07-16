@@ -2,10 +2,11 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { BookOpen, GraduationCap, Mail, School as SchoolIcon, Users } from "lucide-react";
+import { BookOpen, GraduationCap, Mail, School as SchoolIcon, UserCheck, Users } from "lucide-react";
 import { AppShell } from "@/components/product-shell";
 import { PageHeader, StatCard, EmptyState, AlertPanel, LoadingPanel } from "@/components/product-primitives";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { adminNav } from "@/lib/db";
 import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentSchoolAdminSchools } from "@/lib/auth/authorization";
@@ -19,6 +20,20 @@ type SchoolBreakdown = School & {
   studentCount: number;
 };
 
+type PendingTeacherRow = {
+  id: string;
+  school_id: string;
+  user_profiles: { full_name: string } | null;
+};
+
+type PendingStudentRow = {
+  id: string;
+  school_id: string;
+  user_profiles: { full_name: string } | null;
+};
+
+type ClassOption = { id: string; name: string; school_id: string };
+
 export default function AdminDashboardPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
@@ -28,6 +43,12 @@ export default function AdminDashboardPage() {
   const [schools, setSchools] = useState<SchoolBreakdown[]>([]);
   const [pendingInvites, setPendingInvites] = useState(0);
   const [usedInvites, setUsedInvites] = useState(0);
+  const [pendingTeachers, setPendingTeachers] = useState<PendingTeacherRow[]>([]);
+  const [pendingStudents, setPendingStudents] = useState<PendingStudentRow[]>([]);
+  const [classOptions, setClassOptions] = useState<ClassOption[]>([]);
+  const [selectedClassByStudent, setSelectedClassByStudent] = useState<Record<string, string>>({});
+  const [actionLoadingId, setActionLoadingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -80,13 +101,25 @@ export default function AdminDashboardPage() {
           { data: teacherRows, error: teacherError },
           { data: studentRows, error: studentError },
           { data: inviteRows, error: inviteError },
+          { data: pendingTeacherRows, error: pendingTeacherError },
+          { data: pendingStudentRows, error: pendingStudentError },
         ] = await Promise.all([
           supabase.from("schools").select("*").in("id", schoolIds),
-          supabase.from("classes").select("id, school_id").in("school_id", schoolIds),
+          supabase.from("classes").select("id, name, school_id").in("school_id", schoolIds),
           supabase.from("subjects").select("id, school_id").in("school_id", schoolIds),
           supabase.from("teachers").select("id, school_id").in("school_id", schoolIds),
           supabase.from("students").select("id, school_id").in("school_id", schoolIds),
           supabase.from("parent_registration_invites").select("used_at").eq("created_by", profile.id),
+          supabase
+            .from("teachers")
+            .select("id, school_id, user_profiles(full_name)")
+            .in("school_id", schoolIds)
+            .eq("status", "PENDING"),
+          supabase
+            .from("students")
+            .select("id, school_id, user_profiles(full_name)")
+            .in("school_id", schoolIds)
+            .eq("status", "PENDING"),
         ]);
 
         if (schoolError) throw schoolError;
@@ -95,6 +128,8 @@ export default function AdminDashboardPage() {
         if (teacherError) throw teacherError;
         if (studentError) throw studentError;
         if (inviteError) throw inviteError;
+        if (pendingTeacherError) throw pendingTeacherError;
+        if (pendingStudentError) throw pendingStudentError;
         if (cancelled) return;
 
         const countBySchool = (rows: { school_id: string }[] | null, id: string) =>
@@ -112,6 +147,9 @@ export default function AdminDashboardPage() {
         setSchools(breakdown);
         setPendingInvites((inviteRows ?? []).filter((i: { used_at: string | null }) => !i.used_at).length);
         setUsedInvites((inviteRows ?? []).filter((i: { used_at: string | null }) => !!i.used_at).length);
+        setClassOptions((classRows ?? []) as unknown as ClassOption[]);
+        setPendingTeachers((pendingTeacherRows ?? []) as unknown as PendingTeacherRow[]);
+        setPendingStudents((pendingStudentRows ?? []) as unknown as PendingStudentRow[]);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : "Failed to load dashboard data");
@@ -130,6 +168,47 @@ export default function AdminDashboardPage() {
   const totalClasses = schools.reduce((sum, s) => sum + s.classCount, 0);
   const totalTeachers = schools.reduce((sum, s) => sum + s.teacherCount, 0);
   const totalStudents = schools.reduce((sum, s) => sum + s.studentCount, 0);
+
+  async function handleDecision(
+    role: "TEACHER" | "STUDENT",
+    recordId: string,
+    decision: "ACTIVE" | "REJECTED"
+  ) {
+    setActionError(null);
+    setActionLoadingId(recordId);
+    try {
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
+      if (!session) throw new Error("Session expired, please sign in again");
+
+      const classId = role === "STUDENT" ? selectedClassByStudent[recordId] : undefined;
+
+      const response = await fetch("/api/school-admin/approve-registration", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`,
+        },
+        body: JSON.stringify({ role, recordId, decision, classId }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || "Failed to update registration");
+      }
+
+      if (role === "TEACHER") {
+        setPendingTeachers((prev) => prev.filter((t) => t.id !== recordId));
+      } else {
+        setPendingStudents((prev) => prev.filter((s) => s.id !== recordId));
+      }
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : "Failed to update registration");
+    } finally {
+      setActionLoadingId(null);
+    }
+  }
 
   return (
     <AppShell role="admin" nav={adminNav}>
@@ -217,6 +296,112 @@ export default function AdminDashboardPage() {
                       </div>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
+              <h2 className="text-[13px] font-bold text-ink mb-4 flex items-center gap-2">
+                <UserCheck className="h-3.5 w-3.5" />
+                Pendaftaran Menunggu Persetujuan
+              </h2>
+
+              {actionError && (
+                <div className="mb-3">
+                  <AlertPanel tone="danger" title="Gagal memproses">
+                    {actionError}
+                  </AlertPanel>
+                </div>
+              )}
+
+              {pendingTeachers.length === 0 && pendingStudents.length === 0 ? (
+                <EmptyState
+                  icon={UserCheck}
+                  title="Tidak ada pendaftaran yang menunggu"
+                  description="Pendaftaran guru dan siswa baru akan muncul di sini untuk disetujui atau ditolak."
+                />
+              ) : (
+                <div className="divide-y divide-border">
+                  {pendingTeachers.map((t) => (
+                    <div key={t.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[13px] font-semibold text-ink truncate">
+                          {t.user_profiles?.full_name ?? "-"}
+                        </div>
+                        <div className="text-[11px] text-ink-secondary mt-0.5">
+                          Guru · {schools.find((s) => s.id === t.school_id)?.name ?? "-"}
+                        </div>
+                      </div>
+                      <div className="flex shrink-0 gap-2">
+                        <Button
+                          variant="success"
+                          className="h-7 text-[11px] px-2.5"
+                          disabled={actionLoadingId === t.id}
+                          onClick={() => handleDecision("TEACHER", t.id, "ACTIVE")}
+                        >
+                          Setujui
+                        </Button>
+                        <Button
+                          variant="danger"
+                          className="h-7 text-[11px] px-2.5"
+                          disabled={actionLoadingId === t.id}
+                          onClick={() => handleDecision("TEACHER", t.id, "REJECTED")}
+                        >
+                          Tolak
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+
+                  {pendingStudents.map((s) => {
+                    const schoolClasses = classOptions.filter((c) => c.school_id === s.school_id);
+                    return (
+                      <div key={s.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
+                        <div className="flex-1 min-w-0">
+                          <div className="text-[13px] font-semibold text-ink truncate">
+                            {s.user_profiles?.full_name ?? "-"}
+                          </div>
+                          <div className="text-[11px] text-ink-secondary mt-0.5">
+                            Siswa · {schools.find((sc) => sc.id === s.school_id)?.name ?? "-"}
+                          </div>
+                        </div>
+                        {schoolClasses.length > 0 && (
+                          <select
+                            className="h-7 rounded-[4px] border border-border bg-background px-2 text-[11px] text-ink-secondary"
+                            value={selectedClassByStudent[s.id] ?? ""}
+                            onChange={(e) =>
+                              setSelectedClassByStudent((prev) => ({ ...prev, [s.id]: e.target.value }))
+                            }
+                          >
+                            <option value="">Belum pilih kelas</option>
+                            {schoolClasses.map((c) => (
+                              <option key={c.id} value={c.id}>
+                                {c.name}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                        <div className="flex shrink-0 gap-2">
+                          <Button
+                            variant="success"
+                            className="h-7 text-[11px] px-2.5"
+                            disabled={actionLoadingId === s.id}
+                            onClick={() => handleDecision("STUDENT", s.id, "ACTIVE")}
+                          >
+                            Setujui
+                          </Button>
+                          <Button
+                            variant="danger"
+                            className="h-7 text-[11px] px-2.5"
+                            disabled={actionLoadingId === s.id}
+                            onClick={() => handleDecision("STUDENT", s.id, "REJECTED")}
+                          >
+                            Tolak
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

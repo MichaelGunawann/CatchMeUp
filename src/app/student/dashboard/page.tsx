@@ -37,6 +37,8 @@ export default function StudentDashboardPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [accountStatus, setAccountStatus] = useState<"PENDING" | "REJECTED" | null>(null);
+  const [noClassAssigned, setNoClassAssigned] = useState(false);
   const [studentName, setStudentName] = useState("");
   const [className, setClassName] = useState("");
   const [schoolName, setSchoolName] = useState("");
@@ -66,6 +68,27 @@ export default function StudentDashboardPage() {
       if (cancelled) return;
       if (!student) {
         setError("No student record is linked to this account yet.");
+        setLoading(false);
+        return;
+      }
+
+      // Pending/rejected accounts must not reach dashboard content, even
+      // though RLS would already return empty results for every query
+      // below - this check makes that explicit and skips the queries
+      // entirely rather than relying on them silently coming back empty.
+      if (student.status !== "ACTIVE") {
+        setStudentName(profile.full_name);
+        setAccountStatus(student.status);
+        setLoading(false);
+        return;
+      }
+
+      // Approved but not yet placed in a class by the school admin -
+      // nothing class-scoped to show yet, and class_id is null so the
+      // queries below can't run meaningfully.
+      if (!student.class_id) {
+        setStudentName(profile.full_name);
+        setNoClassAssigned(true);
         setLoading(false);
         return;
       }
@@ -152,6 +175,21 @@ export default function StudentDashboardPage() {
 
         {loading ? (
           <LoadingPanel message="Memuat dasbor..." />
+        ) : accountStatus === "PENDING" ? (
+          <AlertPanel tone="warning" title="Menunggu persetujuan admin sekolah">
+            Akun kamu sudah terdaftar tapi belum disetujui oleh admin sekolah. Kamu belum bisa mengakses
+            data atau fitur apa pun sampai akun ini disetujui.
+          </AlertPanel>
+        ) : accountStatus === "REJECTED" ? (
+          <AlertPanel tone="danger" title="Pendaftaran ditolak">
+            Pendaftaran akun siswa ini ditolak oleh admin sekolah. Hubungi admin sekolahmu jika menurutmu
+            ini keliru.
+          </AlertPanel>
+        ) : noClassAssigned ? (
+          <AlertPanel tone="primary" title="Belum ditempatkan di kelas">
+            Akunmu sudah disetujui, tapi kamu belum ditempatkan di kelas mana pun. Hubungi admin sekolahmu
+            untuk penempatan kelas.
+          </AlertPanel>
         ) : !error ? (
           <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
