@@ -1123,6 +1123,30 @@ const _bankStore: { questions: QuestionBankEntry[] } = { questions: [] };
 const _reviewStore: { questions: PendingQuestion[] } = { questions: [] };
 const _bankListeners = new Set<() => void>();
 
+// All of the caches above (_realTeacher, _activeClassId, _bankStore/_bankKey/
+// _reviewStore) are plain module-level variables, not scoped to any
+// particular signed-in session - switching accounts in the same browser tab
+// is a client-side navigation, not a full page reload, so nothing was ever
+// clearing them. A teacher who logged out and back in (or who briefly
+// switched to another account to test something) kept seeing whatever the
+// previous session had already cached - stale class list, stale bank/review
+// queues, or an empty bank if the last cache write happened to be for a
+// different class+subject combination than the one now being viewed. This
+// resets every one of them on any real sign-in/sign-out transition so a
+// fresh session always starts from a real, freshly-fetched state.
+supabase.auth.onAuthStateChange((event) => {
+  if (event !== "SIGNED_IN" && event !== "SIGNED_OUT") return;
+  _realTeacher = null;
+  _realTeacherPromise = null;
+  _teacherListeners.forEach(fn => fn(null));
+  _activeClassId = "";
+  _bankKey = null;
+  _bankLoading = null;
+  _bankStore.questions = [];
+  _reviewStore.questions = [];
+  _bankListeners.forEach(fn => fn());
+});
+
 async function loadBankAndReview(classId: string, subjectId: string): Promise<void> {
   const key = `${classId}:${subjectId}`;
   if (_bankKey === key) return _bankLoading ?? Promise.resolve();
@@ -6315,9 +6339,21 @@ function ParentProgress() {
       setChild(c);
       if (c) {
         fetchClassRankedStats(c.studentId, c.classId).then(setStats);
-        fetchScoreTrendAndSubjectMastery(c.studentId).then(({ scoreTrend, subjectMastery }) => {
+        // Score trend only needs assessment_attempts (already safe for a
+        // parent's own direct RLS access); topic mastery is real per-topic
+        // accuracy, not per-subject - reuses the same server-side aggregation
+        // as Rekomendasi Pengajaran, since a parent has no direct RLS access
+        // to question_attempts/questions (see /api/parent/topic-stats).
+        fetchScoreTrendAndSubjectMastery(c.studentId).then(({ scoreTrend }) => {
           setScoreTrendData(scoreTrend);
-          setSubjectMasteryData(subjectMastery);
+        });
+        authedFetch("/api/parent/topic-stats", { studentId: c.studentId }).then((data) => {
+          const topicStats = (data as { topicStats?: Array<{ topic: string; avgSuccessRate: number }> } | null)?.topicStats ?? [];
+          setSubjectMasteryData(topicStats.map(t => ({
+            label: t.topic,
+            value: t.avgSuccessRate,
+            tone: t.avgSuccessRate >= 80 ? "success" : t.avgSuccessRate >= 60 ? "primary" : "warning",
+          })));
         });
       }
     });
