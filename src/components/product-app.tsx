@@ -4355,6 +4355,10 @@ function TeacherAnalytics() {
                   <p className="text-[12px] text-ink">{popupRec.suggestion}</p>
                 </div>
               </div>
+            ) : popupTopic && popupTopic.value < 50 ? (
+              <p className="text-[13px] text-danger">Akurasi kelas untuk topik ini masih rendah ({popupTopic.value}%). Perlu perhatian khusus - pertimbangkan sesi remedial atau latihan tambahan sebelum lanjut ke topik berikutnya.</p>
+            ) : popupTopic && popupTopic.value < 70 ? (
+              <p className="text-[13px] text-warning">Akurasi kelas untuk topik ini masih di bawah target ({popupTopic.value}%). Latihan tambahan akan membantu memperkuat pemahaman siswa.</p>
             ) : (
               <p className="text-[13px] text-ink-secondary">Topik ini performanya sudah baik. Tidak ada intervensi khusus yang diperlukan.</p>
             )}
