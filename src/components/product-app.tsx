@@ -6836,13 +6836,15 @@ async function fetchAdminStudents(): Promise<AdminStudentRow[]> {
 }
 
 function InviteParentModal({ students, preselectedId, onClose, onDone }: {
-  students: AdminStudentRow[]; preselectedId: string; onClose: () => void; onDone: (message: string) => void;
+  students: AdminStudentRow[]; preselectedId: string; onClose: () => void; onDone: () => void;
 }) {
   const [email, setEmail] = useState("");
   const [relationship, setRelationship] = useState("Wali");
   const [selected, setSelected] = useState<Set<string>>(new Set([preselectedId]));
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  const [result, setResult] = useState<{ linked: boolean; url: string | null } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   function toggle(id: string) {
     setSelected(prev => {
@@ -6861,9 +6863,56 @@ function InviteParentModal({ students, preselectedId, onClose, onDone }: {
     }) as { success?: boolean; error?: string; linked?: boolean; invitationUrl?: string } | null;
     setSending(false);
     if (!res || res.error) { setError(res?.error ?? "Gagal mengirim undangan."); return; }
-    onDone(res.linked
-      ? `Akun orang tua sudah ada - langsung terhubung ke ${selected.size} siswa.`
-      : `Undangan dibuat untuk ${selected.size} siswa. Link registrasi: ${res.invitationUrl}`);
+    setResult({
+      linked: !!res.linked,
+      url: res.invitationUrl ? `${window.location.origin}${res.invitationUrl}` : null,
+    });
+  }
+
+  function copyLink() {
+    if (!result?.url) return;
+    navigator.clipboard.writeText(result.url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  if (result) {
+    return (
+      <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={onDone} />
+        <div className="relative w-full max-w-md rounded-card border border-border bg-surface shadow-xl p-6">
+          <div className="flex items-center gap-2.5 mb-4">
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-success-light">
+              <CheckCircle2 className="h-5 w-5 text-success" />
+            </div>
+            <h2 className="text-[16px] font-bold text-ink">
+              {result.linked ? "Langsung Terhubung" : "Undangan Dibuat"}
+            </h2>
+          </div>
+          {result.linked ? (
+            <p className="text-[13px] text-ink-secondary leading-relaxed mb-5">
+              Akun orang tua dengan email ini sudah ada, jadi langsung terhubung ke {selected.size} siswa yang dipilih. Tidak perlu link registrasi.
+            </p>
+          ) : (
+            <>
+              <p className="text-[13px] text-ink-secondary leading-relaxed mb-3">
+                Belum ada pengiriman email otomatis - kirimkan link ini sendiri ke orang tua (WhatsApp, email, dsb). Membuka link ini akan menghubungkan semua {selected.size} siswa yang dipilih ke akun yang mereka buat.
+              </p>
+              <div className="flex items-center gap-2 rounded-[8px] border border-border bg-background px-3 py-2 mb-5">
+                <span className="flex-1 text-[12px] text-ink truncate">{result.url}</span>
+                <Button variant="outline" className="h-7 px-2 text-[11px] shrink-0" onClick={copyLink}>
+                  {copied ? "Tersalin!" : "Salin"}
+                </Button>
+              </div>
+            </>
+          )}
+          <div className="flex justify-end">
+            <Button variant="default" className="h-8 text-[12px]" onClick={onDone}>Selesai</Button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -6922,7 +6971,6 @@ function InviteParentModal({ students, preselectedId, onClose, onDone }: {
 function AdminStudents() {
   const [students, setStudents] = useState<AdminStudentRow[] | null>(null);
   const [inviteFor, setInviteFor] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -6984,10 +7032,9 @@ function AdminStudents() {
           students={students}
           preselectedId={inviteFor}
           onClose={() => setInviteFor(null)}
-          onDone={(message) => { setInviteFor(null); setToast({ message, tone: "success" }); }}
+          onDone={() => setInviteFor(null)}
         />
       )}
-      {toast && <AppToast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>
   );
 }
