@@ -79,7 +79,7 @@ import {
 import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase/client";
 import { getCurrentProfile } from "@/lib/auth/session";
-import { getCurrentTeacher, getCurrentStudent, getCurrentParent } from "@/lib/auth/authorization";
+import { getCurrentTeacher, getCurrentStudent, getCurrentParent, getCurrentSchoolAdminSchools } from "@/lib/auth/authorization";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -97,6 +97,7 @@ import {
   Filter,
   HelpCircle,
   Lightbulb,
+  Mail,
   MessageCircle,
   Pencil,
   Plus,
@@ -6791,51 +6792,202 @@ function AdminTeachers() {
   );
 }
 
+type AdminStudentRow = { id: string; name: string; school: string; className: string; avgScore: number | null };
+
+async function fetchAdminStudents(): Promise<AdminStudentRow[]> {
+  const adminSchools = await getCurrentSchoolAdminSchools();
+  const schoolIds = adminSchools.map(a => a.school_id);
+  if (schoolIds.length === 0) return [];
+
+  const { data } = await supabase
+    .from("students")
+    .select("id, user_profile_id, user_profiles(full_name), schools(name), classes(name)")
+    .in("school_id", schoolIds)
+    .eq("status", "ACTIVE");
+  type Row = { id: string; user_profile_id: string; user_profiles: { full_name: string } | null; schools: { name: string } | null; classes: { name: string } | null };
+  const rows = (data ?? []) as unknown as Row[];
+  if (rows.length === 0) return [];
+
+  const studentIds = rows.map(r => r.id);
+  const { data: attemptRows } = await supabase
+    .from("assessment_attempts")
+    .select("student_id, score")
+    .in("student_id", studentIds)
+    .in("status", ["submitted", "graded"]);
+  const scoreByStudent = new Map<string, { sum: number; count: number }>();
+  for (const a of (attemptRows ?? []) as Array<{ student_id: string; score: number | null }>) {
+    if (a.score == null) continue;
+    const cur = scoreByStudent.get(a.student_id) ?? { sum: 0, count: 0 };
+    cur.sum += a.score;
+    cur.count += 1;
+    scoreByStudent.set(a.student_id, cur);
+  }
+
+  return rows.map(r => {
+    const stat = scoreByStudent.get(r.id);
+    return {
+      id: r.id,
+      name: r.user_profiles?.full_name ?? "-",
+      school: r.schools?.name ?? "-",
+      className: r.classes?.name ?? "-",
+      avgScore: stat ? Math.round(stat.sum / stat.count) : null,
+    };
+  });
+}
+
+function InviteParentModal({ students, preselectedId, onClose, onDone }: {
+  students: AdminStudentRow[]; preselectedId: string; onClose: () => void; onDone: (message: string) => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [relationship, setRelationship] = useState("Wali");
+  const [selected, setSelected] = useState<Set<string>>(new Set([preselectedId]));
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+
+  function toggle(id: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function handleSend() {
+    if (!email.trim() || selected.size === 0) return;
+    setSending(true);
+    setError("");
+    const res = await authedFetch("/api/parent-invite", {
+      studentIds: [...selected], parentEmail: email.trim(), relationship,
+    }) as { success?: boolean; error?: string; linked?: boolean; invitationUrl?: string } | null;
+    setSending(false);
+    if (!res || res.error) { setError(res?.error ?? "Gagal mengirim undangan."); return; }
+    onDone(res.linked
+      ? `Akun orang tua sudah ada - langsung terhubung ke ${selected.size} siswa.`
+      : `Undangan dibuat untuk ${selected.size} siswa. Link registrasi: ${res.invitationUrl}`);
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => !sending && onClose()} />
+      <div className="relative w-full max-w-md rounded-card border border-border bg-surface shadow-xl p-6 max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-[16px] font-bold text-ink">Undang Orang Tua</h2>
+          <button onClick={() => !sending && onClose()} className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-4 overflow-y-auto pr-1">
+          <div>
+            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Email Orang Tua *</label>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="orangtua@email.com"
+              className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Hubungan</label>
+            <select value={relationship} onChange={e => setRelationship(e.target.value)}
+              className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
+              <option value="Ibu">Ibu</option>
+              <option value="Ayah">Ayah</option>
+              <option value="Wali">Wali</option>
+            </select>
+          </div>
+          <div>
+            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">
+              Siswa yang Terhubung ({selected.size} dipilih)
+            </label>
+            <p className="text-[11px] text-ink-tertiary mb-2">Satu orang tua bisa memiliki lebih dari satu anak - centang semua anak yang terhubung ke email ini.</p>
+            <div className="rounded-[8px] border border-border max-h-52 overflow-y-auto divide-y divide-border">
+              {students.map(s => (
+                <label key={s.id} className="flex items-center gap-2.5 px-3 py-2 text-[12px] cursor-pointer hover:bg-background">
+                  <input type="checkbox" checked={selected.has(s.id)} onChange={() => toggle(s.id)} className="h-3.5 w-3.5" />
+                  <span className="flex-1 text-ink">{s.name}</span>
+                  <span className="text-ink-tertiary">{s.className}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          {error && <p className="text-[12px] text-danger">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-2 mt-5 pt-4 border-t border-border shrink-0">
+          <Button variant="outline" className="h-8 text-[12px]" onClick={onClose} disabled={sending}>Batal</Button>
+          <Button variant="default" className="h-8 text-[12px]" onClick={handleSend} disabled={sending || !email.trim() || selected.size === 0}>
+            {sending ? "Mengirim..." : "Kirim Undangan"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AdminStudents() {
-  const mockStudentList = [
-    { id: "s1", name: "Adi Pratama", school: "SMA N 1 Bandung", class: "XI IPA 2", avgScore: 88, lastActive: "Hari ini" },
-    { id: "s2", name: "Budi Rahmat", school: "SMA N 1 Bandung", class: "XI IPA 2", avgScore: 76, lastActive: "Kemarin" },
-    { id: "s3", name: "Citra Lestari", school: "SMA N 2 Bandung", class: "X IPS 1", avgScore: 91, lastActive: "Hari ini" },
-    { id: "s4", name: "Dewi Amalia", school: "SMA N 1 Bandung", class: "XII IPA 1", avgScore: 82, lastActive: "3 hari lalu" },
-    { id: "s5", name: "Eko Susanto", school: "SMP N 5 Bandung", class: "IX A", avgScore: 68, lastActive: "1 minggu lalu" },
-  ];
+  const [students, setStudents] = useState<AdminStudentRow[] | null>(null);
+  const [inviteFor, setInviteFor] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAdminStudents().then(rows => { if (!cancelled) setStudents(rows); });
+    return () => { cancelled = true; };
+  }, []);
+
+  const scored = (students ?? []).filter(s => s.avgScore != null);
+  const avgAll = scored.length ? Math.round(scored.reduce((sum, s) => sum + (s.avgScore ?? 0), 0) / scored.length) : 0;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <PageHeader eyebrow="Admin" title="Manajemen Siswa" />
-        <div className="flex gap-2">
-          <Button variant="outline" className="h-8 text-[12px]"><Upload className="mr-1.5 h-3.5 w-3.5" />Import CSV</Button>
-          <Button variant="default" className="h-8 text-[12px]"><Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Siswa</Button>
+      </div>
+      {students === null ? (
+        <div className="flex items-center justify-center py-16">
+          <span className="h-5 w-5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
         </div>
-      </div>
-      <div className="grid grid-cols-3 gap-4">
-        {[
-          { label: "Total Siswa", value: "1.312", detail: "Seluruh sekolah", tone: "primary" as const },
-          { label: "Aktif Bulan Ini", value: "1.189", detail: "90.6% aktif", tone: "success" as const },
-          { label: "Rata-rata Nilai", value: "79.4", detail: "Semua asesmen", tone: "neutral" as const },
-        ].map(s => <StatCard key={s.label} {...s} />)}
-      </div>
-      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
-        <table className="w-full">
-          <AdminTableHead cols={["Nama Siswa", "Sekolah", "Kelas", "Rata-rata Nilai", "Terakhir Aktif", "Aksi"]} />
-          <tbody>
-            {mockStudentList.map(s => (
-              <tr key={s.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
-                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{s.name}</span></td>
-                <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary">{s.school}</span></td>
-                <td className="px-4 py-3 text-[12px] text-ink">{s.class}</td>
-                <td className="px-4 py-3 text-[12px]">
-                  <span className={cn("font-semibold", s.avgScore >= 80 ? "text-success" : s.avgScore >= 70 ? "text-warning" : "text-danger")}>{s.avgScore}</span>
-                </td>
-                <td className="px-4 py-3 text-[12px] text-ink">{s.lastActive}</td>
-                <td className="px-4 py-3 text-right">
-                  <Button variant="ghost" className="h-7 px-2 text-[11px]"><Eye className="h-3.5 w-3.5" /></Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      ) : (
+        <>
+          <div className="grid grid-cols-3 gap-4">
+            <StatCard label="Total Siswa" value={String(students.length)} detail="Seluruh sekolah" tone="primary" />
+            <StatCard label="Punya Nilai" value={String(scored.length)} detail="Sudah mengerjakan asesmen" tone="success" />
+            <StatCard label="Rata-rata Nilai" value={scored.length ? String(avgAll) : "-"} detail="Semua asesmen" tone="neutral" />
+          </div>
+          {students.length === 0 ? (
+            <EmptyState icon={Users} title="Belum ada siswa" description="Siswa yang terdaftar di sekolah ini akan muncul di sini." />
+          ) : (
+            <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
+              <table className="w-full">
+                <AdminTableHead cols={["Nama Siswa", "Sekolah", "Kelas", "Rata-rata Nilai", "Aksi"]} />
+                <tbody>
+                  {students.map(s => (
+                    <tr key={s.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
+                      <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{s.name}</span></td>
+                      <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary">{s.school}</span></td>
+                      <td className="px-4 py-3 text-[12px] text-ink">{s.className}</td>
+                      <td className="px-4 py-3 text-[12px]">
+                        {s.avgScore == null ? <span className="text-ink-tertiary">-</span> : (
+                          <span className={cn("font-semibold", s.avgScore >= 80 ? "text-success" : s.avgScore >= 70 ? "text-warning" : "text-danger")}>{s.avgScore}</span>
+                        )}
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <Button variant="ghost" className="h-7 px-2 text-[11px]" onClick={() => setInviteFor(s.id)}>
+                          <Mail className="h-3.5 w-3.5 mr-1" />Undang Ortu
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+      {inviteFor && students && (
+        <InviteParentModal
+          students={students}
+          preselectedId={inviteFor}
+          onClose={() => setInviteFor(null)}
+          onDone={(message) => { setInviteFor(null); setToast({ message, tone: "success" }); }}
+        />
+      )}
+      {toast && <AppToast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>
   );
 }
