@@ -51,7 +51,7 @@ ${materialList}`;
     async start(controller) {
       try {
         const response = await getGroq().chat.completions.create({
-          model: "llama-3.3-70b-versatile",
+          model: "openai/gpt-oss-120b",
           messages: [
             { role: "system", content: systemPrompt },
             ...messages.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),

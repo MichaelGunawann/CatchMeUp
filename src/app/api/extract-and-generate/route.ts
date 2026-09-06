@@ -118,7 +118,7 @@ Pastikan:
     // usage, so an oversized fixed value rejects small requests needlessly).
     const maxTokens = Math.min(8192, count * 350 + 500);
     const completion = await getGroq().chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       messages: [{ role: "user", content: prompt }],
       max_tokens: maxTokens,
     });

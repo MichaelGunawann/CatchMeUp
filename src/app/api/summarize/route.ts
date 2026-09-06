@@ -32,7 +32,7 @@ Berikan ringkasan dalam format JSON berikut (HANYA JSON, tanpa teks lain):
 
   try {
     const completion = await getGroq().chat.completions.create({
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
       messages: [{ role: "user", content: prompt }],
       max_tokens: 1024,
     });

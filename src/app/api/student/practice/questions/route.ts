@@ -100,7 +100,7 @@ export async function POST(req: Request) {
           topic ? ` topik "${topic}"` : ""
         } tingkat kesulitan "${difficulty ?? "Sedang"}". Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":"","C":"","D":""},"correctAnswer":"A","explanation":"","topic":""}]}`;
         const completion = await getGroq().chat.completions.create({
-          model: "llama-3.3-70b-versatile",
+          model: "openai/gpt-oss-120b",
           messages: [{ role: "user", content: prompt }],
           max_tokens: 2000,
         });

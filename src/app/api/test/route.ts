@@ -10,7 +10,7 @@ export async function GET() {
   try {
     const groq = new Groq({ apiKey: key });
     const completion = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
       messages: [{ role: "user", content: "Say OK in one word." }],
       max_tokens: 10,
     });
