@@ -12,11 +12,12 @@ export async function GET() {
     const completion = await groq.chat.completions.create({
       model: "openai/gpt-oss-20b",
       messages: [{ role: "user", content: "Say OK in one word." }],
-      // gpt-oss models spend part of the token budget on internal
-      // reasoning before the visible answer - 10 was tuned for the old
-      // llama model and left nothing for actual output here, so a healthy
-      // key still came back with an empty response string.
-      max_tokens: 50,
+      // gpt-oss models spend a variable, non-deterministic amount of the
+      // token budget on internal reasoning before the visible answer even
+      // for a trivial prompt (observed 30-64 reasoning tokens across
+      // identical calls) - 200 gives enough headroom that an empty
+      // response reliably means a real problem, not reasoning variance.
+      max_tokens: 200,
     });
     const text = completion.choices[0].message.content ?? "";
     return Response.json({ success: true, response: text });
