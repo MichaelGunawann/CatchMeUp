@@ -109,7 +109,13 @@ Format WAJIB — kembalikan HANYA JSON array, tanpa teks lain:
 
 Pastikan:
 - sourceTitle harus sama dengan "${materialTitle}"
-- sourcePage harus angka halaman di materi (estimasi atau asli jika terlihat)`;
+- sourcePage harus angka halaman di materi (estimasi atau asli jika terlihat)
+- SANGAT PENTING: Sebelum menuliskan correctAnswer, hitung ulang jawabannya
+  langkah demi langkah, PASTIKAN hasil perhitunganmu benar-benar cocok
+  dengan salah satu dari 4 pilihan yang kamu buat. Jika hasil hitunganmu
+  tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
+  agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
+  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.`;
 
   try {
     // Scaled to the actual question count instead of a flat 4096 - see
@@ -121,6 +127,11 @@ Pastikan:
       model: "openai/gpt-oss-120b",
       messages: [{ role: "user", content: prompt }],
       max_tokens: maxTokens,
+      // Low temperature specifically to reduce answer-key inconsistency -
+      // see generate-questions/route.ts for the empirical test that found
+      // the default temperature let the model compute the right answer in
+      // its own explanation and then pick a different, wrong option anyway.
+      temperature: 0.3,
     });
 
     const text = completion.choices[0].message.content ?? "[]";

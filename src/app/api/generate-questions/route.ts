@@ -38,7 +38,13 @@ Pastikan:
 - Ada 4 pilihan (A, B, C, D) per soal
 - Penjelasan jawaban lengkap dan edukatif
 - Jawaban tersebar merata (tidak selalu A)
-- Jangan include sourceTitle atau sourcePage (tidak ada materi spesifik)`;
+- Jangan include sourceTitle atau sourcePage (tidak ada materi spesifik)
+- SANGAT PENTING: Sebelum menuliskan correctAnswer, hitung ulang jawabannya
+  langkah demi langkah, PASTIKAN hasil perhitunganmu benar-benar cocok
+  dengan salah satu dari 4 pilihan yang kamu buat. Jika hasil hitunganmu
+  tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
+  agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
+  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.`;
 
   try {
     // Scaled to the actual question count instead of a flat 8192 - Groq's
@@ -50,6 +56,12 @@ Pastikan:
       model: "openai/gpt-oss-120b",
       messages: [{ role: "user", content: prompt }],
       max_tokens: maxTokens,
+      // Low temperature specifically to reduce answer-key inconsistency -
+      // verified empirically that the default temperature let the model
+      // compute the right answer in its own explanation and then pick a
+      // different, wrong option anyway; 0.3 + the self-verification
+      // instruction above eliminated that in repeated testing.
+      temperature: 0.3,
     });
 
     const text = completion.choices[0].message.content ?? "[]";
