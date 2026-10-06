@@ -30,7 +30,7 @@ export function effectiveStreak(streakDays: number, lastActiveDate: string | nul
 export async function awardXpAndStreak(studentId: string, xpToAdd: number) {
   const today = jakartaDate(0);
 
-  // Atomic path (migration 017): safe under the parallel per-answer grading
+  // Atomic path (migration 021): safe under the parallel per-answer grading
   // the practice screen does.
   const { data, error } = await supabaseAdmin.rpc("award_student_activity", {
     p_student_id: studentId,
@@ -42,7 +42,7 @@ export async function awardXpAndStreak(studentId: string, xpToAdd: number) {
     return row ? { xp: row.xp, streakDays: row.streak_days } : null;
   }
 
-  // Fallback for databases without migration 017 (not race-safe).
+  // Fallback for databases without migration 021 (not race-safe).
   const { data: student } = await supabaseAdmin
     .from("students")
     .select("xp, streak_days, last_active_date")

@@ -1550,7 +1550,7 @@ async function fetchAttemptReviewDetail(attemptId: string): Promise<ReviewQuesti
 type MaterialRow = {
   id: string; title: string; type: string | null; file_url: string | null; file_size: number | null;
   ai_processed: boolean; status: string; class_id: string | null; subject_id: string | null; created_at: string;
-  // migration 016 - absent on databases that haven't applied it yet
+  // migration 020 - absent on databases that haven't applied it yet
   chapter?: string | null; academic_year?: string | null; publisher?: string | null; source_type?: string | null;
 };
 
@@ -1633,7 +1633,7 @@ async function fetchStudentMaterialsReal(): Promise<MaterialWithFile[]> {
 }
 
 // PostgREST/Postgres "unknown column" errors - lets inserts keep working
-// (minus the new optional fields) on a database where migration 016 hasn't
+// (minus the new optional fields) on a database where migration 020 hasn't
 // been applied yet, instead of failing the whole upload.
 function isMissingColumnError(error: { code?: string; message?: string } | null): boolean {
   return !!error && (error.code === "PGRST204" || error.code === "42703" || /column .* does not exist|Could not find the '.*' column/i.test(error.message ?? ""));
@@ -1702,7 +1702,7 @@ async function updateMaterialMetadata(id: string, meta: { type: string; chapter:
     source_type: meta.sourceType || null,
     updated_at: new Date().toISOString(),
   }).eq("id", id).select("id");
-  if (isMissingColumnError(error)) return "Kolom metadata belum ada di database. Jalankan migrasi 016 terlebih dahulu.";
+  if (isMissingColumnError(error)) return "Kolom metadata belum ada di database. Jalankan migrasi 020 terlebih dahulu.";
   if (error) return error.message;
   // RLS silently filters the UPDATE to zero rows for non-uploaders.
   if (!data || data.length === 0) return "Hanya guru yang mengunggah materi ini yang bisa mengubahnya.";
@@ -1766,7 +1766,7 @@ async function createAssessment(params: {
   }).select("id").single();
   if (isMissingColumnError(error)) {
     if (params.distributionMode === "adaptive") {
-      return { error: "Mode adaptif butuh migrasi database 016. Jalankan supabase/migrations/016_form_metadata_and_adaptive_assessments.sql terlebih dahulu." };
+      return { error: "Mode adaptif butuh migrasi database 020. Jalankan supabase/migrations/020_form_metadata_and_adaptive_assessments.sql terlebih dahulu." };
     }
     ({ data: assessmentRow, error } = await supabase.from("assessments").insert(base).select("id").single());
   }
