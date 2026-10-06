@@ -900,11 +900,15 @@ export function MaterialCard({
   isProcessing,
   onClick,
   onProcessAI,
+  className: classLabel,
+  chapter,
 }: {
   title: string;
   type: string;
   subject: string;
   pages: number;
+  className?: string;
+  chapter?: string;
   uploadedAt: string;
   status: string;
   aiProcessed: boolean;
@@ -928,17 +932,26 @@ export function MaterialCard({
         <FileText className="h-5 w-5 text-ink-secondary group-hover:text-primary transition-colors" />
       </div>
       <div className="flex-1 min-w-0">
-        <div className="flex items-start justify-between gap-2">
-          <div className="min-w-0">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0 flex-1">
             <div className="text-[13px] font-semibold text-ink truncate">{title}</div>
-            <div className="text-[11px] text-ink-secondary mt-0.5">{subject} · {type} · {pages} hal.</div>
+            <div className="text-[11px] text-ink-secondary mt-0.5 break-words">
+              {[subject, chapter, type, pages > 0 ? `${pages} hal.` : null].filter(Boolean).join(" · ")}
+            </div>
           </div>
-          <span className={cn("shrink-0 flex items-center gap-1.5 rounded-[4px] px-2 py-0.5 text-[10px] font-semibold", statusStyle.bg, statusStyle.text)}>
-            <span className={cn("h-1.5 w-1.5 rounded-full", statusStyle.dot)} />
-            {status}
-          </span>
+          <div className="flex shrink-0 flex-wrap items-center justify-end gap-1.5 max-w-[45%]">
+            {classLabel && (
+              <span className="whitespace-nowrap rounded-full border border-border bg-ink/5 px-2 py-0.5 text-[10px] font-semibold text-ink-secondary">
+                {classLabel}
+              </span>
+            )}
+            <span className={cn("flex items-center gap-1.5 whitespace-nowrap rounded-[4px] px-2 py-0.5 text-[10px] font-semibold", statusStyle.bg, statusStyle.text)}>
+              <span className={cn("h-1.5 w-1.5 rounded-full", statusStyle.dot)} />
+              {status}
+            </span>
+          </div>
         </div>
-        <div className="flex items-center gap-3 mt-2.5">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mt-2.5">
           <span className="text-[11px] text-ink-tertiary">Diunggah {uploadedAt}</span>
           {aiProcessed && questionsGenerated > 0 && (
             <span className="flex items-center gap-1 text-[11px] text-primary font-medium">

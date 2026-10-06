@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
+import { parseDbTime } from "@/lib/auth/assessment-availability";
 import { awardXpAndStreak, checkAndAwardAchievements } from "@/lib/gamification/award";
 import type { Assessment, Question } from "@/lib/supabase/types";
 
@@ -75,7 +76,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
     const { data: assessment } = await supabaseAdmin.from("assessments").select("*").eq("id", assessmentId).single();
     const a = assessment as Assessment;
 
-    if (a.close_at && new Date() > new Date(a.close_at)) {
+    // The exam client auto-submits exactly at close_at; allow a short grace
+    // window for that request's network latency so those answers aren't
+    // discarded. Starting a NEW attempt after close is still blocked by
+    // the start route.
+    const SUBMIT_GRACE_MS = 2 * 60_000;
+    if (a.close_at && Date.now() > parseDbTime(a.close_at) + SUBMIT_GRACE_MS) {
       await supabaseAdmin.from("assessment_attempts").update({ status: "missed" }).eq("id", attemptId);
       return Response.json({ error: "Waktu pengerjaan asesmen ini sudah berakhir" }, { status: 400 });
     }
@@ -86,7 +92,16 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
       .eq("assessment_id", assessmentId);
 
     type AQRow = { id: string; question_id: string; points: number; questions: Question };
-    const rows = (aqRows ?? []) as unknown as AQRow[];
+    let rows = (aqRows ?? []) as unknown as AQRow[];
+
+    // Adaptive assessments: grade only the per-student subset chosen at
+    // start time, never the whole pool (unseen pool questions would
+    // otherwise count as wrong answers).
+    const selectedIds = (attempt as { selected_question_ids?: string[] | null }).selected_question_ids;
+    if (selectedIds && selectedIds.length > 0) {
+      const allowed = new Set(selectedIds);
+      rows = rows.filter(r => allowed.has(r.id));
+    }
 
     let totalPoints = 0;
     let earnedPoints = 0;

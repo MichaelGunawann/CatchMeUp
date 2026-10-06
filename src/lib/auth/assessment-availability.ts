@@ -1,5 +1,19 @@
 import { Assessment, AssessmentAttempt } from "@/lib/supabase/types";
 
+/**
+ * Parse an assessments.open_at/close_at value as an absolute instant.
+ * The columns were created as TIMESTAMP (no time zone); the app always
+ * writes UTC ISO strings, but PostgREST hands them back WITHOUT an offset
+ * ("2026-10-23T03:00:00"), which `new Date()` would read as the viewer's
+ * local time - shifting every schedule by +7h in WIB. Values without an
+ * explicit offset are therefore treated as UTC. (Migration 016 converts
+ * the columns to TIMESTAMPTZ; this stays correct either way.)
+ */
+export function parseDbTime(value: string): number {
+  const hasZone = /([zZ]|[+-]\d{2}:?\d{2})$/.test(value);
+  return new Date(hasZone ? value : `${value.replace(" ", "T")}Z`).getTime();
+}
+
 export type AssessmentAvailability =
   | "DRAFT"
   | "UPCOMING"
@@ -27,10 +41,10 @@ export function getAssessmentAvailability(
 ): AssessmentAvailabilityInfo {
   const nowTime = now.getTime();
   const openTime = assessment.open_at
-    ? new Date(assessment.open_at).getTime()
+    ? parseDbTime(assessment.open_at)
     : null;
   const closeTime = assessment.close_at
-    ? new Date(assessment.close_at).getTime()
+    ? parseDbTime(assessment.close_at)
     : null;
 
   // If draft, always unavailable
@@ -91,7 +105,7 @@ export function getAssessmentAvailability(
     return {
       state: "UPCOMING",
       isOpen: false,
-      message: `Asesmen akan dibuka pada ${new Date(openTime!).toLocaleString("id-ID")}`,
+      message: `Asesmen akan dibuka pada ${new Date(openTime!).toLocaleString("id-ID", { dateStyle: "full", timeStyle: "short" })}`,
       canAttempt: false,
       retriesLeft,
     };

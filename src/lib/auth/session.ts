@@ -15,22 +15,53 @@ export async function getCurrentUser() {
   return user;
 }
 
+// Profile lookups happen on every page guard, so they must be cheap: the
+// user id comes from the locally stored session (no Auth-server round
+// trip - RLS still enforces every data read server-side), and the profile
+// row is cached per user for the lifetime of the tab. The cache is
+// dropped on any sign-in/sign-out so a different account never sees a
+// stale profile.
+let _profileCache: { userId: string; profile: Promise<UserProfile | null> } | null = null;
+
+let _authListenerAttached = false;
+
+function ensureAuthListener() {
+  if (_authListenerAttached || typeof window === "undefined") return;
+  _authListenerAttached = true;
+  supabase.auth.onAuthStateChange((event) => {
+    if (event === "SIGNED_IN" || event === "SIGNED_OUT" || event === "USER_UPDATED") {
+      _profileCache = null;
+    }
+  });
+}
+
 export async function getCurrentProfile(): Promise<UserProfile | null> {
-  const user = await getCurrentUser();
-  if (!user) return null;
-
-  const { data, error } = await supabase
-    .from("user_profiles")
-    .select("*")
-    .eq("auth_user_id", user.id)
-    .single();
-
-  if (error) {
-    console.error("Error fetching profile:", error);
+  ensureAuthListener();
+  const session = await getCurrentSession();
+  const userId = session?.user.id;
+  if (!userId) {
+    _profileCache = null;
     return null;
   }
 
-  return data;
+  if (_profileCache?.userId === userId) return _profileCache.profile;
+
+  const profile = (async () => {
+    const { data, error } = await supabase
+      .from("user_profiles")
+      .select("*")
+      .eq("auth_user_id", userId)
+      .single();
+
+    if (error) {
+      console.error("Error fetching profile:", error);
+      _profileCache = null;
+      return null;
+    }
+    return data as UserProfile;
+  })();
+  _profileCache = { userId, profile };
+  return profile;
 }
 
 export async function signOut() {

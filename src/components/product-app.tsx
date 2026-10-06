@@ -29,15 +29,13 @@ import {
   TopicBar,
   TypingIndicator,
   UpcomingCard,
-  WeakTopicRow,
   NotificationItem,
   MasteryBadge,
 } from "@/components/product-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { FormField, SelectField, fieldClass, useRequiredFields, type SelectOption } from "@/components/ui/form-field";
 import {
-  achievements,
-  adminStats,
   aiStyleOptions,
   assessmentStyles,
   assessments,
@@ -49,8 +47,6 @@ import {
   school,
   scoreTrend,
   scoreTrendLabels,
-  scoreDistribution,
-  scoreDistributionLabels,
   studentProfile,
   studentProgressStats,
   studentResults,
@@ -58,7 +54,6 @@ import {
   suggestedPrompts,
   teacherAnalyticsStats,
   teachingRecommendations,
-  topicAccuracy,
   weakTopics,
   simulatorQuestions,
   teacherNav,
@@ -83,6 +78,8 @@ import { cn } from "@/lib/utils";
 import { supabase } from "@/lib/supabase/client";
 import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentTeacher, getCurrentStudent, getCurrentParent } from "@/lib/auth/authorization";
+import { parseDbTime } from "@/lib/auth/assessment-availability";
+import { useScheduleClock, formatCountdown } from "@/lib/hooks/use-schedule-clock";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -191,14 +188,20 @@ export function ProductApp({ path }: { path: string[] }) {
 
 function ClassSelectorBanner() {
   const [activeClass] = useActiveClass();
-  const teacher = useRealTeacher();
+  const { teacher, loading } = useRealTeacherStatus();
   const classes = teacher?.classes ?? [];
   const activeClassYear = classes.find(c => c.id === activeClass)?.year;
 
   return (
-    <div className="flex items-center gap-2 flex-wrap mb-6 rounded-[10px] border border-border bg-surface px-4 py-2.5 shadow-sm">
+    <div className="flex items-center gap-2 flex-wrap mb-6 rounded-[10px] border border-border bg-surface px-4 py-2.5 shadow-sm min-h-[46px]">
       <span className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-tertiary shrink-0 mr-1">Kelas:</span>
-      {classes.map(cls => (
+      {loading ? (
+        <>
+          {[0, 1, 2].map(i => <span key={i} className="h-6 w-20 rounded-full bg-border/60 animate-pulse" />)}
+        </>
+      ) : classes.length === 0 ? (
+        <span className="text-[12px] text-ink-secondary">Kamu belum ditugaskan ke kelas mana pun. Hubungi admin sekolah.</span>
+      ) : classes.map(cls => (
         <button
           key={cls.id}
           onClick={() => changeActiveClass(cls.id)}
@@ -213,6 +216,18 @@ function ClassSelectorBanner() {
         </button>
       ))}
       {activeClassYear && <span className="ml-auto text-[11px] text-ink-tertiary hidden sm:block">Tahun Ajaran {activeClassYear}</span>}
+    </div>
+  );
+}
+
+// Shared inline loading block for lists/sections whose data is still being
+// fetched - shown instead of an "empty" message so a page never claims
+// "tidak ada data" before it actually knows.
+function SectionLoading({ message = "Memuat data...", className }: { message?: string; className?: string }) {
+  return (
+    <div className={cn("flex items-center justify-center gap-2.5 py-10 text-[13px] text-ink-secondary", className)}>
+      <span className="h-4 w-4 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+      {message}
     </div>
   );
 }
@@ -271,16 +286,17 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
     }
 
     const title = file.name.replace(/\.[^/.]+$/, "");
-    const matId = await insertMaterial({
-      schoolId: teacher.schoolId, classId: activeClassId, subjectId: activeSubjectId,
+    const created = await uploadNewMaterial(file, {
+      classId: activeClassId, subjectId: activeSubjectId,
       creatorId: teacher.profileId, title, type: "Modul Ajar",
     });
-    if (!matId) {
-      setToast({ message: "Gagal menyimpan materi. Coba lagi.", tone: "primary" });
+    if ("error" in created) {
+      setToast({ message: `Gagal mengunggah materi: ${created.error}`, tone: "primary" });
       setUploading(false);
       return;
     }
-    const uploadedPath = await uploadMaterialFile(file, teacher.schoolId, matId);
+    const matId = created.id;
+    const uploadedPath: string | null = created.path;
 
     setToast({ message: "Mengunggah materi dan memulai analisis AI...", tone: "primary" });
 
@@ -494,89 +510,57 @@ function computeRealClassStats(classStudents: Student[]) {
 }
 
 type OwnStudentStats = { avgScore: number; xp: number; streak: number; rank: number; classSize: number; className: string; totalAssessments: number };
+type StudentAchievementRow = { id: string; code: string; title: string; description: string; category: string; xp: number; icon: string | null; earned: boolean; earnedAt: string | null };
+type StudentWeakTopic = { topic: string; subject: string; attempted: number; accuracy: number };
+type StudentOverview = { stats: OwnStudentStats; achievements: StudentAchievementRow[]; weakTopics: StudentWeakTopic[] };
 
-// Real replacement for the studentProfile/studentProgressStats mock: computes
-// the signed-in student's own average (across every subject, unlike the
-// teacher-side dashboard's class+subject dual scoping - a student's overall
-// progress view isn't tied to one subject), real xp/streak (already real
-// columns on `students`), and a real class rank derived the same way as
-// computeRealClassStats/fetchRealClassStudents (rank by avgScore desc,
-// no-data students last).
-async function fetchOwnStudentStats(): Promise<OwnStudentStats | null> {
-  const student = await getCurrentStudent();
-  if (!student || !student.class_id) return null;
-  return fetchClassRankedStats(student.id, student.class_id);
+// Stats, class rank, achievements and weak topics come from
+// /api/student/overview: ranking needs every classmate's scores, which RLS
+// (correctly) hides from a student's own session - computing it in the
+// browser always produced "#1 dari 1". Cached per student for the tab so
+// moving between student pages doesn't refetch or flash empty values;
+// refreshStudentOverview() is called after anything that changes them.
+const _overviewCache = new Map<string, Promise<StudentOverview | null>>();
+
+function loadStudentOverview(studentId?: string): Promise<StudentOverview | null> {
+  const key = studentId ?? "self";
+  let p = _overviewCache.get(key);
+  if (!p) {
+    p = apiPost<StudentOverview>("/api/student/overview", studentId ? { studentId } : {})
+      .then(res => (res.error || !res.stats ? null : res as StudentOverview));
+    p.then(r => { if (!r) _overviewCache.delete(key); });
+    _overviewCache.set(key, p);
+  }
+  return p;
 }
 
-// Shared by a student viewing their own stats and a parent viewing a linked
-// child's stats - same ranking computation, just parameterized by whose
-// student row to resolve. `xp`/`streak_days` are real columns on `students`
-// (added by migration 007) but not yet reflected in the generated
-// supabase/types.ts, so this reads them with an explicit select + cast, the
-// same workaround fetchRealClassStudents already uses above.
-async function fetchClassRankedStats(studentId: string, classId: string): Promise<OwnStudentStats | null> {
-  const [{ data: classData }, { data: classmates }] = await Promise.all([
-    supabase.from("classes").select("name").eq("id", classId).single(),
-    supabase.from("students").select("id, xp, streak_days").eq("class_id", classId).eq("status", "ACTIVE"),
-  ]);
-  const roster = (classmates ?? []) as Array<{ id: string; xp: number; streak_days: number }>;
-  const self = roster.find(r => r.id === studentId);
-  if (!self) return null;
+function refreshStudentOverview(studentId?: string) {
+  _overviewCache.delete(studentId ?? "self");
+}
 
-  const { data: aRows } = await supabase.from("assessments").select("id").eq("class_id", classId);
-  const assessmentIds = (aRows ?? []).map(r => r.id as string);
-
-  const scoreByStudent = new Map<string, { sum: number; count: number }>();
-  if (assessmentIds.length > 0) {
-    const { data: attemptRows } = await supabase
-      .from("assessment_attempts")
-      .select("student_id, score")
-      .in("assessment_id", assessmentIds)
-      .in("status", ["submitted", "graded"]);
-    for (const row of (attemptRows ?? []) as Array<{ student_id: string; score: number | null }>) {
-      if (row.score == null) continue;
-      const cur = scoreByStudent.get(row.student_id) ?? { sum: 0, count: 0 };
-      cur.sum += row.score;
-      cur.count += 1;
-      scoreByStudent.set(row.student_id, cur);
-    }
-  }
-
-  const withScores = roster.map(r => {
-    const stat = scoreByStudent.get(r.id);
-    return { id: r.id, avgScore: stat ? stat.sum / stat.count : null };
-  });
-  const ranked = [...withScores].sort((a, b) => (b.avgScore ?? -1) - (a.avgScore ?? -1));
-  const rankMap = new Map(ranked.map((s, i) => [s.id, i + 1]));
-
-  const own = scoreByStudent.get(studentId);
-  return {
-    avgScore: own ? Math.round(own.sum / own.count) : 0,
-    xp: self.xp,
-    streak: self.streak_days,
-    rank: rankMap.get(studentId) ?? roster.length,
-    classSize: roster.length,
-    className: classData?.name ?? "-",
-    totalAssessments: own?.count ?? 0,
-  };
+/** undefined = loading, null = failed/unavailable */
+function useStudentOverview(studentId?: string | null): StudentOverview | null | undefined {
+  const [data, setData] = useState<StudentOverview | null | undefined>(undefined);
+  useEffect(() => {
+    if (studentId === null) return; // parent view still resolving the child
+    let cancelled = false;
+    setData(undefined);
+    loadStudentOverview(studentId ?? undefined).then(r => { if (!cancelled) setData(r); });
+    return () => { cancelled = true; };
+  }, [studentId]);
+  return data;
 }
 
 function useOwnStudentStats(): OwnStudentStats | null {
-  const [stats, setStats] = useState<OwnStudentStats | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    fetchOwnStudentStats().then(s => { if (!cancelled) setStats(s); });
-    return () => { cancelled = true; };
-  }, []);
-  return stats;
+  return useStudentOverview()?.stats ?? null;
 }
 
 function ownStudentStatCards(stats: OwnStudentStats | null) {
   return [
-    { label: "Rata-rata nilai", value: stats ? String(stats.avgScore) : "-", detail: "Dari asesmen yang sudah dinilai", tone: "success" as const },
-    { label: "XP terkumpul", value: stats ? stats.xp.toLocaleString("id-ID") : "-", detail: "Poin pengalaman belajar", tone: "primary" as const },
-    { label: "Streak belajar", value: stats ? `${stats.streak} hari` : "-", detail: "Konsistensi belajar harian", tone: "neutral" as const },
-    { label: "Peringkat kelas", value: stats ? `#${stats.rank}` : "-", detail: stats?.className ?? "-", tone: "warning" as const },
+    { label: "Rata-rata nilai", value: stats ? String(stats.avgScore) : "…", detail: "Dari asesmen yang sudah dinilai", tone: "success" as const },
+    { label: "XP terkumpul", value: stats ? stats.xp.toLocaleString("id-ID") : "…", detail: "Poin pengalaman belajar", tone: "primary" as const },
+    { label: "Streak belajar", value: stats ? `${stats.streak} hari` : "…", detail: "Konsistensi belajar harian", tone: "neutral" as const },
+    { label: "Peringkat kelas", value: stats ? `#${stats.rank}` : "…", detail: stats ? `dari ${stats.classSize} siswa · ${stats.className}` : "…", tone: "warning" as const },
   ];
 }
 
@@ -892,16 +876,49 @@ type RealTeacherContext = {
 
 let _realTeacher: RealTeacherContext | null = null;
 let _realTeacherPromise: Promise<RealTeacherContext | null> | null = null;
+let _realTeacherLoaded = false;
 const _teacherListeners = new Set<(t: RealTeacherContext | null) => void>();
 
+// Drops every per-account module cache so switching accounts in the same
+// tab never shows the previous teacher's classes/questions.
+function resetTeacherCaches() {
+  _realTeacher = null;
+  _realTeacherPromise = null;
+  _realTeacherLoaded = false;
+  _activeClassId = "";
+  _bankKey = null;
+  _bankLoading = null;
+  _bankStore.questions = [];
+  _reviewStore.questions = [];
+  _bankLoadedKey = null;
+  _aiSettingsCache = null;
+}
+
+let _authResetAttached = false;
+function attachAuthReset() {
+  if (_authResetAttached || typeof window === "undefined") return;
+  _authResetAttached = true;
+  supabase.auth.onAuthStateChange(event => {
+    if (event === "SIGNED_OUT") resetTeacherCaches();
+  });
+}
+
 async function loadRealTeacher(): Promise<RealTeacherContext | null> {
+  attachAuthReset();
   if (_realTeacher) return _realTeacher;
   if (_realTeacherPromise) return _realTeacherPromise;
   _realTeacherPromise = (async () => {
     const profile = await getCurrentProfile();
-    if (!profile) return null;
-    const teacher = await getCurrentTeacher();
-    if (!teacher) return null;
+    const teacher = profile ? await getCurrentTeacher() : null;
+    if (!profile || !teacher) {
+      // Never cache a "no teacher" result: it usually just means the
+      // session wasn't restored yet, and caching it is what left the
+      // class bar empty until a full page refresh.
+      _realTeacherPromise = null;
+      _realTeacherLoaded = true;
+      _teacherListeners.forEach(fn => fn(null));
+      return null;
+    }
     const { data } = await supabase
       .from("teacher_assignments")
       .select("class_id, subject_id, classes(name, year), subjects(name)")
@@ -931,12 +948,14 @@ async function loadRealTeacher(): Promise<RealTeacherContext | null> {
       profileId: profile.id,
       name: profile.full_name,
       schoolId: teacher.school_id,
-      classes: Array.from(classMap.values()),
+      classes: Array.from(classMap.values()).sort((a, b) => a.name.localeCompare(b.name, "id")),
       subjects: Array.from(subjectMap.values()),
       assignments,
     };
     _realTeacher = result;
+    _realTeacherLoaded = true;
     _teacherListeners.forEach(fn => fn(result));
+    _classListeners.forEach(fn => fn(getActiveClassId()));
     return result;
   })();
   return _realTeacherPromise;
@@ -945,11 +964,20 @@ async function loadRealTeacher(): Promise<RealTeacherContext | null> {
 function useRealTeacher(): RealTeacherContext | null {
   const [teacher, setTeacher] = useState<RealTeacherContext | null>(_realTeacher);
   useEffect(() => {
-    if (!_realTeacher) loadRealTeacher();
     _teacherListeners.add(setTeacher);
+    // Sync with whatever resolved between this component's first render
+    // and its effect running (otherwise that update would be missed).
+    if (_realTeacher) setTeacher(_realTeacher);
+    else loadRealTeacher().then(t => setTeacher(t));
     return () => { _teacherListeners.delete(setTeacher); };
   }, []);
   return teacher;
+}
+
+/** true once the teacher context has finished loading (successfully or not). */
+function useRealTeacherStatus(): { teacher: RealTeacherContext | null; loading: boolean } {
+  const teacher = useRealTeacher();
+  return { teacher, loading: !teacher && !_realTeacherLoaded };
 }
 
 // ── Active class store (backed by the real teacher's real assigned classes) ──
@@ -957,8 +985,13 @@ let _activeClassId = "";
 const _classListeners = new Set<(id: string) => void>();
 
 function getActiveClassId(): string {
-  if (!_activeClassId && _realTeacher && _realTeacher.classes.length > 0) {
-    _activeClassId = lsGet<string>("catchup_active_class") ?? _realTeacher.classes[0].id;
+  const classes = _realTeacher?.classes ?? [];
+  // A remembered id from another account / a class this teacher no longer
+  // teaches would otherwise leave nothing selected and every page empty.
+  if (_activeClassId && !classes.some(c => c.id === _activeClassId)) _activeClassId = "";
+  if (!_activeClassId && classes.length > 0) {
+    const stored = lsGet<string>("catchup_active_class");
+    _activeClassId = stored && classes.some(c => c.id === stored) ? stored : classes[0].id;
   }
   return _activeClassId;
 }
@@ -971,12 +1004,10 @@ function changeActiveClass(id: string) {
 
 function useActiveClass(): [string, typeof changeActiveClass] {
   const teacher = useRealTeacher();
-  const [cls, setCls] = useState<string>("");
+  const [cls, setCls] = useState<string>(() => getActiveClassId());
   useEffect(() => {
-    if (teacher && teacher.classes.length > 0) {
-      setCls(getActiveClassId());
-    }
     _classListeners.add(setCls);
+    if (teacher) setCls(getActiveClassId());
     return () => { _classListeners.delete(setCls); };
   }, [teacher]);
   return [cls, changeActiveClass];
@@ -1041,6 +1072,8 @@ const _bankStore: { questions: QuestionBankEntry[] } = { questions: [] };
 const _reviewStore: { questions: PendingQuestion[] } = { questions: [] };
 const _bankListeners = new Set<() => void>();
 
+let _bankLoadedKey: string | null = null;
+
 async function loadBankAndReview(classId: string, subjectId: string): Promise<void> {
   const key = `${classId}:${subjectId}`;
   if (_bankKey === key) return _bankLoading ?? Promise.resolve();
@@ -1053,9 +1086,11 @@ async function loadBankAndReview(classId: string, subjectId: string): Promise<vo
       .eq("subject_id", subjectId)
       .in("status", ["active", "pending"])
       .order("created_at", { ascending: false });
+    if (_bankKey !== key) return; // superseded by a newer class/subject
     const rows = (data ?? []) as unknown as BankRow[];
     _bankStore.questions = rows.filter(r => r.status === "active").map(bankRowToEntry);
     _reviewStore.questions = rows.filter(r => r.status === "pending").map(bankRowToPending);
+    _bankLoadedKey = key;
     _bankListeners.forEach(fn => fn());
   })();
   return _bankLoading;
@@ -1066,7 +1101,7 @@ function refreshBankAndReview(classId: string, subjectId: string): Promise<void>
   return loadBankAndReview(classId, subjectId);
 }
 
-function useQuestionBank(classId: string | undefined, subjectId: string | undefined): { bank: QuestionBankEntry[]; pending: PendingQuestion[] } {
+function useQuestionBank(classId: string | undefined, subjectId: string | undefined): { bank: QuestionBankEntry[]; pending: PendingQuestion[]; loading: boolean } {
   const [, bump] = useState(0);
   useEffect(() => {
     if (!classId || !subjectId) return;
@@ -1075,7 +1110,83 @@ function useQuestionBank(classId: string | undefined, subjectId: string | undefi
     _bankListeners.add(listener);
     return () => { _bankListeners.delete(listener); };
   }, [classId, subjectId]);
-  return { bank: _bankStore.questions, pending: _reviewStore.questions };
+  const key = classId && subjectId ? `${classId}:${subjectId}` : null;
+  // Only expose rows that belong to the requested class+subject; while a
+  // different key is still loading, report loading instead of stale rows.
+  const ready = key !== null && _bankLoadedKey === key;
+  return {
+    bank: ready ? _bankStore.questions : [],
+    pending: ready ? _reviewStore.questions : [],
+    loading: !ready,
+  };
+}
+
+// ── Teacher AI settings (teacher_ai_settings, one row per teacher) ────────────
+type TeacherAiSettings = {
+  activeStyle: "socratic" | "explicit" | "analogy";
+  grounding: boolean; autoReview: boolean; parentReports: boolean; bloomBalance: boolean; notifyWeak: boolean;
+};
+const DEFAULT_AI_SETTINGS: TeacherAiSettings = {
+  activeStyle: "socratic", grounding: true, autoReview: false, parentReports: true, bloomBalance: true, notifyWeak: true,
+};
+let _aiSettingsCache: { teacherId: string; settings: TeacherAiSettings } | null = null;
+
+async function fetchTeacherAiSettings(teacherId: string): Promise<TeacherAiSettings> {
+  if (_aiSettingsCache?.teacherId === teacherId) return _aiSettingsCache.settings;
+  const { data } = await supabase
+    .from("teacher_ai_settings")
+    .select("active_style, grounding_required, auto_review, parent_reports, bloom_balance, notify_weak")
+    .eq("teacher_id", teacherId)
+    .maybeSingle();
+  const settings: TeacherAiSettings = data ? {
+    activeStyle: (data.active_style ?? "socratic") as TeacherAiSettings["activeStyle"],
+    grounding: data.grounding_required,
+    autoReview: data.auto_review,
+    parentReports: data.parent_reports,
+    bloomBalance: data.bloom_balance,
+    notifyWeak: data.notify_weak,
+  } : DEFAULT_AI_SETTINGS;
+  _aiSettingsCache = { teacherId, settings };
+  return settings;
+}
+
+async function saveTeacherAiSettings(teacherId: string, settings: TeacherAiSettings): Promise<string | null> {
+  const { error } = await supabase.from("teacher_ai_settings").upsert({
+    teacher_id: teacherId,
+    active_style: settings.activeStyle,
+    grounding_required: settings.grounding,
+    auto_review: settings.autoReview,
+    parent_reports: settings.parentReports,
+    bloom_balance: settings.bloomBalance,
+    notify_weak: settings.notifyWeak,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: "teacher_id" });
+  if (error) return error.message;
+  _aiSettingsCache = { teacherId, settings };
+  return null;
+}
+
+// Authenticated POST to one of this app's own API routes (the server
+// verifies the bearer token itself). Returns the parsed JSON body, or an
+// { error } object for network/HTTP failures, so callers can always show
+// the real reason instead of failing silently.
+async function apiPost<T = Record<string, unknown>>(path: string, body: unknown): Promise<T & { error?: string }> {
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const res = await fetch(path, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({})) as T & { error?: string };
+    if (!res.ok && !json.error) return { ...json, error: `Server error (${res.status})` };
+    return json;
+  } catch (err) {
+    return { error: err instanceof Error ? err.message : "Gagal menghubungi server" } as T & { error?: string };
+  }
 }
 
 // Insert freshly AI-generated questions straight into the review queue (status 'pending')
@@ -1085,6 +1196,9 @@ async function insertPendingQuestions(
   sourceMaterialId?: string,
 ): Promise<void> {
   if (!raw.length) return;
+  // "Auto-approve soal AI" (Konfigurasi AI): skip the review queue and put
+  // AI questions straight into the active bank.
+  const autoApprove = _realTeacher ? (await fetchTeacherAiSettings(_realTeacher.id)).autoReview : false;
   const rows = raw.map(q => ({
     school_id: schoolId,
     class_id: classId,
@@ -1099,7 +1213,7 @@ async function insertPendingQuestions(
     options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
     correct_answer: (["A", "B", "C", "D", "E"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D" | "E",
     explanation: q.explanation,
-    status: "pending" as const,
+    status: (autoApprove ? "active" : "pending") as "active" | "pending",
     source_title: sourceTitle,
     source_material_id: sourceMaterialId ?? null,
   }));
@@ -1110,9 +1224,11 @@ async function insertPendingQuestions(
 async function saveManualQToBank(
   q: typeof EMPTY_MANUAL_Q,
   schoolId: string, classId: string, subjectId: string, creatorId: string,
-): Promise<boolean> {
-  if (!q.text.trim() || !q.optA.trim() || !q.optB.trim() || !q.optC.trim() || !q.optD.trim() || !q.topic.trim()) return false;
-  await supabase.from("questions").insert({
+): Promise<string | null> {
+  if (!q.text.trim() || !q.optA.trim() || !q.optB.trim() || !q.optC.trim() || !q.optD.trim() || !q.topic.trim()) {
+    return "Lengkapi semua kolom bertanda *.";
+  }
+  const { error } = await supabase.from("questions").insert({
     school_id: schoolId,
     class_id: classId,
     subject_id: subjectId,
@@ -1129,46 +1245,87 @@ async function saveManualQToBank(
     status: "active",
     source_title: "Manual Guru",
   });
+  if (error) return error.message;
   await refreshBankAndReview(classId, subjectId);
-  return true;
+  return null;
 }
 
-async function approveBankQuestion(merged: PendingQuestion, classId: string, subjectId: string): Promise<void> {
-  await supabase.from("questions").update({
-    status: "active",
-    question: merged.question,
-    topic: merged.topic,
-    subtopic: merged.topic,
-    difficulty: merged.difficulty,
-    explanation: merged.explanation,
-    correct_answer: merged.correctAnswer,
-    options: { A: merged.optionA, B: merged.optionB, C: merged.optionC, D: merged.optionD },
-  }).eq("id", merged.id);
-  await refreshBankAndReview(classId, subjectId);
+// Shared manual-question form used by Bank Soal and the assessment
+// builder's "Tambah Soal Baru" dialog - every * field turns red with a
+// message if submit is attempted while it's empty.
+function ManualQuestionFields({ value, onChange, errorFor }: {
+  value: typeof EMPTY_MANUAL_Q;
+  onChange: (next: typeof EMPTY_MANUAL_Q) => void;
+  errorFor: (k: keyof typeof EMPTY_MANUAL_Q) => string | null;
+}) {
+  const set = (k: keyof typeof EMPTY_MANUAL_Q, v: string) => onChange({ ...value, [k]: v });
+  return (
+    <>
+      <FormField label="Pertanyaan" required error={errorFor("text")}>
+        <textarea rows={3} placeholder="Tuliskan pertanyaan di sini..."
+          value={value.text} onChange={e => set("text", e.target.value)}
+          className={fieldClass(!!errorFor("text"), "resize-none")} />
+      </FormField>
+      {(["A", "B", "C", "D"] as const).map(opt => {
+        const k = `opt${opt}` as "optA" | "optB" | "optC" | "optD";
+        return (
+          <FormField key={opt} label={`Pilihan ${opt}`} required error={errorFor(k)}>
+            <input type="text" placeholder={`Jawaban pilihan ${opt}`}
+              value={value[k]} onChange={e => set(k, e.target.value)}
+              className={fieldClass(!!errorFor(k))} />
+          </FormField>
+        );
+      })}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <FormField label="Kunci Jawaban" required>
+          <SelectField value={value.correct} options={ANSWER_OPTIONS} onChange={v => set("correct", v)} />
+        </FormField>
+        <FormField label="Kesulitan" required>
+          <SelectField value={value.difficulty} options={DIFFICULTY_OPTIONS} onChange={v => set("difficulty", v)} />
+        </FormField>
+        <FormField label="Topik" required error={errorFor("topic")}>
+          <input type="text" placeholder="Contoh: Bab 3 - Perkalian"
+            value={value.topic} onChange={e => set("topic", e.target.value)}
+            className={fieldClass(!!errorFor("topic"))} />
+        </FormField>
+      </div>
+      <FormField label="Pembahasan (opsional)">
+        <textarea rows={2} placeholder="Jelaskan jawaban benar..."
+          value={value.explanation} onChange={e => set("explanation", e.target.value)}
+          className={fieldClass(false, "resize-none")} />
+      </FormField>
+    </>
+  );
 }
 
-// "Tolak" hard-deletes the row (never a soft status flip) - safe only
-// because this only ever targets 'pending' rows, which by construction
-// have never been approved into an assessment/practice session, so there
-// is nothing for the ON DELETE CASCADE chain to destroy. The RLS DELETE
-// policy (migration 010) enforces status='pending' server-side too.
-async function rejectBankQuestion(id: string, classId: string, subjectId: string): Promise<void> {
-  await supabase.from("questions").delete().eq("id", id).eq("status", "pending");
-  await refreshBankAndReview(classId, subjectId);
+const MANUAL_Q_REQUIRED: (keyof typeof EMPTY_MANUAL_Q)[] = ["text", "optA", "optB", "optC", "optD", "topic"];
+
+function pendingToApprovePayload(m: PendingQuestion) {
+  return {
+    id: m.id, question: m.question, topic: m.topic, difficulty: m.difficulty, explanation: m.explanation,
+    correctAnswer: m.correctAnswer, options: { A: m.optionA, B: m.optionB, C: m.optionC, D: m.optionD },
+  };
 }
 
-async function approveAllBankQuestions(merged: PendingQuestion[], classId: string, subjectId: string): Promise<void> {
-  await Promise.all(merged.map(m => supabase.from("questions").update({
-    status: "active",
-    question: m.question,
-    topic: m.topic,
-    subtopic: m.topic,
-    difficulty: m.difficulty,
-    explanation: m.explanation,
-    correct_answer: m.correctAnswer,
-    options: { A: m.optionA, B: m.optionB, C: m.optionC, D: m.optionD },
-  }).eq("id", m.id)));
+// Approve/reject go through /api/teacher/questions/review (see that route
+// for why a direct client UPDATE was unreliable). Each returns an error
+// message, or null on success.
+async function approveBankQuestion(merged: PendingQuestion, classId: string, subjectId: string): Promise<string | null> {
+  const res = await apiPost("/api/teacher/questions/review", { action: "approve", questions: [pendingToApprovePayload(merged)] });
   await refreshBankAndReview(classId, subjectId);
+  return res.error ?? null;
+}
+
+async function rejectBankQuestion(id: string, classId: string, subjectId: string): Promise<string | null> {
+  const res = await apiPost("/api/teacher/questions/review", { action: "reject", ids: [id] });
+  await refreshBankAndReview(classId, subjectId);
+  return res.error ?? null;
+}
+
+async function approveAllBankQuestions(merged: PendingQuestion[], classId: string, subjectId: string): Promise<string | null> {
+  const res = await apiPost("/api/teacher/questions/review", { action: "approve", questions: merged.map(pendingToApprovePayload) });
+  await refreshBankAndReview(classId, subjectId);
+  return res.error ?? null;
 }
 
 // ── Real assessments (assessments + assessment_questions tables) ──────────────
@@ -1198,10 +1355,12 @@ function assessmentRowToSaved(row: AssessmentRow, classId: string, questionCount
     totalQuestions: questionCount,
     duration: row.duration_minutes ?? 0,
     scheduledFor: row.open_at
-      ? new Date(row.open_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })
-      : new Date(row.created_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
-    openAt: row.open_at ?? undefined,
-    closeAt: row.close_at ?? undefined,
+      ? new Date(parseDbTime(row.open_at)).toLocaleString("id-ID", { day: "numeric", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
+      : new Date(parseDbTime(row.created_at)).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+    // Normalised to explicit-UTC ISO strings so every consumer can safely
+    // use `new Date(openAt)` (see parseDbTime).
+    openAt: row.open_at ? new Date(parseDbTime(row.open_at)).toISOString() : undefined,
+    closeAt: row.close_at ? new Date(parseDbTime(row.close_at)).toISOString() : undefined,
     avgScore,
     participants,
     status: "Terjadwal",
@@ -1249,7 +1408,7 @@ async function fetchStudentAssessments(): Promise<SavedAssessment[]> {
   return rows.map(r => {
     const saved = assessmentRowToSaved(r, "", r.assessment_questions?.[0]?.count ?? 0);
     const done = attempts.some(a => a.assessment_id === r.id && (a.status === "submitted" || a.status === "graded"));
-    const closed = r.close_at ? now > new Date(r.close_at).getTime() : false;
+    const closed = r.close_at ? now > parseDbTime(r.close_at) : false;
     saved.status = done ? "Selesai" : closed ? "Berlangsung" : "Terjadwal";
     return saved;
   });
@@ -1391,13 +1550,15 @@ async function fetchAttemptReviewDetail(attemptId: string): Promise<ReviewQuesti
 type MaterialRow = {
   id: string; title: string; type: string | null; file_url: string | null; file_size: number | null;
   ai_processed: boolean; status: string; class_id: string | null; subject_id: string | null; created_at: string;
+  // migration 016 - absent on databases that haven't applied it yet
+  chapter?: string | null; academic_year?: string | null; publisher?: string | null; source_type?: string | null;
 };
 
 // Extends the shared mock Material shape with the real Storage path -
 // structurally assignable anywhere a plain Material is expected (MaterialCard
 // etc.), while still letting callers that need to download/re-extract the
 // file get at file_url without a parallel lookup structure.
-type MaterialWithFile = Material & { fileUrl: string | null };
+type MaterialWithFile = Material & { fileUrl: string | null; academicYear?: string; sourceType?: string };
 
 function materialRowToMock(row: MaterialRow, className: string | undefined, subjectName: string, questionCount: number): MaterialWithFile {
   return {
@@ -1413,6 +1574,10 @@ function materialRowToMock(row: MaterialRow, className: string | undefined, subj
     aiProcessed: row.ai_processed,
     questionsGenerated: questionCount,
     fileUrl: row.file_url,
+    chapter: row.chapter ?? undefined,
+    publisher: row.publisher ?? undefined,
+    academicYear: row.academic_year ?? undefined,
+    sourceType: row.source_type ?? undefined,
   };
 }
 
@@ -1426,7 +1591,7 @@ function materialRowToMock(row: MaterialRow, className: string | undefined, subj
 async function fetchTeacherMaterials(classId: string | null, subjectId: string | undefined, classNamesById: Map<string, string>, subjectNamesById: Map<string, string>): Promise<MaterialWithFile[]> {
   let query = supabase
     .from("materials")
-    .select("id, title, type, file_url, file_size, ai_processed, status, class_id, subject_id, created_at")
+    .select("*")
     .order("created_at", { ascending: false });
   if (classId) {
     query = query.eq("class_id", classId);
@@ -1460,15 +1625,28 @@ async function fetchTeacherMaterials(classId: string | null, subjectId: string |
 async function fetchStudentMaterialsReal(): Promise<MaterialWithFile[]> {
   const { data } = await supabase
     .from("materials")
-    .select("id, title, type, file_url, file_size, ai_processed, status, class_id, subject_id, created_at, subjects(name)")
+    .select("*, subjects(name)")
     .eq("status", "active")
     .order("created_at", { ascending: false });
   type Row = MaterialRow & { subjects: { name: string } | null };
   return ((data ?? []) as unknown as Row[]).map(r => materialRowToMock(r, undefined, r.subjects?.name ?? "Umum", 0));
 }
 
-async function insertMaterial(params: { schoolId: string; classId: string; subjectId: string; creatorId: string; title: string; type: string }): Promise<string | null> {
-  const { data, error } = await supabase.from("materials").insert({
+// PostgREST/Postgres "unknown column" errors - lets inserts keep working
+// (minus the new optional fields) on a database where migration 016 hasn't
+// been applied yet, instead of failing the whole upload.
+function isMissingColumnError(error: { code?: string; message?: string } | null): boolean {
+  return !!error && (error.code === "PGRST204" || error.code === "42703" || /column .* does not exist|Could not find the '.*' column/i.test(error.message ?? ""));
+}
+
+async function insertMaterial(params: {
+  schoolId: string; classId: string; subjectId: string; creatorId: string; title: string; type: string;
+  chapter?: string; academicYear?: string; publisher?: string; sourceType?: string;
+  id?: string; fileUrl?: string; fileSize?: number;
+}): Promise<{ id: string } | { error: string }> {
+  const base = {
+    ...(params.id ? { id: params.id } : {}),
+    ...(params.fileUrl ? { file_url: params.fileUrl, file_size: params.fileSize ?? null } : {}),
     school_id: params.schoolId,
     class_id: params.classId,
     subject_id: params.subjectId,
@@ -1476,35 +1654,79 @@ async function insertMaterial(params: { schoolId: string; classId: string; subje
     title: params.title,
     type: params.type,
     status: "active",
-  }).select("id").single();
-  if (error || !data) return null;
-  return data.id;
+  };
+  const meta = {
+    chapter: params.chapter || null,
+    academic_year: params.academicYear || null,
+    publisher: params.publisher || null,
+    source_type: params.sourceType || null,
+  };
+  let { data, error } = await supabase.from("materials").insert({ ...base, ...meta }).select("id").single();
+  if (isMissingColumnError(error)) {
+    ({ data, error } = await supabase.from("materials").insert(base).select("id").single());
+  }
+  if (error || !data) return { error: error?.message ?? "Gagal menyimpan materi" };
+  return { id: data.id as string };
 }
 
-async function uploadMaterialFile(file: File, schoolId: string, materialId: string): Promise<string | null> {
-  const ext = file.name.split(".").pop() || "bin";
-  const path = `${schoolId}/${materialId}.${ext}`;
-  const { error } = await supabase.storage.from("materials").upload(path, file, { upsert: true });
-  if (error) return null;
-  await supabase.from("materials").update({ file_url: path, file_size: file.size }).eq("id", materialId);
-  return path;
+// Upload first, then create the row: the server hands out a signed upload
+// URL (see /api/materials/upload-url for why direct uploads always failed),
+// and the materials row is only inserted once the file is really stored -
+// so a material can never again exist without its file.
+async function uploadNewMaterial(file: File, params: {
+  classId: string; subjectId: string; creatorId: string; title: string; type: string;
+  chapter?: string; academicYear?: string; publisher?: string; sourceType?: string;
+}): Promise<{ id: string; path: string } | { error: string }> {
+  const ticket = await apiPost<{ materialId: string; path: string; token: string; schoolId: string }>(
+    "/api/materials/upload-url",
+    { classId: params.classId, subjectId: params.subjectId, fileName: file.name, fileSize: file.size },
+  );
+  if (ticket.error || !ticket.token) return { error: ticket.error ?? "Gagal menyiapkan unggahan" };
+
+  const { error: uploadError } = await supabase.storage.from("materials").uploadToSignedUrl(ticket.path, ticket.token, file);
+  if (uploadError) return { error: `File gagal diunggah: ${uploadError.message}` };
+
+  const inserted = await insertMaterial({
+    ...params, schoolId: ticket.schoolId, id: ticket.materialId, fileUrl: ticket.path, fileSize: file.size,
+  });
+  if ("error" in inserted) return inserted;
+  return { id: inserted.id, path: ticket.path };
+}
+
+async function updateMaterialMetadata(id: string, meta: { type: string; chapter: string; academicYear: string; publisher: string; sourceType: string }): Promise<string | null> {
+  const { data, error } = await supabase.from("materials").update({
+    type: meta.type,
+    chapter: meta.chapter || null,
+    academic_year: meta.academicYear || null,
+    publisher: meta.publisher || null,
+    source_type: meta.sourceType || null,
+    updated_at: new Date().toISOString(),
+  }).eq("id", id).select("id");
+  if (isMissingColumnError(error)) return "Kolom metadata belum ada di database. Jalankan migrasi 016 terlebih dahulu.";
+  if (error) return error.message;
+  // RLS silently filters the UPDATE to zero rows for non-uploaders.
+  if (!data || data.length === 0) return "Hanya guru yang mengunggah materi ini yang bisa mengubahnya.";
+  return null;
 }
 
 async function markMaterialProcessed(materialId: string): Promise<void> {
   await supabase.from("materials").update({ ai_processed: true, ai_processed_at: new Date().toISOString() }).eq("id", materialId);
 }
 
-// Download always goes through a fresh short-lived signed URL - `materials`
-// is a private bucket (supabase/migrations/008), never a public one.
-async function downloadMaterialFile(fileUrl: string, fallbackName: string): Promise<void> {
-  const { data } = await supabase.storage.from("materials").createSignedUrl(fileUrl, 60);
-  if (!data?.signedUrl) return;
+// Downloads go through /api/materials/download-url, which checks access
+// and returns a short-lived URL served as an attachment, so the browser
+// saves the file instead of navigating away from the app. Returns an error
+// message to show, or null on success.
+async function downloadMaterialFile(materialId: string): Promise<string | null> {
+  const res = await apiPost<{ url: string; fileName: string }>("/api/materials/download-url", { materialId });
+  if (res.error || !res.url) return res.error ?? "Gagal mengunduh materi";
   const a = document.createElement("a");
-  a.href = data.signedUrl;
-  a.download = fallbackName;
+  a.href = res.url;
+  a.rel = "noopener";
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  return null;
 }
 
 // Publish/save-draft: creates the assessments row, then (for AI-sourced
@@ -1516,11 +1738,13 @@ async function createAssessment(params: {
   schoolId: string; classId: string; subjectId: string; creatorId: string;
   title: string; type: string; durationMinutes: number;
   openAt: string; closeAt: string; status: "draft" | "published";
+  distributionMode: "uniform" | "adaptive"; questionCount: number;
+  randomizeQuestions?: boolean; randomizeOptions?: boolean; allowReview?: boolean;
   questionSource: "ai" | "bank";
   aiQuestions: typeof questionBank;
   bankQuestionIds: string[];
-}): Promise<{ id: string } | null> {
-  const { data: assessmentRow, error } = await supabase.from("assessments").insert({
+}): Promise<{ id: string } | { error: string }> {
+  const base = {
     school_id: params.schoolId,
     class_id: params.classId,
     subject_id: params.subjectId,
@@ -1531,8 +1755,22 @@ async function createAssessment(params: {
     close_at: params.closeAt ? new Date(params.closeAt).toISOString() : null,
     duration_minutes: params.durationMinutes,
     status: params.status,
+    randomize_questions: params.randomizeQuestions ?? false,
+    randomize_options: params.randomizeOptions ?? false,
+    allow_review: params.allowReview ?? true,
+  };
+  let { data: assessmentRow, error } = await supabase.from("assessments").insert({
+    ...base,
+    distribution_mode: params.distributionMode,
+    question_count: params.questionCount,
   }).select("id").single();
-  if (error || !assessmentRow) return null;
+  if (isMissingColumnError(error)) {
+    if (params.distributionMode === "adaptive") {
+      return { error: "Mode adaptif butuh migrasi database 016. Jalankan supabase/migrations/016_form_metadata_and_adaptive_assessments.sql terlebih dahulu." };
+    }
+    ({ data: assessmentRow, error } = await supabase.from("assessments").insert(base).select("id").single());
+  }
+  if (error || !assessmentRow) return { error: error?.message ?? "Gagal menyimpan asesmen" };
 
   let questionIds: string[] = [];
   if (params.questionSource === "ai" && params.aiQuestions.length > 0) {
@@ -1542,8 +1780,8 @@ async function createAssessment(params: {
       subject_id: params.subjectId,
       creator_id: params.creatorId,
       source: "ai_generated" as const,
-      topic: q.topic,
-      subtopic: q.topic,
+      topic: q.topic || "Umum",
+      subtopic: q.topic || "Umum",
       difficulty: q.difficulty,
       bloom_level: "Menerapkan" as const,
       question: q.question,
@@ -1553,7 +1791,8 @@ async function createAssessment(params: {
       status: "active" as const,
       source_title: q.source,
     }));
-    const { data: inserted } = await supabase.from("questions").insert(rows).select("id");
+    const { data: inserted, error: qError } = await supabase.from("questions").insert(rows).select("id");
+    if (qError) return { error: `Asesmen tersimpan, tetapi soal gagal disimpan: ${qError.message}` };
     questionIds = (inserted ?? []).map(r => r.id);
     await refreshBankAndReview(params.classId, params.subjectId);
   } else {
@@ -1562,15 +1801,16 @@ async function createAssessment(params: {
 
   if (questionIds.length > 0) {
     const aqRows = questionIds.map((qid, i) => ({
-      assessment_id: assessmentRow.id,
+      assessment_id: assessmentRow!.id,
       question_id: qid,
       question_order: i + 1,
       status: "approved" as const,
     }));
-    await supabase.from("assessment_questions").insert(aqRows);
+    const { error: linkError } = await supabase.from("assessment_questions").insert(aqRows);
+    if (linkError) return { error: `Asesmen tersimpan, tetapi soal gagal ditautkan: ${linkError.message}` };
   }
 
-  return { id: assessmentRow.id };
+  return { id: assessmentRow.id as string };
 }
 
 // ── Completed results store (student answers + scores) ─────────────────────────
@@ -1638,8 +1878,20 @@ function deleteIncorrectQuestion(id: string) {
 
 // ── Teacher Materials ─────────────────────────────────────────────────────────
 
+const MATERIAL_TYPE_OPTIONS: SelectOption[] = ["Modul Ajar", "Buku Teks", "PPT", "RPP", "LKS", "Ringkasan Materi", "Lainnya"].map(v => ({ value: v, label: v }));
+const MATERIAL_SOURCE_OPTIONS: SelectOption[] = ["Buku wajib", "Materi guru", "Internal sekolah", "Lainnya"].map(v => ({ value: v, label: v }));
+const MATERIAL_ACCEPT = ".pdf,.ppt,.pptx,.doc,.docx";
+const MATERIAL_MAX_BYTES = 50 * 1024 * 1024;
+
+// Indonesian school years start in July: Oct 2026 -> "2026/2027".
+function academicYearOptions(): SelectOption[] {
+  const now = new Date();
+  const start = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+  return [start - 1, start, start + 1].map(y => ({ value: `${y}/${y + 1}`, label: `${y}/${y + 1}` }));
+}
+
 function TeacherMaterials() {
-  const teacher = useRealTeacher();
+  const { teacher, loading: teacherLoading } = useRealTeacherStatus();
   const [activeClass] = useActiveClass();
   const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name;
   // The active class may have more than one subject assigned to this
@@ -1650,10 +1902,13 @@ function TeacherMaterials() {
   const activeSubjectId = activeAssignment?.subjectId;
   const [showAllClasses, setShowAllClasses] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
-  const [dragOver, setDragOver] = useState(false);
+  const [pageDragOver, setPageDragOver] = useState(false);
+  const dragDepth = React.useRef(0);
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [fileError, setFileError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
-  const [uploadedMaterials, setUploadedMaterials] = useState<MaterialWithFile[]>([]);
+  // null = still loading (never render "Belum ada materi" before we know)
+  const [uploadedMaterials, setUploadedMaterials] = useState<MaterialWithFile[] | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialWithFile | null>(null);
   const [confirmProcessId, setConfirmProcessId] = useState<string | null>(null);
@@ -1661,36 +1916,112 @@ function TeacherMaterials() {
   const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
   const [editMeta, setEditMeta] = useState(false);
-  const [materialFiles, setMaterialFiles] = useState<Record<string, File>>({});
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [materialQuestions, setMaterialQuestions] = useState<Record<string, typeof questionBank>>({});
   const [generatingMore, setGeneratingMore] = useState<string | null>(null);
+  const [metaForm, setMetaForm] = useState({ type: "Modul Ajar", chapter: "", academicYear: "", publisher: "", sourceType: "" });
+  const [savingMeta, setSavingMeta] = useState(false);
+  const metaValidation = useRequiredFields(metaForm, ["chapter", "academicYear"]);
+
+  // Upload form
+  const emptyUploadForm = { classId: "", subjectId: "", chapter: "", academicYear: "", type: "Modul Ajar", publisher: "", sourceType: "" };
+  const [uploadForm, setUploadForm] = useState(emptyUploadForm);
+  const uploadValidation = useRequiredFields(
+    { ...uploadForm, file: uploadedFile ? "ok" : "" },
+    ["file", "classId", "subjectId", "chapter", "academicYear"],
+  );
+  const uploadClassOptions: SelectOption[] = (teacher?.classes ?? []).map(c => ({ value: c.id, label: c.name }));
+  const uploadSubjectOptions: SelectOption[] = (teacher?.assignments ?? [])
+    .filter(a => a.classId === uploadForm.classId)
+    .map(a => ({ value: a.subjectId, label: a.subjectName }));
+
+  function openUpload(file?: File | null) {
+    setUploadForm(prev => {
+      const classId = prev.classId || activeClass;
+      const subjects = (teacher?.assignments ?? []).filter(a => a.classId === classId);
+      const subjectId = prev.subjectId && subjects.some(x => x.subjectId === prev.subjectId)
+        ? prev.subjectId
+        : subjects.length === 1 ? subjects[0].subjectId : "";
+      return { ...prev, classId, subjectId };
+    });
+    if (file !== undefined) pickFile(file);
+    setShowUpload(true);
+  }
+
+  function closeUpload() {
+    setShowUpload(false);
+    setUploadedFile(null);
+    setFileError(null);
+    setUploadForm(emptyUploadForm);
+    uploadValidation.reset();
+  }
+
+  function pickFile(file: File | null) {
+    if (!file) { setUploadedFile(null); return; }
+    const ext = "." + (file.name.split(".").pop() ?? "").toLowerCase();
+    if (!MATERIAL_ACCEPT.split(",").includes(ext)) {
+      setUploadedFile(null);
+      setFileError("Format tidak didukung. Gunakan PDF, PPT/PPTX, atau DOC/DOCX.");
+      return;
+    }
+    if (file.size > MATERIAL_MAX_BYTES) {
+      setUploadedFile(null);
+      setFileError("Ukuran file melebihi 50 MB.");
+      return;
+    }
+    setFileError(null);
+    setUploadedFile(file);
+  }
+
+  // The whole page is a drop target: dragging a file anywhere over Pustaka
+  // Materi shows an overlay, and dropping it opens the upload form with the
+  // file already attached.
+  const pageDropHandlers = {
+    onDragEnter: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes("Files")) return;
+      e.preventDefault();
+      dragDepth.current += 1;
+      setPageDragOver(true);
+    },
+    onDragOver: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes("Files")) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    },
+    onDragLeave: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes("Files")) return;
+      dragDepth.current = Math.max(0, dragDepth.current - 1);
+      if (dragDepth.current === 0) setPageDragOver(false);
+    },
+    onDrop: (e: React.DragEvent) => {
+      if (!e.dataTransfer.types.includes("Files")) return;
+      e.preventDefault();
+      dragDepth.current = 0;
+      setPageDragOver(false);
+      openUpload(e.dataTransfer.files[0] ?? null);
+    },
+  };
 
   const reloadMaterials = React.useCallback(() => {
-    if (!teacher) { setUploadedMaterials([]); return; }
+    if (!teacher) { setUploadedMaterials(teacherLoading ? null : []); return; }
+    if (teacher.classes.length === 0) { setUploadedMaterials([]); return; }
+    if (!showAllClasses && !activeClass) { setUploadedMaterials(null); return; }
+    setUploadedMaterials(null);
+    let cancelled = false;
     const classNamesById = new Map(teacher.classes.map(c => [c.id, c.name]));
     const subjectNamesById = new Map(teacher.subjects.map(s => [s.id, s.name]));
-    fetchTeacherMaterials(showAllClasses ? null : activeClass, activeSubjectId, classNamesById, subjectNamesById).then(setUploadedMaterials);
-  }, [teacher, activeClass, activeSubjectId, showAllClasses]);
+    fetchTeacherMaterials(showAllClasses ? null : activeClass, activeSubjectId, classNamesById, subjectNamesById)
+      .then(rows => { if (!cancelled) setUploadedMaterials(rows); });
+    return () => { cancelled = true; };
+  }, [teacher, teacherLoading, activeClass, activeSubjectId, showAllClasses]);
 
-  useEffect(() => { reloadMaterials(); }, [reloadMaterials]);
-
-  // Cancel pending upload form when teacher switches class
-  const prevClassRef = React.useRef<string | null>(null);
-  useEffect(() => {
-    if (prevClassRef.current !== null && prevClassRef.current !== activeClass && activeClass) {
-      if (showUpload) {
-        setShowUpload(false);
-        setUploadedFile(null);
-        setToast({ message: "Form upload dibatalkan karena kamu berpindah kelas.", tone: "primary" });
-      }
-    }
-    prevClassRef.current = activeClass;
-  }, [activeClass, showUpload]);
+  useEffect(() => reloadMaterials(), [reloadMaterials]);
 
   // showAllClasses drives reloadMaterials directly (a real re-fetch across
   // every class this teacher is assigned to, RLS-scoped) rather than a
   // client-side filter over an already-fetched list.
-  const allMaterials = uploadedMaterials;
+  const materialsLoading = uploadedMaterials === null;
+  const allMaterials = uploadedMaterials ?? [];
 
   function handleProcessAI(id: string) {
     setConfirmProcessId(id);
@@ -1701,8 +2032,16 @@ function TeacherMaterials() {
     append = false,
     storagePathOverride?: string,
     matOverride?: { title: string; subject: string },
+    target?: { classId: string; subjectId: string },
   ): Promise<number> {
     const mat = matOverride ?? allMaterials.find(m => m.id === id);
+    const listMat = allMaterials.find(m => m.id === id);
+    // Questions belong to the material's own class+subject, not whatever
+    // class happens to be active in the banner right now.
+    const targetClassId = target?.classId ?? listMat?.classId ?? activeClass;
+    const targetSubjectId = target?.subjectId
+      ?? teacher?.assignments.find(x => x.classId === targetClassId && x.subjectName === listMat?.subject)?.subjectId
+      ?? activeSubjectId;
     const storagePath = storagePathOverride ?? (mat && "fileUrl" in mat ? (mat as MaterialWithFile).fileUrl ?? undefined : undefined);
 
     let rawQuestions: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> = [];
@@ -1778,8 +2117,8 @@ function TeacherMaterials() {
     // Push to the real review queue (status 'pending') - teacher must approve
     // on Tinjau Soal AI before these enter the bank. Linked back to this real
     // material id now that materials are real rows too.
-    if (teacher && activeClass && activeSubjectId) {
-      await insertPendingQuestions(rawQuestions, teacher.schoolId, activeClass, activeSubjectId, teacher.profileId, mat?.title ?? "AI Generated", id);
+    if (teacher && targetClassId && targetSubjectId) {
+      await insertPendingQuestions(rawQuestions, teacher.schoolId, targetClassId, targetSubjectId, teacher.profileId, mat?.title ?? "AI Generated", id);
     }
 
     const total = (append ? existingCount : 0) + generated.length;
@@ -1795,7 +2134,7 @@ function TeacherMaterials() {
     setProcessedIds(prev => new Set([...prev, id]));
     if (count > 0) {
       await markMaterialProcessed(id);
-      setUploadedMaterials(prev => prev.map(m => m.id === id ? { ...m, aiProcessed: true, questionsGenerated: count } : m));
+      setUploadedMaterials(prev => (prev ?? []).map(m => m.id === id ? { ...m, aiProcessed: true, questionsGenerated: count } : m));
     }
   }
 
@@ -1803,160 +2142,198 @@ function TeacherMaterials() {
   const isDialogProcessed = m ? (m.aiProcessed || processedIds.has(m.id)) : false;
   const isDialogProcessing = m ? processingIds.has(m.id) : false;
 
+  async function submitUpload() {
+    if (!uploadValidation.validate() || !teacher || !uploadedFile) return;
+    const { classId, subjectId } = uploadForm;
+    const className = teacher.classes.find(c => c.id === classId)?.name;
+    const subjectName = teacher.assignments.find(x => x.classId === classId && x.subjectId === subjectId)?.subjectName ?? "Umum";
+    setUploading(true);
+    const capturedFile = uploadedFile;
+    const title = capturedFile.name.replace(/\.[^/.]+$/, "");
+
+    // Upload first; the row is only created once the file is stored.
+    const created = await uploadNewMaterial(capturedFile, {
+      classId, subjectId, creatorId: teacher.profileId, title,
+      type: uploadForm.type || "Modul Ajar",
+      chapter: uploadForm.chapter.trim(), academicYear: uploadForm.academicYear,
+      publisher: uploadForm.publisher.trim(), sourceType: uploadForm.sourceType,
+    });
+    if ("error" in created) {
+      setToast({ message: `Gagal mengunggah materi: ${created.error}`, tone: "primary" });
+      setUploading(false);
+      return;
+    }
+    const matId = created.id;
+    const uploadedPath = created.path;
+
+    const newMat: MaterialWithFile = {
+      id: matId,
+      title,
+      type: (uploadForm.type || "Modul Ajar") as MaterialType,
+      subject: subjectName,
+      classId,
+      className,
+      chapter: uploadForm.chapter.trim(),
+      publisher: uploadForm.publisher.trim() || undefined,
+      academicYear: uploadForm.academicYear,
+      sourceType: uploadForm.sourceType || undefined,
+      uploadedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
+      pages: 0,
+      status: "Diproses",
+      aiProcessed: false,
+      questionsGenerated: 0,
+      fileUrl: uploadedPath,
+    };
+    // Only show it in the current list if it belongs to the list's scope.
+    if (showAllClasses || (classId === activeClass && subjectId === activeSubjectId)) {
+      setUploadedMaterials(prev => [newMat, ...(prev ?? [])]);
+    }
+
+    closeUpload();
+    setToast({ message: "Mengunggah materi dan memulai analisis AI...", tone: "primary" });
+
+    try {
+      await fetch("/api/summarize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ materialTitle: title, topic: uploadForm.chapter.trim() || title, subject: subjectName }),
+      });
+    } catch { /* metadata summary is best-effort, doesn't block the flow */ }
+    setUploadedMaterials(prev => (prev ?? []).map(mat => mat.id === matId ? { ...mat, status: "Aktif" as Material["status"] } : mat));
+
+    setProcessingIds(prev => new Set([...prev, matId]));
+    setToast({ message: "AI sedang membaca isi materi dan membuat soal...", tone: "primary" });
+    const count = await generateQuestionsFromMaterial(
+      matId, false,
+      uploadedPath ?? undefined,
+      { title, subject: subjectName },
+      { classId, subjectId },
+    );
+    setProcessingIds(prev => { const next = new Set(prev); next.delete(matId); return next; });
+    setProcessedIds(prev => new Set([...prev, matId]));
+    if (count > 0) {
+      await markMaterialProcessed(matId);
+      setUploadedMaterials(prev => (prev ?? []).map(mat => mat.id === matId ? { ...mat, aiProcessed: true, questionsGenerated: count } : mat));
+      setToast({ message: `${count} soal berhasil diekstrak dari materi "${title}"`, tone: "success" });
+    }
+    setUploading(false);
+  }
+
   return (
-    <div className="space-y-6">
+    <div className="relative space-y-6 min-h-[calc(100dvh-12rem)]" {...pageDropHandlers}>
+      {pageDragOver && (
+        <div className="pointer-events-none fixed inset-0 z-[55] flex items-center justify-center bg-primary/10 backdrop-blur-[1px]">
+          <div className="rounded-card border-2 border-dashed border-primary bg-surface px-10 py-8 text-center shadow-xl">
+            <Upload className="mx-auto h-8 w-8 text-primary" />
+            <p className="mt-3 text-[15px] font-bold text-ink">Lepaskan file untuk mengunggah</p>
+            <p className="mt-1 text-[12px] text-ink-secondary">PDF, PPT, DOCX · Maks. 50 MB</p>
+          </div>
+        </div>
+      )}
+
       <PageHeader
         eyebrow="Pustaka Materi"
         title="Manajemen Materi"
-        description="Unggah buku teks, PPT, RPP, dan modul ajar. AI mengekstrak soal secara otomatis."
+        description="Unggah buku teks, PPT, RPP, dan modul ajar. AI mengekstrak soal secara otomatis. Tarik file ke mana saja di halaman ini untuk mengunggah."
         actions={
-          <Button variant="default" className="h-8 text-[12px]" onClick={() => setShowUpload(!showUpload)}>
+          <Button variant="default" className="h-8 text-[12px]" disabled={!teacher} onClick={() => showUpload ? closeUpload() : openUpload()}>
             <Upload className="mr-1.5 h-3.5 w-3.5" />Unggah Materi
           </Button>
         }
       />
 
       {showUpload && (
-        <div className="rounded-card border-2 border-dashed border-primary/30 bg-primary-soft p-8">
-          <input ref={fileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx" className="hidden"
-            onChange={e => setUploadedFile(e.target.files?.[0] ?? null)} />
-          <div className="flex flex-col items-center gap-4 text-center">
+        <div className="rounded-card border border-primary/30 bg-primary-soft p-6 space-y-5">
+          <input ref={fileInputRef} type="file" accept={MATERIAL_ACCEPT} className="hidden"
+            onChange={e => { pickFile(e.target.files?.[0] ?? null); e.target.value = ""; }} />
+
+          <div>
             <div
+              role="button"
+              tabIndex={0}
+              onClick={() => fileInputRef.current?.click()}
+              onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInputRef.current?.click(); } }}
               className={cn(
-                "flex h-16 w-16 items-center justify-center rounded-2xl border-2 border-dashed transition-colors",
-                dragOver ? "border-primary bg-primary/10" : "border-primary/30 bg-white"
+                "flex flex-col items-center gap-3 rounded-[10px] border-2 border-dashed px-6 py-8 text-center cursor-pointer transition-colors",
+                uploadValidation.errorFor("file") || fileError ? "border-danger bg-danger/5" : "border-primary/30 bg-white hover:border-primary/60",
               )}
-              onDragOver={e => { e.preventDefault(); setDragOver(true); }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={e => { e.preventDefault(); setDragOver(false); setUploadedFile(e.dataTransfer.files[0] ?? null); }}
             >
-              <Upload className="h-7 w-7 text-primary" />
+              {uploadedFile ? (
+                <div className="flex w-full max-w-md items-center gap-2 rounded-[8px] border border-success/30 bg-success-light px-3 py-2 text-left">
+                  <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-[12px] font-semibold text-ink truncate">{uploadedFile.name}</div>
+                    <div className="text-[10px] text-ink-secondary">{(uploadedFile.size / 1024).toFixed(0)} KB · klik untuk ganti file</div>
+                  </div>
+                  <button type="button" aria-label="Hapus file" onClick={e => { e.stopPropagation(); setUploadedFile(null); }} className="text-ink-tertiary hover:text-danger shrink-0">
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              ) : (
+                <>
+                  <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-primary/20 bg-primary-soft">
+                    <Upload className="h-6 w-6 text-primary" />
+                  </div>
+                  <div>
+                    <p className="text-[14px] font-bold text-ink">Tarik & lepas file di mana saja di halaman ini <span className="text-danger">*</span></p>
+                    <p className="text-[12px] text-ink-secondary mt-1">atau klik untuk memilih · PDF, PPT, DOCX · Maks. 50 MB</p>
+                  </div>
+                </>
+              )}
             </div>
-            <div>
-              <p className="text-[15px] font-bold text-ink">Tarik & lepas file di sini</p>
-              <p className="text-[12px] text-ink-secondary mt-1">PDF, PPT, DOCX · Maks. 50 MB per file</p>
-            </div>
-            <Button variant="outline" className="h-8 text-[12px]" onClick={() => fileInputRef.current?.click()}>Pilih File</Button>
+            {(fileError || uploadValidation.errorFor("file")) && (
+              <p role="alert" className="mt-1 text-[11px] font-medium text-danger">{fileError ?? "Tolong pilih file materi terlebih dahulu"}</p>
+            )}
           </div>
-          {uploadedFile && (
-            <div className="mt-3 flex items-center gap-2 rounded-[8px] border border-success/30 bg-success-light px-3 py-2">
-              <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
-              <div className="flex-1 min-w-0">
-                <div className="text-[12px] font-semibold text-ink truncate">{uploadedFile.name}</div>
-                <div className="text-[10px] text-ink-secondary">{(uploadedFile.size / 1024).toFixed(0)} KB</div>
-              </div>
-              <button onClick={() => setUploadedFile(null)} className="text-ink-tertiary hover:text-danger shrink-0">
-                <X className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          )}
-          <div className="mt-4 flex items-center gap-2 rounded-[8px] border border-primary/20 bg-primary-soft px-3 py-2">
-            <span className="text-[11px] font-semibold text-primary">Materi untuk kelas:</span>
-            <span className="text-[12px] font-bold text-primary">{activeClassName ?? "-"}</span>
-            <span className="text-[10px] text-primary/60 ml-1">(sesuai kelas aktif di atas)</span>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-primary/10 pt-4">
+            <FormField label="Kelas" required error={uploadValidation.errorFor("classId")}>
+              <SelectField value={uploadForm.classId} options={uploadClassOptions} placeholder="Pilih kelas..."
+                invalid={!!uploadValidation.errorFor("classId")}
+                onChange={v => {
+                  const subjects = (teacher?.assignments ?? []).filter(x => x.classId === v);
+                  setUploadForm(p => ({ ...p, classId: v, subjectId: subjects.length === 1 ? subjects[0].subjectId : "" }));
+                }} />
+            </FormField>
+            <FormField label="Mata Pelajaran" required error={uploadValidation.errorFor("subjectId")}>
+              <SelectField value={uploadForm.subjectId} options={uploadSubjectOptions}
+                placeholder={uploadForm.classId ? "Pilih mata pelajaran..." : "Pilih kelas dulu"}
+                emptyText="Kamu belum mengajar mapel di kelas ini"
+                disabled={!uploadForm.classId}
+                invalid={!!uploadValidation.errorFor("subjectId")}
+                onChange={v => setUploadForm(p => ({ ...p, subjectId: v }))} />
+            </FormField>
+            <FormField label="Bab / Topik" required error={uploadValidation.errorFor("chapter")}>
+              <input type="text" placeholder="Contoh: Bab 3 - Perkalian"
+                value={uploadForm.chapter} onChange={e => setUploadForm(p => ({ ...p, chapter: e.target.value }))}
+                className={fieldClass(!!uploadValidation.errorFor("chapter"), "bg-white")} />
+            </FormField>
+            <FormField label="Tahun Ajaran" required error={uploadValidation.errorFor("academicYear")}>
+              <SelectField value={uploadForm.academicYear} options={academicYearOptions()} placeholder="Pilih tahun ajaran..."
+                invalid={!!uploadValidation.errorFor("academicYear")}
+                onChange={v => setUploadForm(p => ({ ...p, academicYear: v }))} />
+            </FormField>
+            <FormField label="Tipe Materi">
+              <SelectField value={uploadForm.type} options={MATERIAL_TYPE_OPTIONS}
+                onChange={v => setUploadForm(p => ({ ...p, type: v }))} />
+            </FormField>
+            <FormField label="Sumber (opsional)">
+              <SelectField value={uploadForm.sourceType} options={MATERIAL_SOURCE_OPTIONS} placeholder="Pilih sumber..."
+                onChange={v => setUploadForm(p => ({ ...p, sourceType: v }))} />
+            </FormField>
+            <FormField label="Penerbit (opsional)" className="md:col-span-2">
+              <input type="text" placeholder="Erlangga, Grafindo, dst."
+                value={uploadForm.publisher} onChange={e => setUploadForm(p => ({ ...p, publisher: e.target.value }))}
+                className={fieldClass(false, "bg-white")} />
+            </FormField>
           </div>
-          <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4 border-t border-primary/10 pt-4">
-            {[
-              { label: "Tipe Materi *", ph: "Buku Teks, PPT, RPP, Modul Ajar..." },
-              { label: "Mata Pelajaran *", ph: activeSubjectName },
-              { label: "Bab/Topik *", ph: "Fungsi Kuadrat" },
-              { label: "Tahun Ajaran *", ph: "2025/2026" },
-              { label: "Penerbit (opsional)", ph: "Erlangga, Grafindo, dst." },
-            ].map(f => (
-              <div key={f.label}>
-                <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">{f.label}</label>
-                <input type="text" placeholder={f.ph}
-                  className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
-              </div>
-            ))}
-            <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Sumber *</label>
-              <input type="text" placeholder="Buku wajib / materi guru / internal"
-                className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
-            </div>
-          </div>
-          <div className="mt-4 flex justify-end gap-2">
-            <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowUpload(false); setUploadedFile(null); }}>Batal</Button>
-            <Button variant="default" className="h-8 text-[12px]" disabled={uploading}
-              onClick={async () => {
-                if (!teacher || !activeClass || !activeSubjectId) {
-                  setToast({ message: "Pilih kelas aktif terlebih dahulu.", tone: "primary" });
-                  return;
-                }
-                setUploading(true);
-                const capturedFile = uploadedFile;
-                const fileName = capturedFile?.name ?? "Materi Baru";
-                const title = fileName.replace(/\.[^/.]+$/, "");
 
-                const matId = await insertMaterial({
-                  schoolId: teacher.schoolId, classId: activeClass, subjectId: activeSubjectId,
-                  creatorId: teacher.profileId, title, type: "Modul Ajar",
-                });
-                if (!matId) {
-                  setToast({ message: "Gagal menyimpan materi. Coba lagi.", tone: "primary" });
-                  setUploading(false);
-                  return;
-                }
-
-                const newMat: MaterialWithFile = {
-                  id: matId,
-                  title,
-                  type: "Modul Ajar",
-                  subject: activeSubjectName,
-                  classId: activeClass,
-                  className: activeClassName,
-                  uploadedAt: new Date().toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }),
-                  pages: 0,
-                  status: "Diproses",
-                  aiProcessed: false,
-                  questionsGenerated: 0,
-                  fileUrl: null,
-                };
-                setUploadedMaterials(prev => [newMat, ...prev]);
-
-                // Keep the file in-memory for this session's own download
-                // button, and upload it to real Storage - the extraction
-                // call below fetches it back from there server-side rather
-                // than resending the raw bytes through Vercel.
-                let uploadedPath: string | null = null;
-                if (capturedFile) {
-                  setMaterialFiles(prev => ({ ...prev, [matId]: capturedFile }));
-                  uploadedPath = await uploadMaterialFile(capturedFile, teacher.schoolId, matId);
-                }
-
-                // Close upload panel immediately so user sees the list
-                setShowUpload(false);
-                setUploadedFile(null);
-                setToast({ message: "Mengunggah materi dan memulai analisis AI...", tone: "primary" });
-
-                // Step 1: Quick summarize for metadata
-                try {
-                  await fetch("/api/summarize", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ materialTitle: title, topic: title, subject: activeSubjectName }),
-                  });
-                } catch { /* metadata summary is best-effort, doesn't block the flow */ }
-                setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, status: "Aktif" as Material["status"] } : m));
-
-                // Step 2: Generate real questions from file content
-                setProcessingIds(prev => new Set([...prev, matId]));
-                setToast({ message: "AI sedang membaca isi materi dan membuat soal...", tone: "primary" });
-                const count = await generateQuestionsFromMaterial(
-                  matId, false,
-                  uploadedPath ?? undefined,
-                  { title, subject: activeSubjectName },
-                );
-                setProcessingIds(prev => { const next = new Set(prev); next.delete(matId); return next; });
-                setProcessedIds(prev => new Set([...prev, matId]));
-                if (count > 0) {
-                  await markMaterialProcessed(matId);
-                  setUploadedMaterials(prev => prev.map(m => m.id === matId ? { ...m, aiProcessed: true, questionsGenerated: count } : m));
-                  setToast({ message: `${count} soal berhasil diekstrak dari materi "${title}"`, tone: "success" });
-                }
-
-                setUploading(false);
-              }}>
+          <div className="flex items-center justify-end gap-3">
+            {uploadValidation.attempted && !uploadValidation.isValid && (
+              <span className="mr-auto text-[12px] font-medium text-danger">Tolong lengkapi kolom bertanda * sebelum mengunggah.</span>
+            )}
+            <Button variant="outline" className="h-8 text-[12px]" onClick={closeUpload} disabled={uploading}>Batal</Button>
+            <Button variant="default" className="h-8 text-[12px]" disabled={uploading} onClick={submitUpload}>
               {uploading ? (
                 <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />Mengunggah...</>
               ) : (
@@ -1970,16 +2347,16 @@ function TeacherMaterials() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
           { label: "Total materi", value: `${allMaterials.length}`, detail: "Aktif & draf", tone: "neutral" as const },
-          { label: "Diproses AI", value: `${allMaterials.filter(mat => mat.aiProcessed).length + processedIds.size}`, detail: "Dari total materi", tone: "success" as const },
+          { label: "Diproses AI", value: `${allMaterials.filter(mat => mat.aiProcessed || processedIds.has(mat.id)).length}`, detail: "Dari total materi", tone: "success" as const },
           { label: "Soal diekstrak", value: allMaterials.reduce((s, mat) => s + mat.questionsGenerated, 0).toString(), detail: "Siap digunakan", tone: "primary" as const },
-          { label: "Menunggu proses", value: `${Math.max(0, allMaterials.filter(mat => !mat.aiProcessed && mat.status !== "Draf").length - processedIds.size)}`, detail: "Dalam antrean", tone: "warning" as const },
-        ].map(s => <StatCard key={s.label} {...s} />)}
+          { label: "Menunggu proses", value: `${allMaterials.filter(mat => !mat.aiProcessed && !processedIds.has(mat.id) && mat.status !== "Draf").length}`, detail: "Dalam antrean", tone: "warning" as const },
+        ].map(s => <StatCard key={s.label} {...s} value={materialsLoading ? "…" : s.value} />)}
       </div>
 
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="flex items-center justify-between border-b border-border px-5 py-3.5 gap-3 flex-wrap">
           <h2 className="text-[14px] font-bold text-ink">
-            Daftar Materi — {activeClassName ?? "…"} ({allMaterials.length})
+            Daftar Materi — {showAllClasses ? "Semua Kelas" : activeClassName ?? "…"} {!materialsLoading && `(${allMaterials.length})`}
           </h2>
           <button
             onClick={() => setShowAllClasses(v => !v)}
@@ -1994,27 +2371,23 @@ function TeacherMaterials() {
           </button>
         </div>
         <div className="p-4 space-y-3">
-          {allMaterials.length === 0 && (
+          {materialsLoading && <SectionLoading message="Memuat materi..." />}
+          {!materialsLoading && allMaterials.length === 0 && (
             <div className="py-8 text-center text-[13px] text-ink-secondary">
               Belum ada materi untuk kelas <span className="font-semibold text-ink">{activeClassName ?? "-"}</span>.
-              Unggah materi di atas untuk memulai.
+              Tarik file ke halaman ini atau klik Unggah Materi untuk memulai.
             </div>
           )}
           {allMaterials.map(mat => (
-            <div key={mat.id} className="relative">
-              <MaterialCard title={mat.title} type={mat.type} subject={mat.subject ?? ""} pages={mat.pages}
-                uploadedAt={mat.uploadedAt} status={mat.status}
-                aiProcessed={mat.aiProcessed || processedIds.has(mat.id)}
-                questionsGenerated={mat.questionsGenerated}
-                isProcessing={processingIds.has(mat.id)}
-                onClick={() => setSelectedMaterial(mat)}
-                onProcessAI={() => handleProcessAI(mat.id)} />
-              {mat.className && (
-                <span className="absolute top-3 right-12 rounded-full bg-ink/5 border border-border px-2 py-0.5 text-[10px] font-semibold text-ink-secondary">
-                  {mat.className}
-                </span>
-              )}
-            </div>
+            <MaterialCard key={mat.id} title={mat.title} type={mat.type} subject={mat.subject ?? ""} pages={mat.pages}
+              uploadedAt={mat.uploadedAt} status={mat.status}
+              className={showAllClasses ? mat.className : undefined}
+              chapter={mat.chapter}
+              aiProcessed={mat.aiProcessed || processedIds.has(mat.id)}
+              questionsGenerated={mat.questionsGenerated}
+              isProcessing={processingIds.has(mat.id)}
+              onClick={() => setSelectedMaterial(mat)}
+              onProcessAI={() => handleProcessAI(mat.id)} />
           ))}
         </div>
       </div>
@@ -2043,13 +2416,15 @@ function TeacherMaterials() {
                 <div className="grid grid-cols-2 gap-x-8 gap-y-4">
                   {[
                     { label: "Mata Pelajaran", value: m.subject },
+                    { label: "Kelas", value: m.className ?? "-" },
+                    { label: "Bab / Topik", value: m.chapter || "-" },
+                    { label: "Tahun Ajaran", value: m.academicYear || "-" },
                     { label: "Tipe Dokumen", value: m.type },
-                    { label: "Jumlah Halaman", value: `${m.pages} halaman` },
+                    { label: "Sumber", value: m.sourceType || "-" },
+                    { label: "Penerbit", value: m.publisher || "-" },
                     { label: "Tanggal Unggah", value: m.uploadedAt },
                     { label: "Diunggah oleh", value: teacher?.name ?? "-" },
                     { label: "Status", value: m.status },
-                    ...(m.publisher ? [{ label: "Penerbit", value: m.publisher }] : []),
-                    ...(m.year ? [{ label: "Tahun Terbit", value: `${m.year}` }] : []),
                   ].map(item => (
                     <div key={item.label}>
                       <div className="text-[10px] font-bold uppercase tracking-[0.08em] text-ink-tertiary mb-0.5">{item.label}</div>
@@ -2059,18 +2434,28 @@ function TeacherMaterials() {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {[
-                    { label: "Mata Pelajaran *", ph: m.subject },
-                    { label: "Tipe Materi *", ph: m.type },
-                    { label: "Bab/Topik", ph: m.chapter ?? "Fungsi Kuadrat" },
-                    { label: "Penerbit", ph: m.publisher ?? "Erlangga, Grafindo..." },
-                  ].map(f => (
-                    <div key={f.label}>
-                      <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">{f.label}</label>
-                      <input type="text" defaultValue={f.ph}
-                        className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
-                    </div>
-                  ))}
+                  <FormField label="Bab / Topik" required error={metaValidation.errorFor("chapter")}>
+                    <input type="text" placeholder="Contoh: Bab 3 - Perkalian" value={metaForm.chapter}
+                      onChange={e => setMetaForm(p => ({ ...p, chapter: e.target.value }))}
+                      className={fieldClass(!!metaValidation.errorFor("chapter"))} />
+                  </FormField>
+                  <FormField label="Tahun Ajaran" required error={metaValidation.errorFor("academicYear")}>
+                    <SelectField value={metaForm.academicYear} options={academicYearOptions()} placeholder="Pilih tahun ajaran..."
+                      invalid={!!metaValidation.errorFor("academicYear")}
+                      onChange={v => setMetaForm(p => ({ ...p, academicYear: v }))} />
+                  </FormField>
+                  <FormField label="Tipe Materi">
+                    <SelectField value={metaForm.type} options={MATERIAL_TYPE_OPTIONS} onChange={v => setMetaForm(p => ({ ...p, type: v }))} />
+                  </FormField>
+                  <FormField label="Sumber (opsional)">
+                    <SelectField value={metaForm.sourceType} options={MATERIAL_SOURCE_OPTIONS} placeholder="Pilih sumber..."
+                      onChange={v => setMetaForm(p => ({ ...p, sourceType: v }))} />
+                  </FormField>
+                  <FormField label="Penerbit (opsional)" className="md:col-span-2">
+                    <input type="text" placeholder="Erlangga, Grafindo, dst." value={metaForm.publisher}
+                      onChange={e => setMetaForm(p => ({ ...p, publisher: e.target.value }))}
+                      className={fieldClass(false)} />
+                  </FormField>
                 </div>
               )}
 
@@ -2149,7 +2534,13 @@ function TeacherMaterials() {
 
             {/* Footer */}
             <div className="shrink-0 flex items-center justify-between border-t border-border px-6 py-4">
-              <button onClick={() => setEditMeta(!editMeta)}
+              <button onClick={() => {
+                if (!editMeta) {
+                  setMetaForm({ type: m.type, chapter: m.chapter ?? "", academicYear: m.academicYear ?? "", publisher: m.publisher ?? "", sourceType: m.sourceType ?? "" });
+                  metaValidation.reset();
+                }
+                setEditMeta(!editMeta);
+              }}
                 className="flex items-center gap-1.5 text-[12px] font-semibold text-primary hover:underline">
                 <Pencil className="h-3.5 w-3.5" />
                 {editMeta ? "Batalkan" : "Edit Metadata"}
@@ -2157,22 +2548,24 @@ function TeacherMaterials() {
               <div className="flex gap-2">
                 <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setSelectedMaterial(null); setEditMeta(false); }}>Tutup</Button>
                 {editMeta
-                  ? <Button variant="default" className="h-8 text-[12px]">Simpan Perubahan</Button>
-                  : <Button variant="outline" className="h-8 text-[12px]" onClick={async () => {
-                      const file = materialFiles[m.id];
-                      if (file) {
-                        const url = URL.createObjectURL(file);
-                        const a = document.createElement("a");
-                        a.href = url; a.download = file.name; a.click();
-                        URL.revokeObjectURL(url);
-                        return;
-                      }
-                      if (m.fileUrl) {
-                        await downloadMaterialFile(m.fileUrl, m.title);
-                        return;
-                      }
-                      setToast({ message: "File tidak tersedia. Unggah ulang materi ini agar bisa diunduh.", tone: "primary" });
-                    }}><Download className="mr-1.5 h-3.5 w-3.5" />Unduh</Button>
+                  ? <Button variant="default" className="h-8 text-[12px]" disabled={savingMeta} onClick={async () => {
+                      if (!metaValidation.validate()) return;
+                      setSavingMeta(true);
+                      const err = await updateMaterialMetadata(m.id, { ...metaForm, chapter: metaForm.chapter.trim(), publisher: metaForm.publisher.trim() });
+                      setSavingMeta(false);
+                      if (err) { setToast({ message: `Gagal menyimpan: ${err}`, tone: "primary" }); return; }
+                      const patch = { type: metaForm.type as MaterialType, chapter: metaForm.chapter.trim(), academicYear: metaForm.academicYear, publisher: metaForm.publisher.trim() || undefined, sourceType: metaForm.sourceType || undefined };
+                      setUploadedMaterials(prev => (prev ?? []).map(x => x.id === m.id ? { ...x, ...patch } : x));
+                      setSelectedMaterial({ ...m, ...patch });
+                      setEditMeta(false);
+                      setToast({ message: "Metadata materi tersimpan", tone: "success" });
+                    }}>{savingMeta ? "Menyimpan..." : "Simpan Perubahan"}</Button>
+                  : <Button variant="outline" className="h-8 text-[12px]" disabled={downloadingId === m.id} onClick={async () => {
+                      setDownloadingId(m.id);
+                      const err = await downloadMaterialFile(m.id);
+                      setDownloadingId(null);
+                      if (err) setToast({ message: err, tone: "primary" });
+                    }}><Download className="mr-1.5 h-3.5 w-3.5" />{downloadingId === m.id ? "Mengunduh..." : "Unduh"}</Button>
                 }
               </div>
             </div>
@@ -2199,26 +2592,116 @@ function TeacherMaterials() {
 
 // ── Teacher Assessment Styles ─────────────────────────────────────────────────
 
+// ── Assessment style templates (assessment_style_templates) ──────────────────
+// A teacher's saved configuration for one of the built-in "Gaya Asesmen"
+// presets, stored per school (latest save wins). Used by Buat Asesmen to
+// prefill jumlah soal/durasi and to set the assessment's randomisation and
+// review flags - the only settings the exam engine actually honours.
+type StyleConfig = { duration: number; questions: number; randomizeQuestions: boolean; randomizeOptions: boolean; allowReview: boolean };
+
+const BUILTIN_STYLE_DEFAULTS: Record<string, { questions: number; duration: number }> = {
+  as1: { questions: 45, duration: 90 },
+  as2: { questions: 45, duration: 90 },
+  as3: { questions: 40, duration: 75 },
+  as4: { questions: 45, duration: 90 },
+  as5: { questions: 50, duration: 120 },
+  as6: { questions: 40, duration: 90 },
+  as7: { questions: 10, duration: 20 },
+};
+
+function defaultStyleConfig(styleId: string): StyleConfig {
+  const d = BUILTIN_STYLE_DEFAULTS[styleId] ?? { questions: 20, duration: 45 };
+  return { duration: d.duration, questions: d.questions, randomizeQuestions: true, randomizeOptions: false, allowReview: true };
+}
+
+async function fetchStyleConfig(schoolId: string, styleId: string): Promise<StyleConfig> {
+  const style = assessmentStyles.find(x => x.id === styleId);
+  if (!style) return defaultStyleConfig(styleId);
+  const { data } = await supabase
+    .from("assessment_style_templates")
+    .select("default_duration_minutes, default_question_count, randomize_questions, randomize_options, allow_review")
+    .eq("school_id", schoolId)
+    .eq("name", style.name)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (!data) return defaultStyleConfig(styleId);
+  const d = defaultStyleConfig(styleId);
+  return {
+    duration: data.default_duration_minutes ?? d.duration,
+    questions: data.default_question_count ?? d.questions,
+    randomizeQuestions: data.randomize_questions,
+    randomizeOptions: data.randomize_options,
+    allowReview: data.allow_review,
+  };
+}
+
+async function saveStyleConfig(schoolId: string, creatorId: string, styleId: string, cfg: StyleConfig): Promise<string | null> {
+  const style = assessmentStyles.find(x => x.id === styleId);
+  if (!style) return "Gaya asesmen tidak ditemukan";
+  const { error } = await supabase.from("assessment_style_templates").insert({
+    school_id: schoolId,
+    created_by: creatorId,
+    name: style.name,
+    style_type: style.styleType,
+    default_duration_minutes: cfg.duration,
+    default_question_count: cfg.questions,
+    randomize_questions: cfg.randomizeQuestions,
+    randomize_options: cfg.randomizeOptions,
+    allow_review: cfg.allowReview,
+  });
+  return error?.message ?? null;
+}
+
 function TeacherAssessmentStyles() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showUploadPaket, setShowUploadPaket] = useState(false);
   const [paketFile, setPaketFile] = useState<File | null>(null);
   const [paketDragOver, setPaketDragOver] = useState(false);
   const paketFileInputRef = React.useRef<HTMLInputElement>(null);
+  const [paketTopic, setPaketTopic] = useState("");
+  const [paketDifficulty, setPaketDifficulty] = useState("");
+  const [paketNotice, setPaketNotice] = useState<string | null>(null);
+  const paketValidation = useRequiredFields(
+    { topic: paketTopic, difficulty: paketDifficulty, file: paketFile ? "ok" : "" },
+    ["topic", "difficulty", "file"],
+  );
   const selected = assessmentStyles.find(a => a.id === selectedId) as AssessmentStyleCorpus | undefined;
-  const [config, setConfig] = useState({
-    duration: 90, questions: 50,
-    allowBack: true, showTimer: true, showPalette: true,
-    fullscreenRequired: true, randomizeQuestions: true, randomizeOptions: false,
-    negativeMark: false, partialScoring: false,
-    adaptiveDifficulty: true, groundingRequired: true,
-  });
-  function tog(key: keyof typeof config) {
-    setConfig(prev => ({ ...prev, [key]: !prev[key] }));
+  const { teacher } = useRealTeacherStatus();
+  const [config, setConfig] = useState<StyleConfig | null>(null);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configAttempted, setConfigAttempted] = useState(false);
+  const [configToast, setConfigToast] = useState<{ message: string; tone: "success" | "danger" } | null>(null);
+
+  // Load the saved configuration whenever a style is opened.
+  useEffect(() => {
+    setConfig(null);
+    setConfigAttempted(false);
+    if (!selectedId || !teacher) return;
+    let cancelled = false;
+    fetchStyleConfig(teacher.schoolId, selectedId).then(c => { if (!cancelled) setConfig(c); });
+    return () => { cancelled = true; };
+  }, [selectedId, teacher]);
+
+  type ToggleKey = "randomizeQuestions" | "randomizeOptions" | "allowReview";
+  function tog(key: ToggleKey) {
+    setConfig(prev => prev ? { ...prev, [key]: !prev[key] } : prev);
   }
 
-  function ConfigRow({ id, label, desc }: { id: keyof typeof config; label: string; desc?: string }) {
-    const val = config[id] as boolean;
+  const durationErr = config && (!Number.isInteger(config.duration) || config.duration < 1 || config.duration > 600) ? "Isi 1–600 menit" : null;
+  const questionsErr = config && (!Number.isInteger(config.questions) || config.questions < 1 || config.questions > 100) ? "Isi 1–100 soal" : null;
+
+  async function saveConfig() {
+    setConfigAttempted(true);
+    if (!config || !teacher || !selectedId || durationErr || questionsErr) return;
+    setConfigSaving(true);
+    const err = await saveStyleConfig(teacher.schoolId, teacher.profileId, selectedId, config);
+    setConfigSaving(false);
+    setConfigToast(err ? { message: `Gagal menyimpan: ${err}`, tone: "danger" } : { message: "Konfigurasi tersimpan dan dipakai di Buat Asesmen", tone: "success" });
+  }
+
+  function ConfigRow({ id, label, desc }: { id: ToggleKey; label: string; desc?: string }) {
+    const val = !!config?.[id];
     return (
       <div className="flex items-start justify-between gap-4 py-3 border-b border-border last:border-0">
         <div className="flex-1">
@@ -2257,25 +2740,23 @@ function TeacherAssessmentStyles() {
             </button>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik *</label>
-              <input type="text" placeholder="e.g. Fungsi Kuadrat, Barisan..."
-                className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
-            </div>
-            <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tingkat Kesulitan *</label>
-              <select className="w-full rounded-[8px] border border-border bg-white px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
-                <option value="">Pilih kesulitan...</option>
-                {["Mudah", "Sedang", "Sulit", "Campuran"].map(d => <option key={d} value={d}>{d}</option>)}
-              </select>
-            </div>
+            <FormField label="Topik" required error={paketValidation.errorFor("topic")}>
+              <input type="text" placeholder="Contoh: Bab 3 - Perkalian"
+                value={paketTopic} onChange={e => setPaketTopic(e.target.value)}
+                className={fieldClass(!!paketValidation.errorFor("topic"), "bg-white")} />
+            </FormField>
+            <FormField label="Tingkat Kesulitan" required error={paketValidation.errorFor("difficulty")}>
+              <SelectField value={paketDifficulty} placeholder="Pilih kesulitan..."
+                options={["Mudah", "Sedang", "Sulit", "Campuran"].map(d => ({ value: d, label: d }))}
+                invalid={!!paketValidation.errorFor("difficulty")} onChange={setPaketDifficulty} />
+            </FormField>
             <div className="md:col-span-2">
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">File Paket Soal *</label>
+              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">File Paket Soal <span className="text-danger">*</span></label>
               <input ref={paketFileInputRef} type="file" accept=".pdf,.docx,.xlsx" className="hidden"
                 onChange={e => setPaketFile(e.target.files?.[0] ?? null)} />
               <div
                 className={cn("flex items-center gap-3 rounded-[8px] border border-dashed px-4 py-4 text-center transition-colors",
-                  paketDragOver ? "border-primary bg-primary/5" : "border-primary/40 bg-white")}
+                  paketDragOver ? "border-primary bg-primary/5" : paketValidation.errorFor("file") ? "border-danger bg-danger/5" : "border-primary/40 bg-white")}
                 onDragOver={e => { e.preventDefault(); setPaketDragOver(true); }}
                 onDragLeave={() => setPaketDragOver(false)}
                 onDrop={e => { e.preventDefault(); setPaketDragOver(false); setPaketFile(e.dataTransfer.files[0] ?? null); }}>
@@ -2301,9 +2782,19 @@ function TeacherAssessmentStyles() {
               </div>
             </div>
           </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" className="h-8 text-[12px]" onClick={() => setShowUploadPaket(false)}>Batal</Button>
-            <Button variant="default" className="h-8 text-[12px]">
+          {paketValidation.errorFor("file") && <p className="text-[11px] font-medium text-danger -mt-2">Tolong pilih file paket soal</p>}
+          {paketNotice && <AlertPanel tone="warning" title="Belum tersedia">{paketNotice}</AlertPanel>}
+          <div className="flex items-center justify-end gap-2">
+            {paketValidation.attempted && !paketValidation.isValid && (
+              <span className="mr-auto text-[12px] font-medium text-danger">Tolong lengkapi kolom bertanda *.</span>
+            )}
+            <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowUploadPaket(false); paketValidation.reset(); setPaketNotice(null); }}>Batal</Button>
+            <Button variant="default" className="h-8 text-[12px]" onClick={() => {
+              if (!paketValidation.validate()) return;
+              // No backend for past-paper packages exists yet - say so
+              // instead of pretending the upload succeeded.
+              setPaketNotice("Penyimpanan paket soal belum didukung server. Untuk sekarang, unggah file soal lewat Pustaka Materi agar AI bisa mengekstrak soalnya.");
+            }}>
               <Upload className="mr-1.5 h-3.5 w-3.5" />Unggah Paket
             </Button>
           </div>
@@ -2370,61 +2861,39 @@ function TeacherAssessmentStyles() {
                 </button>
               </div>
 
+              {!config ? <SectionLoading message="Memuat konfigurasi..." /> : (
               <div className="p-5 space-y-5">
-                {/* Basic */}
                 <div>
                   <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-ink-tertiary mb-3">Pengaturan Dasar</p>
                   <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Durasi (menit)</label>
-                      <input type="number" value={config.duration}
-                        onChange={e => setConfig(prev => ({ ...prev, duration: +e.target.value }))}
-                        className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Jumlah Soal</label>
-                      <input type="number" value={config.questions}
-                        onChange={e => setConfig(prev => ({ ...prev, questions: +e.target.value }))}
-                        className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
-                    </div>
+                    <FormField label="Durasi (menit)" required error={configAttempted ? durationErr : null}>
+                      <input type="number" min={1} max={600} value={Number.isNaN(config.duration) ? "" : config.duration}
+                        onChange={e => setConfig(prev => prev ? { ...prev, duration: e.target.value === "" ? NaN : Number(e.target.value) } : prev)}
+                        className={fieldClass(configAttempted && !!durationErr)} />
+                    </FormField>
+                    <FormField label="Jumlah Soal" required error={configAttempted ? questionsErr : null}>
+                      <input type="number" min={1} max={100} value={Number.isNaN(config.questions) ? "" : config.questions}
+                        onChange={e => setConfig(prev => prev ? { ...prev, questions: e.target.value === "" ? NaN : Number(e.target.value) } : prev)}
+                        className={fieldClass(configAttempted && !!questionsErr)} />
+                    </FormField>
                   </div>
                 </div>
 
-                {/* Navigation */}
                 <div>
-                  <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-ink-tertiary mb-1">Navigasi & Tampilan</p>
-                  <ConfigRow id="allowBack" label="Siswa bisa kembali ke soal sebelumnya" />
-                  <ConfigRow id="showTimer" label="Tampilkan timer hitung mundur" />
-                  <ConfigRow id="showPalette" label="Tampilkan palet nomor soal" />
+                  <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-ink-tertiary mb-1">Pengerjaan</p>
+                  <ConfigRow id="randomizeQuestions" label="Acak urutan soal" desc="Setiap siswa mendapat urutan soal berbeda." />
+                  <ConfigRow id="randomizeOptions" label="Acak pilihan jawaban" desc="Urutan opsi A–D diacak per siswa." />
+                  <ConfigRow id="allowReview" label="Izinkan pembahasan setelah selesai" desc="Siswa bisa melihat jawaban benar dan pembahasan setelah mengumpulkan." />
                 </div>
 
-                {/* Security */}
-                <div>
-                  <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-ink-tertiary mb-1">Keamanan Ujian</p>
-                  <ConfigRow id="fullscreenRequired" label="Mode layar penuh wajib" desc="Ujian otomatis masuk fullscreen dan memperingatkan jika keluar." />
-                  <ConfigRow id="randomizeQuestions" label="Acak urutan soal" />
-                  <ConfigRow id="randomizeOptions" label="Acak pilihan jawaban" />
-                </div>
-
-                {/* Scoring */}
-                <div>
-                  <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-ink-tertiary mb-1">Penilaian</p>
-                  <ConfigRow id="negativeMark" label="Pengurangan nilai untuk jawaban salah" desc="Salah = −1/4 poin (gaya TKA resmi)." />
-                  <ConfigRow id="partialScoring" label="Penilaian sebagian (partial credit)" />
-                </div>
-
-                {/* AI */}
-                <div>
-                  <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-ink-tertiary mb-1">Pengaturan AI</p>
-                  <ConfigRow id="adaptiveDifficulty" label="Tingkat kesulitan adaptif" desc="AI menyesuaikan level soal berdasarkan performa real-time." />
-                  <ConfigRow id="groundingRequired" label="Soal hanya dari materi yang diunggah" />
-                </div>
+                <p className="text-[11px] text-ink-secondary">Konfigurasi ini dipakai otomatis saat guru di sekolahmu memilih gaya &quot;{selected.name}&quot; di Buat Asesmen.</p>
 
                 <div className="flex justify-end gap-2 pt-2">
                   <Button variant="outline" className="h-8 text-[12px]" onClick={() => setSelectedId(null)}>Batal</Button>
-                  <Button variant="default" className="h-8 text-[12px]">Simpan Konfigurasi</Button>
+                  <Button variant="default" className="h-8 text-[12px]" disabled={configSaving} onClick={saveConfig}>{configSaving ? "Menyimpan..." : "Simpan Konfigurasi"}</Button>
                 </div>
               </div>
+              )}
             </div>
           ) : (
             <div className="rounded-card border border-border bg-surface shadow-sm">
@@ -2460,11 +2929,15 @@ function TeacherAssessmentStyles() {
           )}
         </div>
       </div>
+      {configToast && <AppToast message={configToast.message} tone={configToast.tone} onDismiss={() => setConfigToast(null)} />}
     </div>
   );
 }
 
 // ── Teacher Question Bank ─────────────────────────────────────────────────────
+
+const DIFFICULTY_OPTIONS: SelectOption[] = ["Mudah", "Sedang", "Sulit"].map(d => ({ value: d, label: d }));
+const ANSWER_OPTIONS: SelectOption[] = ["A", "B", "C", "D"].map(o => ({ value: o, label: o }));
 
 const EMPTY_MANUAL_Q = { text: "", optA: "", optB: "", optC: "", optD: "", correct: "A", difficulty: "Sedang", topic: "", explanation: "" };
 
@@ -2478,8 +2951,10 @@ function TeacherQuestionBank() {
   const [manualQ, setManualQ] = useState({ ...EMPTY_MANUAL_Q });
   const [manualError, setManualError] = useState("");
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
-  const { bank: bankQs, pending: reviewQs } = useQuestionBank(activeClass, activeSubjectId);
+  const { bank: bankQs, pending: reviewQs, loading: bankLoading } = useQuestionBank(activeClass, activeSubjectId);
   const reviewCount = reviewQs.length;
+  const manualValidation = useRequiredFields(manualQ, MANUAL_Q_REQUIRED);
+  const [savingManual, setSavingManual] = useState(false);
   const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
   const [selectedStyles, setSelectedStyles] = useState<Set<string>>(new Set());
   const [selectedDifficulty, setSelectedDifficulty] = useState<string | null>(null);
@@ -2529,7 +3004,7 @@ function TeacherQuestionBank() {
           { label: "Disetujui", value: `${bankQs.filter(q => q.status === "Disetujui").length}`, detail: "Siap digunakan", tone: "success" as const },
           { label: "Perlu tinjauan", value: `${reviewCount}`, detail: "Menunggu guru", tone: "warning" as const },
           { label: "Rata-rata SR", value: bankQs.length ? `${Math.round(bankQs.reduce((s, q) => s + q.successRate, 0) / bankQs.length)}%` : "—", detail: "Tingkat sukses", tone: "primary" as const },
-        ].map(s => <StatCard key={s.label} {...s} />)}
+        ].map(s => <StatCard key={s.label} {...s} value={bankLoading ? "…" : s.value} />)}
       </div>
 
       <div className="flex items-center gap-3 rounded-[10px] border border-border bg-surface px-4 py-2.5 shadow-sm">
@@ -2626,8 +3101,9 @@ function TeacherQuestionBank() {
       )}
 
       <div className="space-y-3">
-        {filtered.map(q => <QuestionBankRow key={q.id} entry={q} />)}
-        {filtered.length === 0 && (
+        {bankLoading && <SectionLoading message="Memuat bank soal..." />}
+        {!bankLoading && filtered.map(q => <QuestionBankRow key={q.id} entry={q} />)}
+        {!bankLoading && filtered.length === 0 && (
           <EmptyState
             icon={Database}
             title={bankQs.length === 0 ? "Bank soal masih kosong" : "Tidak ada soal ditemukan"}
@@ -2645,68 +3121,30 @@ function TeacherQuestionBank() {
           <div className="relative w-full max-w-2xl rounded-card border border-border bg-surface shadow-xl max-h-[90vh] flex flex-col">
             <div className="flex items-center justify-between border-b border-border px-5 py-3.5 shrink-0">
               <h2 className="text-[14px] font-bold text-ink">Tambah Soal Manual</h2>
-              <button onClick={() => { setShowManualAdd(false); setManualQ({ ...EMPTY_MANUAL_Q }); setManualError(""); }}
+              <button onClick={() => { setShowManualAdd(false); setManualQ({ ...EMPTY_MANUAL_Q }); setManualError(""); manualValidation.reset(); }}
                 className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
                 <X className="h-4 w-4" />
               </button>
             </div>
             <div className="overflow-y-auto p-5 space-y-4">
-              <div>
-                <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pertanyaan *</label>
-                <textarea rows={3} placeholder="Tuliskan pertanyaan di sini..."
-                  value={manualQ.text} onChange={e => setManualQ(p => ({ ...p, text: e.target.value }))}
-                  className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] resize-none focus:border-primary focus:outline-none" />
-              </div>
-              {(["A", "B", "C", "D"] as const).map(opt => (
-                <div key={opt}>
-                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pilihan {opt} *</label>
-                  <input type="text" placeholder={`Jawaban pilihan ${opt}`}
-                    value={manualQ[`opt${opt}` as "optA"|"optB"|"optC"|"optD"]}
-                    onChange={e => setManualQ(p => ({ ...p, [`opt${opt}`]: e.target.value }))}
-                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
-                </div>
-              ))}
-              <div className="grid grid-cols-3 gap-4">
-                <div>
-                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kunci Jawaban *</label>
-                  <select value={manualQ.correct} onChange={e => setManualQ(p => ({ ...p, correct: e.target.value }))}
-                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
-                    {["A", "B", "C", "D"].map(o => <option key={o} value={o}>{o}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kesulitan *</label>
-                  <select value={manualQ.difficulty} onChange={e => setManualQ(p => ({ ...p, difficulty: e.target.value }))}
-                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
-                    {["Mudah", "Sedang", "Sulit"].map(d => <option key={d} value={d}>{d}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik *</label>
-                  <input type="text" placeholder="Fungsi Kuadrat"
-                    value={manualQ.topic} onChange={e => setManualQ(p => ({ ...p, topic: e.target.value }))}
-                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
-                </div>
-              </div>
-              <div>
-                <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pembahasan (opsional)</label>
-                <textarea rows={2} placeholder="Jelaskan jawaban benar..."
-                  value={manualQ.explanation} onChange={e => setManualQ(p => ({ ...p, explanation: e.target.value }))}
-                  className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] resize-none focus:border-primary focus:outline-none" />
-              </div>
+              <ManualQuestionFields value={manualQ} onChange={setManualQ} errorFor={manualValidation.errorFor} />
               {manualError && <p className="text-[12px] text-danger">{manualError}</p>}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
-              <Button variant="outline" size="sm" onClick={() => { setShowManualAdd(false); setManualQ({ ...EMPTY_MANUAL_Q }); setManualError(""); }}>Batal</Button>
-              <Button variant="default" size="sm" onClick={async () => {
+              <Button variant="outline" size="sm" onClick={() => { setShowManualAdd(false); setManualQ({ ...EMPTY_MANUAL_Q }); setManualError(""); manualValidation.reset(); }}>Batal</Button>
+              <Button variant="default" size="sm" disabled={savingManual} onClick={async () => {
+                if (!manualValidation.validate()) { setManualError("Tolong lengkapi kolom bertanda *."); return; }
                 if (!teacher || !activeClass || !activeSubjectId) { setManualError("Pilih kelas aktif terlebih dahulu."); return; }
-                const ok = await saveManualQToBank(manualQ, teacher.schoolId, activeClass, activeSubjectId, teacher.profileId);
-                if (!ok) { setManualError("Lengkapi semua field bertanda * sebelum menyimpan."); return; }
+                setSavingManual(true);
+                const err = await saveManualQToBank(manualQ, teacher.schoolId, activeClass, activeSubjectId, teacher.profileId);
+                setSavingManual(false);
+                if (err) { setManualError(`Gagal menyimpan: ${err}`); return; }
                 setShowManualAdd(false);
                 setManualQ({ ...EMPTY_MANUAL_Q });
                 setManualError("");
+                manualValidation.reset();
                 setToast({ message: "Soal berhasil ditambahkan ke bank soal", tone: "success" });
-              }}>Simpan Soal</Button>
+              }}>{savingManual ? "Menyimpan..." : "Simpan Soal"}</Button>
             </div>
           </div>
         </div>
@@ -2725,23 +3163,32 @@ function TeacherQuestionReview() {
   const [activeClass] = useActiveClass();
   const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
   const activeSubjectId = activeAssignment?.subjectId;
-  const { pending: pendingQs } = useQuestionBank(activeClass, activeSubjectId);
+  const { pending: pendingQs, loading: bankLoading } = useQuestionBank(activeClass, activeSubjectId);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [confirmApproveAll, setConfirmApproveAll] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" | "danger" } | null>(null);
   const [edits, setEdits] = useState<Record<string, Partial<PendingQuestion>>>({});
+  const [busyIds, setBusyIds] = useState<Set<string>>(new Set());
+  const [approvingAll, setApprovingAll] = useState(false);
+
+  function setBusy(id: string, on: boolean) {
+    setBusyIds(prev => { const n = new Set(prev); if (on) n.add(id); else n.delete(id); return n; });
+  }
 
   async function approveQuestion(q: PendingQuestion) {
-    if (!activeClass || !activeSubjectId) return;
-    const merged: PendingQuestion = { ...q, ...edits[q.id] };
-    await approveBankQuestion(merged, activeClass, activeSubjectId);
-    setToast({ message: "Soal disetujui dan masuk ke bank soal", tone: "success" });
+    if (!activeClass || !activeSubjectId || busyIds.has(q.id)) return;
+    setBusy(q.id, true);
+    const err = await approveBankQuestion({ ...q, ...edits[q.id] }, activeClass, activeSubjectId);
+    setBusy(q.id, false);
+    setToast(err ? { message: `Gagal menyetujui soal: ${err}`, tone: "danger" } : { message: "Soal disetujui dan masuk ke bank soal", tone: "success" });
   }
 
   async function rejectQuestion(id: string) {
-    if (!activeClass || !activeSubjectId) return;
-    await rejectBankQuestion(id, activeClass, activeSubjectId);
-    setToast({ message: "Soal ditolak dan dihapus dari antrian", tone: "danger" });
+    if (!activeClass || !activeSubjectId || busyIds.has(id)) return;
+    setBusy(id, true);
+    const err = await rejectBankQuestion(id, activeClass, activeSubjectId);
+    setBusy(id, false);
+    setToast(err ? { message: `Gagal menolak soal: ${err}`, tone: "danger" } : { message: "Soal ditolak dan dihapus dari antrian", tone: "danger" });
   }
 
   const pending = pendingQs;
@@ -2753,9 +3200,23 @@ function TeacherQuestionReview() {
     setEdits(prev => ({ ...prev, [editingId]: { ...prev[editingId], [key]: val } }));
   }
 
+  const editMissing = editData ? [
+    !(editData.question as string)?.trim() && "question",
+    !(editData.optionA as string)?.trim() && "optionA",
+    !(editData.optionB as string)?.trim() && "optionB",
+    !(editData.optionC as string)?.trim() && "optionC",
+    !(editData.optionD as string)?.trim() && "optionD",
+    !(editData.topic as string)?.trim() && "topic",
+  ].filter(Boolean) as string[] : [];
+  const [editAttempted, setEditAttempted] = useState(false);
+  const editErr = (k: string) => editAttempted && editMissing.includes(k) ? "Wajib diisi" : null;
+
   function saveEdit() {
+    setEditAttempted(true);
+    if (editMissing.length > 0) return;
     setEditingId(null);
-    setToast({ message: "Soal berhasil diperbarui", tone: "success" });
+    setEditAttempted(false);
+    setToast({ message: "Perubahan disimpan. Klik Setujui untuk memasukkan ke bank soal.", tone: "success" });
   }
 
   return (
@@ -2766,25 +3227,34 @@ function TeacherQuestionReview() {
         description="Setujui atau tolak soal AI. Hanya soal yang disetujui masuk ke bank soal."
         actions={
           pending.length > 0 ? (
-            <Button variant="success" className="h-8 text-[12px]"
+            <Button variant="success" className="h-8 text-[12px]" disabled={approvingAll}
               onClick={() => setConfirmApproveAll(true)}>
-              <ShieldCheck className="mr-1.5 h-3.5 w-3.5" />Setujui Semua ({pending.length})
+              <ShieldCheck className="mr-1.5 h-3.5 w-3.5" />{approvingAll ? "Menyetujui..." : `Setujui Semua (${pending.length})`}
             </Button>
           ) : undefined
         }
       />
 
-      {pending.length > 0 ? (
+      {bankLoading ? (
+        <SectionLoading message="Memuat soal yang menunggu tinjauan..." />
+      ) : pending.length > 0 ? (
         <>
           <AlertPanel tone="primary" title={`${pending.length} soal menunggu tinjauan`}>
             Periksa konten, jawaban, dan pembahasan sebelum menyetujui.
           </AlertPanel>
           <div className="grid gap-5 lg:grid-cols-2">
             {pending.map(q => (
-              <QuestionReviewCard key={q.id} question={{ ...q, ...edits[q.id] } as PendingQuestion}
-                onApprove={() => approveQuestion({ ...q, ...edits[q.id] } as PendingQuestion)}
-                onReject={() => rejectQuestion(q.id)}
-                onEdit={() => setEditingId(q.id)} />
+              <div key={q.id} className={cn("relative transition-opacity", busyIds.has(q.id) && "pointer-events-none opacity-50")}>
+                <QuestionReviewCard question={{ ...q, ...edits[q.id] } as PendingQuestion}
+                  onApprove={() => approveQuestion({ ...q, ...edits[q.id] } as PendingQuestion)}
+                  onReject={() => rejectQuestion(q.id)}
+                  onEdit={() => { setEditAttempted(false); setEditingId(q.id); }} />
+                {busyIds.has(q.id) && (
+                  <div className="absolute inset-0 flex items-center justify-center">
+                    <span className="h-6 w-6 rounded-full border-2 border-primary border-t-transparent animate-spin" />
+                  </div>
+                )}
+              </div>
             ))}
           </div>
         </>
@@ -2812,16 +3282,17 @@ function TeacherQuestionReview() {
             </div>
             <div className="overflow-y-auto p-5 space-y-4">
               <div>
-                <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pertanyaan</label>
+                <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pertanyaan <span className="text-danger">*</span></label>
                 <textarea rows={3}
                   value={(editData.question as string) ?? ""}
                   onChange={e => patchEdit("question", e.target.value)}
-                  className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] resize-none focus:border-primary focus:outline-none" />
+                  className={fieldClass(!!editErr("question"), "resize-none")} />
+                {editErr("question") && <p className="mt-1 text-[11px] font-medium text-danger">{editErr("question")}</p>}
               </div>
               {(["optionA", "optionB", "optionC", "optionD"] as const).map((k, i) => (
                 <div key={k}>
                   <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">
-                    Pilihan {String.fromCharCode(65 + i)}
+                    Pilihan {String.fromCharCode(65 + i)} <span className="text-danger">*</span>
                     {(editData.correctAnswer as string) === String.fromCharCode(65 + i) && (
                       <span className="ml-2 text-success">(Kunci Jawaban)</span>
                     )}
@@ -2829,17 +3300,15 @@ function TeacherQuestionReview() {
                   <input type="text"
                     value={(editData[k] as string) ?? ""}
                     onChange={e => patchEdit(k, e.target.value)}
-                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+                    className={fieldClass(!!editErr(k))} />
+                  {editErr(k) && <p className="mt-1 text-[11px] font-medium text-danger">{editErr(k)}</p>}
                 </div>
               ))}
               <div>
-                <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kunci Jawaban</label>
-                <select
-                  value={(editData.correctAnswer as string) ?? "A"}
-                  onChange={e => patchEdit("correctAnswer", e.target.value)}
-                  className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
-                  {["A", "B", "C", "D", "E"].map(o => <option key={o} value={o}>{o}</option>)}
-                </select>
+                <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kunci Jawaban <span className="text-danger">*</span></label>
+                <SelectField value={(editData.correctAnswer as string) ?? "A"}
+                  options={["A", "B", "C", "D"].map(o => ({ value: o, label: o }))}
+                  onChange={v => patchEdit("correctAnswer", v)} />
               </div>
               <div>
                 <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pembahasan</label>
@@ -2850,20 +3319,18 @@ function TeacherQuestionReview() {
               </div>
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik</label>
+                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik <span className="text-danger">*</span></label>
                   <input type="text"
                     value={(editData.topic as string) ?? ""}
                     onChange={e => patchEdit("topic", e.target.value)}
-                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+                    className={fieldClass(!!editErr("topic"))} />
+                  {editErr("topic") && <p className="mt-1 text-[11px] font-medium text-danger">{editErr("topic")}</p>}
                 </div>
                 <div>
                   <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tingkat Kesulitan</label>
-                  <select
-                    value={(editData.difficulty as string) ?? "Sedang"}
-                    onChange={e => patchEdit("difficulty", e.target.value)}
-                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
-                    {["Mudah", "Sedang", "Sulit"].map(d => <option key={d} value={d}>{d}</option>)}
-                  </select>
+                  <SelectField value={(editData.difficulty as string) ?? "Sedang"}
+                    options={DIFFICULTY_OPTIONS}
+                    onChange={v => patchEdit("difficulty", v)} />
                 </div>
               </div>
             </div>
@@ -2885,8 +3352,12 @@ function TeacherQuestionReview() {
           setConfirmApproveAll(false);
           if (!activeClass || !activeSubjectId) return;
           const merged = pending.map(q => ({ ...q, ...edits[q.id] } as PendingQuestion));
-          await approveAllBankQuestions(merged, activeClass, activeSubjectId);
-          setToast({ message: `${merged.length} soal disetujui dan masuk ke bank soal`, tone: "success" });
+          setApprovingAll(true);
+          const err = await approveAllBankQuestions(merged, activeClass, activeSubjectId);
+          setApprovingAll(false);
+          setToast(err
+            ? { message: `Gagal menyetujui semua soal: ${err}`, tone: "danger" }
+            : { message: `${merged.length} soal disetujui dan masuk ke bank soal`, tone: "success" });
         }}
         onCancel={() => setConfirmApproveAll(false)}
       />
@@ -2898,37 +3369,41 @@ function TeacherQuestionReview() {
 
 // ── Teacher Assessment Builder ────────────────────────────────────────────────
 
+const ASSESSMENT_TYPE_OPTIONS: SelectOption[] = ["Kuis Guru", "UTS", "UAS", "Tes Diagnostik", "Tryout", "PR"].map(t => ({ value: t, label: t }));
+const CUSTOM_STYLE_ID = "custom";
+
+// "YYYY-MM-DDTHH:mm" in local time, for datetime-local min/value attributes.
+function toLocalInputValue(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function TeacherAssessmentBuilder() {
-  const teacher = useRealTeacher();
+  const { teacher, loading: teacherLoading } = useRealTeacherStatus();
   const [step, setStep] = useState(1);
   const steps = ["Info Dasar", "Materi & Soal", "Jadwal & Publikasi"];
   const [confirmPublish, setConfirmPublish] = useState(false);
   const [confirmSaveDraft, setConfirmSaveDraft] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" | "danger" } | null>(null);
   // Step 1 form fields
   const [formTitle, setFormTitle] = useState("");
   const [formType, setFormType] = useState("");
-  const [formSubject, setFormSubject] = useState("");
-  const [formClass, setFormClass] = useState("");
+  const [formClassId, setFormClassId] = useState("");
+  const [formSubjectId, setFormSubjectId] = useState("");
   const [formQuestionCount, setFormQuestionCount] = useState(20);
   const [formDuration, setFormDuration] = useState(45);
   // Step 3 schedule
-  const [formScheduledFor, setFormScheduledFor] = useState("");
   const [formOpenAt, setFormOpenAt] = useState("");
   const [formCloseAt, setFormCloseAt] = useState("");
+  const [step3Attempted, setStep3Attempted] = useState(false);
   // Step 2 validation error
   const [step2Error, setStep2Error] = useState("");
 
-  // Autofill defaults per style
-  const styleDefaults: Record<string, { questions: number; duration: number }> = {
-    as1: { questions: 45, duration: 90 },
-    as2: { questions: 45, duration: 90 },
-    as3: { questions: 40, duration: 75 },
-    as4: { questions: 45, duration: 90 },
-    as5: { questions: 50, duration: 120 },
-    as6: { questions: 40, duration: 90 },
-    as7: { questions: 10, duration: 20 },
-  };
+  // Autofill defaults per style (overridden by the school's saved
+  // configuration from Gaya Asesmen, loaded when a style is chosen).
+  const styleDefaults = BUILTIN_STYLE_DEFAULTS;
+  const [styleFlags, setStyleFlags] = useState({ randomizeQuestions: false, randomizeOptions: false, allowReview: true });
   const [selectedMaterials, setSelectedMaterials] = useState<Set<string>>(new Set());
   const [aiGenerating, setAiGenerating] = useState(false);
   const [aiGenerated, setAiGenerated] = useState(false);
@@ -2937,26 +3412,46 @@ function TeacherAssessmentBuilder() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<typeof questionBank[number] | null>(null);
   const [activeClass] = useActiveClass();
-  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
-  const activeSubjectId = activeAssignment?.subjectId;
-  const [materials, setMaterials] = useState<MaterialWithFile[]>([]);
-  const { bank: bankQs } = useQuestionBank(activeClass, activeSubjectId);
+  // null = still loading
+  const [materials, setMaterials] = useState<MaterialWithFile[] | null>(null);
+  const { bank: bankQs, loading: bankLoading } = useQuestionBank(formClassId || undefined, formSubjectId || undefined);
   const router = useRouter();
 
-  // Prefill subject/class defaults once the real teacher context loads (still freely editable text fields)
+  const classOptions: SelectOption[] = (teacher?.classes ?? []).map(c => ({ value: c.id, label: c.name }));
+  const subjectOptions: SelectOption[] = (teacher?.assignments ?? [])
+    .filter(a => a.classId === formClassId)
+    .map(a => ({ value: a.subjectId, label: a.subjectName }));
+
+  function chooseClass(classId: string) {
+    const subjects = (teacher?.assignments ?? []).filter(a => a.classId === classId);
+    setFormClassId(classId);
+    setFormSubjectId(prev => subjects.some(x => x.subjectId === prev) ? prev : subjects.length === 1 ? subjects[0].subjectId : "");
+  }
+
+  // Default kelas/mapel to the active class once the teacher context loads
+  // (both remain freely changeable dropdowns).
   useEffect(() => {
-    if (!teacher) return;
-    setFormSubject(prev => prev || (activeAssignment?.subjectName ?? teacher.subjects[0]?.name ?? ""));
-    setFormClass(prev => prev || (teacher.classes.find(c => c.id === activeClass)?.name ?? teacher.classes[0]?.name ?? ""));
+    if (!teacher || formClassId) return;
+    const classId = teacher.classes.some(c => c.id === activeClass) ? activeClass : teacher.classes[0]?.id;
+    if (classId) chooseClass(classId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teacher, activeClass]);
 
-  // Re-fetch materials when the active class (or its resolved subject) changes
+  // Questions/materials belong to one class+subject: changing either
+  // invalidates whatever was picked on step 2.
   useEffect(() => {
-    if (!teacher || !activeClass) { setMaterials([]); return; }
+    setSelectedQuestions(new Set());
+    setSelectedMaterials(new Set());
+    setAiGenerated(false);
+    setAiGeneratedQuestions([]);
+    if (!teacher || !formClassId || !formSubjectId) { setMaterials(teacherLoading ? null : []); return; }
+    setMaterials(null);
+    let cancelled = false;
     const classNamesById = new Map(teacher.classes.map(c => [c.id, c.name]));
     const subjectNamesById = new Map(teacher.subjects.map(s => [s.id, s.name]));
-    fetchTeacherMaterials(activeClass, activeSubjectId, classNamesById, subjectNamesById).then(setMaterials);
-  }, [teacher, activeClass, activeSubjectId]);
+    fetchTeacherMaterials(formClassId, formSubjectId, classNamesById, subjectNamesById).then(rows => { if (!cancelled) setMaterials(rows); });
+    return () => { cancelled = true; };
+  }, [teacher, teacherLoading, formClassId, formSubjectId]);
   const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(new Set());
   const [assessmentType, setAssessmentType] = useState<"uniform" | "adaptive">("uniform");
   const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
@@ -2964,8 +3459,86 @@ function TeacherAssessmentBuilder() {
   const [confirmAddToBank, setConfirmAddToBank] = useState(false);
   const [selectedStyle, setSelectedStyle] = useState<string>("");
   const styleIsLocked = !!selectedStyle && !!styleDefaults[selectedStyle];
-  const [newQ, setNewQ] = useState({ text: "", optA: "", optB: "", optC: "", optD: "", correct: "A", difficulty: "Sedang", topic: "", explanation: "" });
+  const [newQ, setNewQ] = useState({ ...EMPTY_MANUAL_Q });
+  const newQValidation = useRequiredFields(newQ, MANUAL_Q_REQUIRED);
   const selectedStyleData = assessmentStyles.find(s => s.id === selectedStyle);
+  const styleOptions: SelectOption[] = [
+    ...assessmentStyles.map(s => ({ value: s.id, label: s.name, description: `${styleDefaults[s.id]?.questions ?? "-"} soal · ${styleDefaults[s.id]?.duration ?? "-"} menit` })),
+    { value: CUSTOM_STYLE_ID, label: "Kustom (atur sendiri)", description: "Jumlah soal & durasi bebas diatur" },
+  ];
+
+  // ── Step 1 validation ──
+  const step1 = useRequiredFields(
+    { title: formTitle, type: formType, classId: formClassId, subjectId: formSubjectId, style: selectedStyle },
+    ["title", "type", "classId", "subjectId", "style"],
+  );
+  const countError = !Number.isInteger(formQuestionCount) || formQuestionCount < 1 ? "Minimal 1 soal" : formQuestionCount > 100 ? "Maksimal 100 soal" : null;
+  const durationError = !Number.isInteger(formDuration) || formDuration < 1 ? "Minimal 1 menit" : formDuration > 600 ? "Maksimal 600 menit" : null;
+  const step1Valid = step1.isValid && !countError && !durationError;
+
+  // ── Step 2 validation ──
+  // Uniform: every student gets exactly N questions. Adaptive: the chosen
+  // questions are a pool the server picks N from per student, so the pool
+  // must have at least N (more = better personalisation).
+  const selectedCount = selectedQuestions.size;
+  const step2Message =
+    selectedCount === 0 ? "Pilih soal terlebih dahulu."
+    : assessmentType === "uniform" && selectedCount !== formQuestionCount
+      ? `Harus pilih tepat ${formQuestionCount} soal sesuai jumlah soal. Saat ini: ${selectedCount} soal dipilih.`
+    : assessmentType === "adaptive" && selectedCount < formQuestionCount
+      ? `Mode adaptif butuh minimal ${formQuestionCount} soal di pool (setiap siswa mendapat ${formQuestionCount}). Saat ini: ${selectedCount} soal dipilih.`
+    : "";
+  const step2Valid = step2Message === "";
+
+  // ── Step 3 (schedule) validation ──
+  const nowMs = Date.now();
+  const openMs = formOpenAt ? new Date(formOpenAt).getTime() : NaN;
+  const closeMs = formCloseAt ? new Date(formCloseAt).getTime() : NaN;
+  const openError = !formOpenAt ? "Wajib diisi"
+    : openMs < nowMs - 5 * 60_000 ? "Waktu dibuka tidak boleh di masa lalu"
+    : null;
+  const closeError = !formCloseAt ? "Wajib diisi"
+    : !isNaN(openMs) && closeMs <= openMs ? "Waktu ditutup harus setelah waktu dibuka"
+    : !isNaN(openMs) && closeMs - openMs < formDuration * 60_000 ? `Rentang waktu harus minimal ${formDuration} menit (durasi asesmen)`
+    : null;
+  const step3Valid = !openError && !closeError;
+
+  function goToStep(target: number) {
+    if (target <= step) { setStep(target); return; }
+    if (!step1Valid) { step1.validate(); setStep(1); return; }
+    if (target >= 3 && !step2Valid) { setStep2Error(step2Message); setStep(2); return; }
+    setStep2Error("");
+    setStep(target);
+  }
+
+  async function saveAssessment(status: "draft" | "published") {
+    if (!teacher || saving) return;
+    if (!step1Valid || !step2Valid || !step3Valid) return;
+    setSaving(true);
+    const chosenAi = questionSource === "ai" ? aiGeneratedQuestions.filter(q => selectedQuestions.has(q.id)) : [];
+    const chosenBankIds = questionSource === "bank" ? bankQs.filter(q => selectedQuestions.has(q.id)).map(q => q.id) : [];
+    const title = formTitle.trim();
+    const result = await createAssessment({
+      schoolId: teacher.schoolId, classId: formClassId, subjectId: formSubjectId, creatorId: teacher.profileId,
+      title, type: formType, durationMinutes: formDuration,
+      openAt: formOpenAt, closeAt: formCloseAt, status,
+      distributionMode: assessmentType, questionCount: formQuestionCount,
+      ...styleFlags,
+      questionSource, aiQuestions: chosenAi, bankQuestionIds: chosenBankIds,
+    });
+    setSaving(false);
+    if ("error" in result) {
+      setToast({ message: `${status === "published" ? "Gagal mempublikasikan" : "Gagal menyimpan draf"}: ${result.error}`, tone: "danger" });
+      return;
+    }
+    setToast(status === "published"
+      ? { message: `Asesmen "${title}" berhasil dipublikasikan`, tone: "success" }
+      : { message: `Draf "${title}" tersimpan`, tone: "primary" });
+    setStep(1);
+    setFormTitle(""); setFormType(""); setSelectedStyle(""); setFormOpenAt(""); setFormCloseAt("");
+    setStep3Attempted(false); step1.reset();
+    setSelectedQuestions(new Set()); setAiGeneratedQuestions([]); setAiGenerated(false); setSelectedMaterials(new Set());
+  }
 
   function toggleMaterial(id: string) {
     setSelectedMaterials(prev => {
@@ -2982,7 +3555,7 @@ function TeacherAssessmentBuilder() {
     setAiGenerating(true);
     setAiGeneratedQuestions([]);
 
-    const matList = materials.filter(m => selectedMaterials.has(m.id));
+    const matList = (materials ?? []).filter(m => selectedMaterials.has(m.id));
     const allGenerated: typeof questionBank = [];
     const totalCount = formQuestionCount;
     const perMat = Math.max(1, Math.ceil(totalCount / matList.length));
@@ -3055,7 +3628,7 @@ function TeacherAssessmentBuilder() {
         {steps.map((s, i) => (
           <React.Fragment key={s}>
             <button
-              onClick={() => setStep(i + 1)}
+              onClick={() => goToStep(i + 1)}
               className={cn(
                 "flex items-center gap-2 rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors",
                 step === i + 1 ? "bg-primary text-white" : step > i + 1 ? "bg-success-light text-success" : "bg-background text-ink-secondary border border-border"
@@ -3071,86 +3644,68 @@ function TeacherAssessmentBuilder() {
 
       {step === 1 && (
         <div className="rounded-card border border-border bg-surface shadow-sm p-6 space-y-5 max-w-2xl">
-          <div>
-            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Judul Asesmen *</label>
-            <input type="text" placeholder="Kuis Fungsi Kuadrat – Pertemuan 8"
+          <FormField label="Judul Asesmen" required error={step1.errorFor("title")}>
+            <input type="text" placeholder="Contoh: Kuis Bab 3 - Perkalian"
               value={formTitle} onChange={e => setFormTitle(e.target.value)}
-              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
-          </div>
-          <div>
-            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tipe Asesmen *</label>
-            <select value={formType} onChange={e => setFormType(e.target.value)}
-              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
-              <option value="">Pilih tipe...</option>
-              {["Kuis Guru","UTS","UAS","Tes Diagnostik","Tryout","PR"].map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </div>
+              className={fieldClass(!!step1.errorFor("title"))} />
+          </FormField>
+          <FormField label="Tipe Asesmen" required error={step1.errorFor("type")}>
+            <SelectField value={formType} options={ASSESSMENT_TYPE_OPTIONS} placeholder="Pilih tipe..."
+              invalid={!!step1.errorFor("type")} onChange={setFormType} />
+          </FormField>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Mata Pelajaran *</label>
-              <input type="text" placeholder="Matematika XI"
-                value={formSubject} onChange={e => setFormSubject(e.target.value)}
-                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
-            </div>
-            <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Kelas *</label>
-              <input type="text" placeholder="XI IPA 2"
-                value={formClass} onChange={e => setFormClass(e.target.value)}
-                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
-            </div>
-          </div>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">
-                Jumlah Soal {styleIsLocked && <span className="text-ink-tertiary font-normal">(otomatis dari gaya asesmen)</span>}
-              </label>
-              <input type="number" min={1}
-                value={formQuestionCount}
-                readOnly={styleIsLocked}
-                onChange={e => !styleIsLocked && setFormQuestionCount(Number(e.target.value))}
-                className={cn(
-                  "w-full rounded-[8px] border bg-background px-3 py-2 text-[13px] focus:outline-none",
-                  styleIsLocked
-                    ? "border-border text-ink-secondary bg-ink/[0.03] cursor-not-allowed"
-                    : "border-border focus:border-primary"
-                )} />
-            </div>
-            <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">
-                Durasi (menit) {styleIsLocked && <span className="text-ink-tertiary font-normal">(otomatis dari gaya asesmen)</span>}
-              </label>
-              <input type="number" min={1}
-                value={formDuration}
-                readOnly={styleIsLocked}
-                onChange={e => !styleIsLocked && setFormDuration(Number(e.target.value))}
-                className={cn(
-                  "w-full rounded-[8px] border bg-background px-3 py-2 text-[13px] focus:outline-none",
-                  styleIsLocked
-                    ? "border-border text-ink-secondary bg-ink/[0.03] cursor-not-allowed"
-                    : "border-border focus:border-primary"
-                )} />
-            </div>
+            <FormField label="Kelas" required error={step1.errorFor("classId")}>
+              <SelectField value={formClassId} options={classOptions} placeholder="Pilih kelas..."
+                loading={teacherLoading} emptyText="Kamu belum ditugaskan ke kelas mana pun"
+                invalid={!!step1.errorFor("classId")} onChange={chooseClass} />
+            </FormField>
+            <FormField label="Mata Pelajaran" required error={step1.errorFor("subjectId")}>
+              <SelectField value={formSubjectId} options={subjectOptions}
+                placeholder={formClassId ? "Pilih mata pelajaran..." : "Pilih kelas dulu"}
+                disabled={!formClassId} emptyText="Kamu belum mengajar mapel di kelas ini"
+                invalid={!!step1.errorFor("subjectId")} onChange={setFormSubjectId} />
+            </FormField>
           </div>
 
-          <div>
-            <label className="block text-[11px] font-semibold text-ink-secondary mb-2">Gaya Asesmen *</label>
-            <select value={selectedStyle} onChange={e => {
-              const id = e.target.value;
-              setSelectedStyle(id);
-              if (id && styleDefaults[id]) {
-                setFormQuestionCount(styleDefaults[id].questions);
-                setFormDuration(styleDefaults[id].duration);
-              }
-            }}
-              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
-              <option value="">Pilih gaya asesmen...</option>
-              {assessmentStyles.map(s => (
-                <option key={s.id} value={s.id}>{s.name}</option>
-              ))}
-            </select>
-            {selectedStyleData?.description && (
-              <p className="mt-1.5 text-[11px] text-ink-secondary leading-relaxed">{selectedStyleData.description}</p>
-            )}
+          <FormField label="Gaya Asesmen" required error={step1.errorFor("style")}
+            hint={selectedStyleData?.description ?? (selectedStyle === CUSTOM_STYLE_ID ? "Atur jumlah soal dan durasi sendiri di bawah." : undefined)}>
+            <SelectField value={selectedStyle} options={styleOptions} placeholder="Pilih gaya asesmen..."
+              invalid={!!step1.errorFor("style")}
+              onChange={id => {
+                setSelectedStyle(id);
+                if (styleDefaults[id]) {
+                  setFormQuestionCount(styleDefaults[id].questions);
+                  setFormDuration(styleDefaults[id].duration);
+                  if (teacher) {
+                    fetchStyleConfig(teacher.schoolId, id).then(cfg => {
+                      setFormQuestionCount(cfg.questions);
+                      setFormDuration(cfg.duration);
+                      setStyleFlags({ randomizeQuestions: cfg.randomizeQuestions, randomizeOptions: cfg.randomizeOptions, allowReview: cfg.allowReview });
+                    });
+                  }
+                } else {
+                  setStyleFlags({ randomizeQuestions: false, randomizeOptions: false, allowReview: true });
+                }
+              }} />
+          </FormField>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <FormField label="Jumlah Soal" required error={step1.attempted ? countError : null}
+              hint={styleIsLocked ? "Otomatis dari gaya asesmen" : undefined}>
+              <input type="number" min={1} max={100}
+                value={Number.isNaN(formQuestionCount) ? "" : formQuestionCount}
+                readOnly={styleIsLocked}
+                onChange={e => !styleIsLocked && setFormQuestionCount(e.target.value === "" ? NaN : Number(e.target.value))}
+                className={fieldClass(step1.attempted && !!countError, styleIsLocked ? "text-ink-secondary bg-ink/[0.03] cursor-not-allowed" : "")} />
+            </FormField>
+            <FormField label="Durasi (menit)" required error={step1.attempted ? durationError : null}
+              hint={styleIsLocked ? "Otomatis dari gaya asesmen" : undefined}>
+              <input type="number" min={1} max={600}
+                value={Number.isNaN(formDuration) ? "" : formDuration}
+                readOnly={styleIsLocked}
+                onChange={e => !styleIsLocked && setFormDuration(e.target.value === "" ? NaN : Number(e.target.value))}
+                className={fieldClass(step1.attempted && !!durationError, styleIsLocked ? "text-ink-secondary bg-ink/[0.03] cursor-not-allowed" : "")} />
+            </FormField>
           </div>
 
           {/* Assessment distribution type */}
@@ -3179,14 +3734,19 @@ function TeacherAssessmentBuilder() {
               ))}
             </div>
             {assessmentType === "adaptive" && (
-              <AlertPanel tone="primary" title="Mode Adaptif">
-                Sistem akan memilih soal dari bank soal berdasarkan topik di mana setiap siswa menunjukkan pemahaman rendah. Soal yang diterima setiap siswa bisa berbeda.
-              </AlertPanel>
+              <div className="mt-3">
+                <AlertPanel tone="primary" title="Mode Adaptif">
+                  Di langkah berikutnya, pilih <strong>pool soal</strong> (minimal {Number.isNaN(formQuestionCount) ? "N" : formQuestionCount} soal, lebih banyak lebih baik). Saat siswa mulai mengerjakan, sistem memilih {Number.isNaN(formQuestionCount) ? "N" : formQuestionCount} soal untuk tiap siswa dengan memprioritaskan topik yang paling lemah bagi siswa tersebut — soal tiap siswa bisa berbeda.
+                </AlertPanel>
+              </div>
             )}
           </div>
 
-          <div className="flex justify-end">
-            <Button variant="default" className="h-8 text-[12px]" onClick={() => setStep(2)}>Lanjut →</Button>
+          <div className="flex items-center justify-end gap-3">
+            {step1.attempted && !step1Valid && (
+              <span className="mr-auto text-[12px] font-medium text-danger">Tolong lengkapi kolom bertanda * sebelum lanjut.</span>
+            )}
+            <Button variant="default" className="h-8 text-[12px]" onClick={() => { step1.validate(); if (step1Valid) setStep(2); }}>Lanjut →</Button>
           </div>
         </div>
       )}
@@ -3222,12 +3782,13 @@ function TeacherAssessmentBuilder() {
                 )}
               </div>
               <div className="p-4 space-y-2">
-                {materials.length === 0 && (
+                {materials === null && <SectionLoading message="Memuat materi..." />}
+                {materials !== null && materials.length === 0 && (
                   <div className="rounded-[8px] border border-dashed border-border bg-background p-6 text-center">
                     <p className="text-[12px] text-ink-secondary">Belum ada materi — unggah materi di <button onClick={() => router.push("/teacher/materials")} className="font-semibold text-primary underline underline-offset-2 hover:opacity-80">Pustaka Materi</button> terlebih dahulu.</p>
                   </div>
                 )}
-                {materials.map(mat => {
+                {(materials ?? []).map(mat => {
                   const checked = selectedMaterials.has(mat.id);
                   const canProcess = mat.aiProcessed;
                   return (
@@ -3389,11 +3950,8 @@ function TeacherAssessmentBuilder() {
                             <div className="grid grid-cols-2 gap-3">
                               <div>
                                 <label className="block text-[10px] font-bold uppercase tracking-wide text-ink-tertiary mb-1">Jawaban Benar</label>
-                                <select value={draft.correctAnswer}
-                                  onChange={e => setEditDraft(p => p ? { ...p, correctAnswer: e.target.value as "A"|"B"|"C"|"D" } : p)}
-                                  className="w-full rounded-[8px] border border-border bg-background px-3 py-1.5 text-[12px] focus:border-primary focus:outline-none">
-                                  {["A","B","C","D"].map(o => <option key={o} value={o}>{o}</option>)}
-                                </select>
+                                <SelectField value={draft.correctAnswer} options={ANSWER_OPTIONS}
+                                  onChange={v => setEditDraft(p => p ? { ...p, correctAnswer: v as "A"|"B"|"C"|"D" } : p)} />
                               </div>
                               <div>
                                 <label className="block text-[10px] font-bold uppercase tracking-wide text-ink-tertiary mb-1">Topik</label>
@@ -3406,6 +3964,10 @@ function TeacherAssessmentBuilder() {
                               <Button variant="outline" className="h-7 text-[11px]" onClick={() => { setEditingId(null); setEditDraft(null); }}>Batal</Button>
                               <Button variant="default" className="h-7 text-[11px]" onClick={() => {
                                 if (!draft) return;
+                                if (!draft.question.trim() || !draft.topic.trim() || (["A", "B", "C", "D"] as const).some(o => !draft.options[o]?.trim())) {
+                                  setToast({ message: "Pertanyaan, topik, dan pilihan A–D wajib diisi.", tone: "danger" });
+                                  return;
+                                }
                                 setAiGeneratedQuestions(prev => prev.map(pq => pq.id === draft.id ? draft : pq));
                                 setEditingId(null);
                                 setEditDraft(null);
@@ -3434,10 +3996,11 @@ function TeacherAssessmentBuilder() {
                 </Button>
               </div>
               <div className="p-4 space-y-2">
-                {bankQs.length === 0 && (
+                {bankLoading && <SectionLoading message="Memuat bank soal..." />}
+                {!bankLoading && bankQs.length === 0 && (
                   <EmptyState icon={Database} title="Bank soal kosong" description="Upload materi dulu dan proses dengan AI — soal akan otomatis masuk ke bank." />
                 )}
-                {bankQs.map(q => (
+                {!bankLoading && bankQs.map(q => (
                   <div key={q.id} onClick={() => toggleQuestion(q.id)}
                     className={cn(
                       "flex items-start gap-3 rounded-[8px] border p-3 cursor-pointer transition-all",
@@ -3480,46 +4043,10 @@ function TeacherAssessmentBuilder() {
                   <h2 className="text-[16px] font-bold text-ink">Tambah Soal ke Bank Soal</h2>
                   <button onClick={() => setShowAddQuestion(false)} className="text-ink-secondary hover:text-ink"><X className="h-4 w-4" /></button>
                 </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Pertanyaan *</label>
-                  <textarea rows={3} value={newQ.text} onChange={e => setNewQ(p => ({ ...p, text: e.target.value }))}
-                    placeholder="Tulis pertanyaan di sini..."
-                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none resize-none" />
-                </div>
-                {(["A", "B", "C", "D"] as const).map(opt => (
-                  <div key={opt}>
-                    <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Opsi {opt}</label>
-                    <input type="text" placeholder={`Pilihan ${opt}`}
-                      value={newQ[`opt${opt}` as "optA"|"optB"|"optC"|"optD"]}
-                      onChange={e => setNewQ(p => ({ ...p, [`opt${opt}`]: e.target.value }))}
-                      className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
-                  </div>
-                ))}
-                <div className="grid grid-cols-2 gap-4">
-                  <div>
-                    <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Jawaban Benar</label>
-                    <select value={newQ.correct} onChange={e => setNewQ(p => ({ ...p, correct: e.target.value }))}
-                      className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
-                      {["A", "B", "C", "D"].map(o => <option key={o} value={o}>{o}</option>)}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tingkat Kesulitan</label>
-                    <select value={newQ.difficulty} onChange={e => setNewQ(p => ({ ...p, difficulty: e.target.value }))}
-                      className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none">
-                      {["Mudah", "Sedang", "Sulit"].map(d => <option key={d} value={d}>{d}</option>)}
-                    </select>
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Topik</label>
-                  <input type="text" placeholder="e.g. Gerak Lurus Beraturan"
-                    value={newQ.topic} onChange={e => setNewQ(p => ({ ...p, topic: e.target.value }))}
-                    className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] placeholder:text-ink-tertiary focus:border-primary focus:outline-none" />
-                </div>
+                <ManualQuestionFields value={newQ} onChange={setNewQ} errorFor={newQValidation.errorFor} />
                 <div className="flex justify-end gap-2 pt-2">
-                  <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowAddQuestion(false); setNewQ({ ...EMPTY_MANUAL_Q }); }}>Batal</Button>
-                  <Button variant="default" className="h-8 text-[12px]" onClick={() => { setShowAddQuestion(false); setConfirmAddToBank(true); }}>
+                  <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowAddQuestion(false); setNewQ({ ...EMPTY_MANUAL_Q }); newQValidation.reset(); }}>Batal</Button>
+                  <Button variant="default" className="h-8 text-[12px]" onClick={() => { if (!newQValidation.validate()) return; setShowAddQuestion(false); setConfirmAddToBank(true); }}>
                     Simpan ke Bank Soal
                   </Button>
                 </div>
@@ -3534,11 +4061,12 @@ function TeacherAssessmentBuilder() {
             confirmLabel="Ya, Tambahkan"
             confirmVariant="default"
             onConfirm={async () => {
-              if (teacher && activeClass && activeSubjectId) {
-                await saveManualQToBank(newQ, teacher.schoolId, activeClass, activeSubjectId, teacher.profileId);
-              }
               setConfirmAddToBank(false);
+              if (!teacher || !formClassId || !formSubjectId) { setToast({ message: "Pilih kelas dan mapel di langkah 1.", tone: "danger" }); return; }
+              const err = await saveManualQToBank(newQ, teacher.schoolId, formClassId, formSubjectId, teacher.profileId);
+              if (err) { setToast({ message: `Gagal menyimpan soal: ${err}`, tone: "danger" }); setShowAddQuestion(true); return; }
               setNewQ({ ...EMPTY_MANUAL_Q });
+              newQValidation.reset();
               setToast({ message: "Soal berhasil ditambahkan ke bank soal", tone: "success" });
             }}
             onCancel={() => setConfirmAddToBank(false)}
@@ -3547,21 +4075,20 @@ function TeacherAssessmentBuilder() {
           {step2Error && (
             <p className="text-[12px] text-danger bg-danger/5 border border-danger/20 rounded-[8px] px-3 py-2">{step2Error}</p>
           )}
-          <div className="flex justify-between">
+          <div className="flex items-center justify-between gap-3">
             <Button variant="outline" className="h-8 text-[12px]" onClick={() => setStep(1)}>← Kembali</Button>
+            <span className={cn("text-[11px]", step2Valid ? "text-success" : "text-ink-secondary")}>
+              {assessmentType === "adaptive"
+                ? `${selectedCount} soal di pool · tiap siswa mendapat ${formQuestionCount}`
+                : `${selectedCount} / ${formQuestionCount} soal dipilih`}
+            </span>
             <Button variant="default" className="h-8 text-[12px]"
-              disabled={questionSource === "ai" ? (!aiGenerated || selectedQuestions.size === 0) : selectedQuestions.size === 0}
               onClick={() => {
-                if (selectedQuestions.size !== formQuestionCount) {
-                  setStep2Error(
-                    `Harus pilih tepat ${formQuestionCount} soal sesuai gaya asesmen. Saat ini: ${selectedQuestions.size} soal dipilih.`
-                  );
-                  return;
-                }
+                if (!step2Valid) { setStep2Error(step2Message); return; }
                 setStep2Error("");
                 setStep(3);
               }}>
-              Lanjut dengan {selectedQuestions.size} soal →
+              Lanjut →
             </Button>
           </div>
         </div>
@@ -3570,36 +4097,55 @@ function TeacherAssessmentBuilder() {
       {step === 3 && (
         <div className="rounded-card border border-border bg-surface shadow-sm p-6 space-y-5 max-w-2xl">
           <div>
-            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Tanggal Asesmen *</label>
-            <input type="datetime-local"
-              value={formScheduledFor} onChange={e => setFormScheduledFor(e.target.value)}
-              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
+            <h3 className="text-[14px] font-bold text-ink">Jadwal Pengerjaan</h3>
+            <p className="text-[12px] text-ink-secondary mt-0.5">
+              Siswa bisa mulai mengerjakan kapan saja di antara waktu dibuka dan ditutup. Setiap siswa punya waktu {formDuration} menit sejak mulai, dan pengerjaan otomatis berakhir saat asesmen ditutup.
+            </p>
           </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Mulai Dibuka</label>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <FormField label="Mulai Dibuka" required error={step3Attempted ? openError : null} hint="Kapan siswa bisa mulai mengerjakan">
+              <input type="datetime-local" min={toLocalInputValue(new Date())}
+                value={formOpenAt}
+                onChange={e => {
+                  const v = e.target.value;
+                  setFormOpenAt(v);
+                  // Keep the window valid: pushing "dibuka" past "ditutup"
+                  // moves "ditutup" forward instead of leaving a clash.
+                  if (v && formCloseAt && new Date(formCloseAt).getTime() <= new Date(v).getTime()) {
+                    setFormCloseAt(toLocalInputValue(new Date(new Date(v).getTime() + Math.max(formDuration, 1) * 60_000)));
+                  }
+                }}
+                className={fieldClass(step3Attempted && !!openError)} />
+            </FormField>
+            <FormField label="Ditutup Pada" required error={step3Attempted ? closeError : null} hint="Setelah waktu ini asesmen tidak bisa dikerjakan">
               <input type="datetime-local"
-                value={formOpenAt} onChange={e => setFormOpenAt(e.target.value)}
-                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
-              <p className="text-[10px] text-ink-tertiary mt-1">Kapan siswa bisa mulai mengerjakan</p>
-            </div>
-            <div>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">Ditutup Pada</label>
-              <input type="datetime-local"
+                min={formOpenAt || toLocalInputValue(new Date())}
                 value={formCloseAt} onChange={e => setFormCloseAt(e.target.value)}
-                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
-              <p className="text-[10px] text-ink-tertiary mt-1">Setelah waktu ini asesmen tidak bisa dikerjakan</p>
-            </div>
+                className={fieldClass(step3Attempted && !!closeError)} />
+            </FormField>
           </div>
-          <AlertPanel tone="primary" title="Siap dipublikasikan">
-            Setelah dipublikasikan, siswa menerima notifikasi dan dapat mengakses asesmen sesuai jadwal.
-          </AlertPanel>
+          {step3Valid ? (
+            <AlertPanel tone="primary" title="Siap dipublikasikan">
+              Dibuka {new Date(formOpenAt).toLocaleString("id-ID", { dateStyle: "full", timeStyle: "short" })}, ditutup {new Date(formCloseAt).toLocaleString("id-ID", { dateStyle: "full", timeStyle: "short" })}.
+              {assessmentType === "adaptive" ? ` Mode adaptif: tiap siswa mendapat ${formQuestionCount} soal dari pool ${selectedCount} soal.` : ""}
+            </AlertPanel>
+          ) : step3Attempted ? (
+            <p className="text-[12px] font-medium text-danger">Tolong perbaiki jadwal di atas sebelum menyimpan.</p>
+          ) : null}
           <div className="flex justify-between">
-            <Button variant="outline" className="h-8 text-[12px]" onClick={() => setStep(2)}>← Kembali</Button>
+            <Button variant="outline" className="h-8 text-[12px]" onClick={() => setStep(2)} disabled={saving}>← Kembali</Button>
             <div className="flex gap-2">
-              <Button variant="outline" className="h-8 text-[12px]" onClick={() => setConfirmSaveDraft(true)}>Simpan Draf</Button>
-              <Button variant="default" className="h-8 text-[12px]" onClick={() => setConfirmPublish(true)}>
-                <FilePlus2 className="mr-1.5 h-3.5 w-3.5" />Publikasikan
+              <Button variant="outline" className="h-8 text-[12px]" disabled={saving} onClick={() => {
+                setStep3Attempted(true);
+                if (step1Valid && step2Valid && step3Valid) setConfirmSaveDraft(true);
+              }}>Simpan Draf</Button>
+              <Button variant="default" className="h-8 text-[12px]" disabled={saving} onClick={() => {
+                setStep3Attempted(true);
+                if (!step1Valid) { step1.validate(); setStep(1); return; }
+                if (!step2Valid) { setStep2Error(step2Message); setStep(2); return; }
+                if (step3Valid) setConfirmPublish(true);
+              }}>
+                <FilePlus2 className="mr-1.5 h-3.5 w-3.5" />{saving ? "Menyimpan..." : "Publikasikan"}
               </Button>
             </div>
           </div>
@@ -3612,23 +4158,7 @@ function TeacherAssessmentBuilder() {
         message="Siswa akan menerima notifikasi dan dapat mengakses asesmen sesuai jadwal yang ditentukan. Asesmen yang sudah dipublikasikan tidak dapat diedit."
         confirmLabel="Publikasikan"
         confirmVariant="default"
-        onConfirm={async () => {
-          if (!teacher || !activeClass || !activeSubjectId) { setConfirmPublish(false); return; }
-          const chosenAi = questionSource === "ai" ? aiGeneratedQuestions.filter(q => selectedQuestions.has(q.id)) : [];
-          const chosenBankIds = questionSource === "bank" ? bankQs.filter(q => selectedQuestions.has(q.id)).map(q => q.id) : [];
-          const created = await createAssessment({
-            schoolId: teacher.schoolId, classId: activeClass, subjectId: activeSubjectId, creatorId: teacher.profileId,
-            title: formTitle || "Asesmen Tanpa Judul", type: formType || "Kuis Guru", durationMinutes: formDuration,
-            openAt: formOpenAt, closeAt: formCloseAt, status: "published",
-            questionSource, aiQuestions: chosenAi, bankQuestionIds: chosenBankIds,
-          });
-          setConfirmPublish(false);
-          if (!created) { setToast({ message: "Gagal mempublikasikan asesmen. Coba lagi.", tone: "danger" }); return; }
-          setToast({ message: `Asesmen "${formTitle || "Asesmen Tanpa Judul"}" berhasil dipublikasikan`, tone: "success" });
-          setStep(1);
-          setFormTitle(""); setFormType(""); setFormScheduledFor(""); setFormOpenAt(""); setFormCloseAt("");
-          setSelectedQuestions(new Set()); setAiGeneratedQuestions([]); setAiGenerated(false);
-        }}
+        onConfirm={() => { setConfirmPublish(false); saveAssessment("published"); }}
         onCancel={() => setConfirmPublish(false)}
       />
 
@@ -3638,20 +4168,7 @@ function TeacherAssessmentBuilder() {
         message="Asesmen disimpan sebagai draf dan belum dapat diakses siswa. Kamu dapat melanjutkan kapan saja."
         confirmLabel="Simpan Draf"
         confirmVariant="default"
-        onConfirm={async () => {
-          if (!teacher || !activeClass || !activeSubjectId) { setConfirmSaveDraft(false); return; }
-          const chosenAi = questionSource === "ai" ? aiGeneratedQuestions.filter(q => selectedQuestions.has(q.id)) : [];
-          const chosenBankIds = questionSource === "bank" ? bankQs.filter(q => selectedQuestions.has(q.id)).map(q => q.id) : [];
-          const created = await createAssessment({
-            schoolId: teacher.schoolId, classId: activeClass, subjectId: activeSubjectId, creatorId: teacher.profileId,
-            title: formTitle || "Draf Asesmen", type: formType || "Kuis Guru", durationMinutes: formDuration,
-            openAt: formOpenAt, closeAt: formCloseAt, status: "draft",
-            questionSource, aiQuestions: chosenAi, bankQuestionIds: chosenBankIds,
-          });
-          setConfirmSaveDraft(false);
-          if (!created) { setToast({ message: "Gagal menyimpan draf. Coba lagi.", tone: "danger" }); return; }
-          setToast({ message: `Draf "${formTitle || "Draf Asesmen"}" tersimpan`, tone: "primary" });
-        }}
+        onConfirm={() => { setConfirmSaveDraft(false); saveAssessment("draft"); }}
         onCancel={() => setConfirmSaveDraft(false)}
       />
 
@@ -3772,21 +4289,27 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
 }
 
 function TeacherResults() {
-  const teacher = useRealTeacher();
+  const { teacher, loading: teacherLoading } = useRealTeacherStatus();
   const [activeClass] = useActiveClass();
   const activeSubjectId = teacher?.assignments.find(a => a.classId === activeClass)?.subjectId;
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<"soal" | "siswa">("soal");
-  const [allAssessments, setAllAssessments] = useState<SavedAssessment[]>([]);
+  // null = still loading - never show "Belum ada asesmen" before the fetch returns
+  const [assessmentRows, setAssessmentRows] = useState<SavedAssessment[] | null>(null);
+  const allAssessments = assessmentRows ?? [];
+  const listLoading = assessmentRows === null;
   const [classSize, setClassSize] = useState(0);
   const [resultDetail, setResultDetail] = useState<AssessmentResultDetail | null>(null);
   const [aiAnalysis, setAiAnalysis] = useState<{ overallAnalysis: string; questionAnalyses: Array<{index:number;misconception:string;suggestion:string}> } | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
 
   useEffect(() => {
-    if (!activeClass || !activeSubjectId) { setAllAssessments([]); return; }
-    fetchClassAssessments(activeClass, activeSubjectId).then(attachAssessmentStats).then(setAllAssessments);
-  }, [activeClass, activeSubjectId]);
+    if (!activeClass || !activeSubjectId) { setAssessmentRows(teacherLoading || (teacher && teacher.classes.length > 0) ? null : []); return; }
+    setAssessmentRows(null);
+    let cancelled = false;
+    fetchClassAssessments(activeClass, activeSubjectId).then(attachAssessmentStats).then(rows => { if (!cancelled) setAssessmentRows(rows); });
+    return () => { cancelled = true; };
+  }, [activeClass, activeSubjectId, teacher, teacherLoading]);
 
   useEffect(() => {
     if (!activeClass) { setClassSize(0); return; }
@@ -3844,11 +4367,12 @@ function TeacherResults() {
           { label: "Asesmen selesai", value: `${allAssessments.filter(a => a.status === "Selesai").length}`, detail: "Semester ini", tone: "primary" as const },
           { label: "Rata-rata terbaik", value: bestAvg > 0 ? `${bestAvg}` : "—", detail: "Semua asesmen", tone: "success" as const },
           { label: "Partisipasi rata-rata", value: classSize > 0 ? `${participationRate}%` : "—", detail: "Dari total siswa", tone: "neutral" as const },
-        ].map(s => <StatCard key={s.label} {...s} />)}
+        ].map(s => <StatCard key={s.label} {...s} value={listLoading ? "…" : s.value} />)}
       </div>
 
       <div className="space-y-3">
-        {allAssessments.length === 0 && (
+        {listLoading && <SectionLoading message="Memuat daftar asesmen..." />}
+        {!listLoading && allAssessments.length === 0 && (
           <EmptyState icon={ClipboardList} title="Belum ada asesmen" description="Buat asesmen baru di halaman Buat Asesmen untuk melihat hasilnya di sini." />
         )}
         {allAssessments.map(a => (
@@ -3911,6 +4435,8 @@ function TeacherResults() {
                   </div>
                 ))}
               </div>
+
+              {!resultDetail && <SectionLoading message="Memuat detail hasil..." className="py-6" />}
 
               {detail.status === "Terjadwal" && (
                 <AlertPanel tone="primary" title="Asesmen belum dimulai">
@@ -4110,56 +4636,164 @@ function TeacherResults() {
 
 // ── Teacher Analytics ─────────────────────────────────────────────────────────
 
+type ClassAnalytics = {
+  trend: number[]; trendLabels: string[];
+  distribution: number[]; distributionLabels: string[];
+  topics: { label: string; value: number }[];
+  completedAssessments: number; classAvg: number | null; weakestTopic: { label: string; value: number } | null;
+  approvedAiQuestions: number;
+};
+
+// Real class+subject analytics from assessment_attempts / question_attempts
+// (the same teacher-readable tables the results page already uses).
+async function fetchClassAnalytics(classId: string, subjectId: string): Promise<ClassAnalytics> {
+  const [{ data: aRows }, { count: aiCount }] = await Promise.all([
+    supabase.from("assessments").select("id, title, open_at, created_at").eq("class_id", classId).eq("subject_id", subjectId),
+    supabase.from("questions").select("id", { count: "exact", head: true })
+      .eq("class_id", classId).eq("subject_id", subjectId).eq("source", "ai_generated").eq("status", "active"),
+  ]);
+  const assessmentsList = (aRows ?? []) as Array<{ id: string; title: string; open_at: string | null; created_at: string }>;
+  const empty: ClassAnalytics = {
+    trend: [], trendLabels: [], distribution: [], distributionLabels: [], topics: [],
+    completedAssessments: 0, classAvg: null, weakestTopic: null, approvedAiQuestions: aiCount ?? 0,
+  };
+  if (assessmentsList.length === 0) return empty;
+
+  const { data: attemptRows } = await supabase
+    .from("assessment_attempts")
+    .select("id, assessment_id, score")
+    .in("assessment_id", assessmentsList.map(x => x.id))
+    .in("status", ["submitted", "graded"]);
+  const attempts = ((attemptRows ?? []) as Array<{ id: string; assessment_id: string; score: number | null }>).filter(r => r.score != null);
+  if (attempts.length === 0) return empty;
+
+  const when = (x: { open_at: string | null; created_at: string }) => parseDbTime(x.open_at ?? x.created_at);
+  const ordered = [...assessmentsList].sort((x, y) => when(x) - when(y));
+  const perAssessment = ordered
+    .map(x => {
+      const scores = attempts.filter(t => t.assessment_id === x.id).map(t => Number(t.score));
+      return scores.length ? { label: new Date(when(x)).toLocaleDateString("id-ID", { day: "numeric", month: "short" }), avg: Math.round(scores.reduce((s, v) => s + v, 0) / scores.length) } : null;
+    })
+    .filter((x): x is { label: string; avg: number } => !!x)
+    .slice(-8);
+
+  const buckets = [0, 0, 0, 0, 0, 0];
+  for (const t of attempts) {
+    const v = Number(t.score);
+    buckets[v < 50 ? 0 : v < 60 ? 1 : v < 70 ? 2 : v < 80 ? 3 : v < 90 ? 4 : 5] += 1;
+  }
+
+  const { data: qaRows } = await supabase
+    .from("question_attempts")
+    .select("is_correct, assessment_questions(questions(topic))")
+    .in("assessment_attempt_id", attempts.map(t => t.id));
+  const topicStats = new Map<string, { correct: number; total: number }>();
+  for (const r of (qaRows ?? []) as unknown as Array<{ is_correct: boolean | null; assessment_questions: { questions: { topic: string } | null } | null }>) {
+    const topic = r.assessment_questions?.questions?.topic;
+    if (!topic) continue;
+    const cur = topicStats.get(topic) ?? { correct: 0, total: 0 };
+    cur.total += 1;
+    if (r.is_correct) cur.correct += 1;
+    topicStats.set(topic, cur);
+  }
+  const topics = [...topicStats.entries()]
+    .map(([label, st]) => ({ label, value: Math.round((st.correct / st.total) * 100) }))
+    .sort((x, y) => x.value - y.value);
+
+  return {
+    trend: perAssessment.map(x => x.avg),
+    trendLabels: perAssessment.map(x => x.label),
+    distribution: buckets,
+    distributionLabels: ["< 50", "50–59", "60–69", "70–79", "80–89", "90–100"],
+    topics,
+    completedAssessments: new Set(attempts.map(t => t.assessment_id)).size,
+    classAvg: Math.round(attempts.reduce((sum, t) => sum + Number(t.score), 0) / attempts.length),
+    weakestTopic: topics[0] ?? null,
+    approvedAiQuestions: aiCount ?? 0,
+  };
+}
+
 function TeacherAnalytics() {
-  const teacher = useRealTeacher();
+  const { teacher, loading: teacherLoading } = useRealTeacherStatus();
   const [activeClass] = useActiveClass();
   const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
   const [topicPopup, setTopicPopup] = useState<string | null>(null);
   const [showAllStudents, setShowAllStudents] = useState(false);
 
-  const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name ?? teacher?.classes[0]?.name ?? "-";
-  const [classStudents, setClassStudents] = useState<Student[]>([]);
+  const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name ?? "…";
+  // null = still loading
+  const [studentRows, setStudentRows] = useState<Student[] | null>(null);
+  const [analytics, setAnalytics] = useState<ClassAnalytics | null>(null);
+  const classStudents = studentRows ?? [];
   const activeStats = computeRealClassStats(classStudents);
+  const loading = studentRows === null || analytics === null;
 
   useEffect(() => {
-    if (!activeClass) { setClassStudents([]); return; }
-    fetchRealClassStudents(activeClass, activeAssignment?.subjectId, activeClassName).then(setClassStudents);
-  }, [activeClass, activeAssignment?.subjectId, activeClassName]);
+    setStudentRows(null);
+    setAnalytics(null);
+    if (!activeClass) {
+      if (!teacherLoading && teacher && teacher.classes.length === 0) {
+        setStudentRows([]);
+        setAnalytics({ trend: [], trendLabels: [], distribution: [], distributionLabels: [], topics: [], completedAssessments: 0, classAvg: null, weakestTopic: null, approvedAiQuestions: 0 });
+      }
+      return;
+    }
+    let cancelled = false;
+    fetchRealClassStudents(activeClass, activeAssignment?.subjectId, activeClassName).then(rows => { if (!cancelled) setStudentRows(rows); });
+    if (activeAssignment?.subjectId) {
+      fetchClassAnalytics(activeClass, activeAssignment.subjectId).then(r => { if (!cancelled) setAnalytics(r); });
+    } else {
+      setAnalytics({ trend: [], trendLabels: [], distribution: [], distributionLabels: [], topics: [], completedAssessments: 0, classAvg: null, weakestTopic: null, approvedAiQuestions: 0 });
+    }
+    return () => { cancelled = true; };
+  }, [activeClass, activeAssignment?.subjectId, activeClassName, teacher, teacherLoading]);
 
-  const popupTopic = topicAccuracy.find(t => t.label === topicPopup);
+  const statCards = [
+    { label: "Asesmen selesai", value: analytics ? String(analytics.completedAssessments) : "…", detail: "Punya hasil siswa", tone: "primary" as const },
+    { label: "Rata-rata nilai kelas", value: analytics?.classAvg != null ? String(analytics.classAvg) : analytics ? "—" : "…", detail: "Semua asesmen dinilai", tone: "success" as const },
+    { label: "Topik paling lemah", value: analytics?.weakestTopic?.label ?? (analytics ? "—" : "…"), detail: analytics?.weakestTopic ? `${analytics.weakestTopic.value}% akurasi rata-rata` : "Belum ada data", tone: "warning" as const },
+    { label: "Soal AI disetujui", value: analytics ? String(analytics.approvedAiQuestions) : "…", detail: "Di bank soal kelas ini", tone: "neutral" as const },
+  ];
+  const topicList = analytics?.topics ?? [];
+
+  const popupTopic = topicList.find(t => t.label === topicPopup);
   const popupRec = topicPopup
     ? teachingRecommendations.find(r => r.topic.toLowerCase() === topicPopup.toLowerCase())
     : null;
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Analitik Kelas" title={`Analitik ${activeClassName}`} description={`Performa ${activeStats.total} siswa berdasarkan data asesmen semester ini.`} />
+      <PageHeader eyebrow="Analitik Kelas" title={`Analitik ${activeClassName}`} description={loading ? "Memuat data kelas..." : `Performa ${activeStats.total} siswa berdasarkan data asesmen.`} />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {teacherAnalyticsStats.map(s => <StatCard key={s.label} {...s} />)}
+        {statCards.map(s => <StatCard key={s.label} {...s} />)}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
         <div className="col-span-1 lg:col-span-2 rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Tren Nilai Kelas</h3>
           <p className="text-[12px] text-ink-secondary mb-4">Rata-rata per asesmen</p>
-          {scoreTrend.length === 0 ? (
+          {!analytics ? (
+            <SectionLoading className="h-[120px] py-0" />
+          ) : analytics.trend.length === 0 ? (
             <div className="flex items-center justify-center h-[120px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah asesmen diselesaikan</p>
             </div>
           ) : (
-            <SimpleChart data={scoreTrend} labels={scoreTrendLabels} height={120} />
+            <SimpleChart data={analytics.trend} labels={analytics.trendLabels} height={120} />
           )}
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Distribusi Nilai</h3>
-          <p className="text-[12px] text-ink-secondary mb-4">Berdasarkan asesmen terakhir</p>
-          {scoreDistribution.length === 0 ? (
+          <p className="text-[12px] text-ink-secondary mb-4">Jumlah siswa per rentang nilai</p>
+          {!analytics ? (
+            <SectionLoading className="h-[100px] py-0" />
+          ) : analytics.distribution.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Belum ada data asesmen</p>
             </div>
           ) : (
-            <SimpleChart data={scoreDistribution} labels={scoreDistributionLabels} type="bar" height={100} />
+            <SimpleChart data={analytics.distribution} labels={analytics.distributionLabels} type="bar" height={100} />
           )}
         </div>
       </div>
@@ -4168,16 +4802,18 @@ function TeacherAnalytics() {
         <div className="flex items-center justify-between mb-5">
           <div>
             <h3 className="text-[14px] font-bold text-ink">Akurasi per Topik</h3>
-            <p className="text-[12px] text-ink-secondary mt-0.5">Rata-rata kelas berdasarkan bank soal · klik topik untuk rekomendasi</p>
+            <p className="text-[12px] text-ink-secondary mt-0.5">Persentase jawaban benar siswa per topik · klik topik untuk detail</p>
           </div>
         </div>
-        {topicAccuracy.length === 0 ? (
+        {!analytics ? (
+          <SectionLoading />
+        ) : topicList.length === 0 ? (
           <div className="flex items-center justify-center py-10 rounded-[8px] border border-dashed border-border">
             <p className="text-[12px] text-ink-tertiary">Data akurasi akan tersedia setelah siswa mengerjakan asesmen</p>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
-            {topicAccuracy.map(t => (
+            {topicList.map(t => (
               <div key={t.label} className="cursor-pointer hover:opacity-80 transition-opacity" onClick={() => setTopicPopup(t.label)}>
                 <TopicBar label={t.label} value={t.value} />
               </div>
@@ -4189,11 +4825,17 @@ function TeacherAnalytics() {
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="border-b border-border px-5 py-3.5 flex items-center justify-between">
           <h3 className="text-[14px] font-bold text-ink">Performa Siswa</h3>
-          <span className="text-[11px] text-ink-secondary">{classStudents.length} siswa · {activeClassName}</span>
+          <span className="text-[11px] text-ink-secondary">{studentRows === null ? "…" : classStudents.length} siswa · {activeClassName}</span>
         </div>
-        <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-          {(showAllStudents ? classStudents : classStudents.slice(0, 6)).map(s => <StudentPerformanceCard key={s.id} student={s} />)}
-        </div>
+        {studentRows === null ? (
+          <SectionLoading message="Memuat data siswa..." />
+        ) : classStudents.length === 0 ? (
+          <p className="px-5 py-8 text-center text-[12px] text-ink-tertiary">Belum ada siswa aktif di kelas ini.</p>
+        ) : (
+          <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+            {(showAllStudents ? classStudents : classStudents.slice(0, 6)).map(s => <StudentPerformanceCard key={s.id} student={s} />)}
+          </div>
+        )}
         {classStudents.length > 6 && (
           <div className="border-t border-border px-5 py-3 text-center">
             <button onClick={() => setShowAllStudents(p => !p)}
@@ -4270,7 +4912,7 @@ function TeacherRecommendations() {
   const [activeClass] = useActiveClass();
   const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name ?? teacher?.classes[0]?.name ?? "-";
   const activeSubjectId = teacher?.assignments.find(a => a.classId === activeClass)?.subjectId;
-  const { bank: bankQs } = useQuestionBank(activeClass, activeSubjectId);
+  const { bank: bankQs, loading: bankLoading } = useQuestionBank(activeClass, activeSubjectId);
   const [recs, setRecs] = useState<typeof teachingRecommendations>([]);
   const [summary, setSummary] = useState("");
   const [loading, setLoading] = useState(false);
@@ -4349,7 +4991,9 @@ function TeacherRecommendations() {
       <PageHeader eyebrow="Rekomendasi AI" title={`Rekomendasi — ${activeClassName}`}
         description="Berdasarkan analisis soal di bank soal, AI merekomendasikan intervensi pengajaran berikut." />
 
-      {bankQs.length === 0 && !loading && (
+      {bankLoading && <SectionLoading message="Memuat data soal..." />}
+
+      {!bankLoading && bankQs.length === 0 && !loading && (
         <EmptyState icon={Sparkles} title="Belum ada data soal"
           description="Tambahkan soal ke bank soal terlebih dahulu agar AI dapat menganalisis dan memberi rekomendasi pengajaran." />
       )}
@@ -4414,68 +5058,114 @@ function TeacherRecommendations() {
 
 // ── Teacher AI Config ─────────────────────────────────────────────────────────
 
-function TeacherAIConfig() {
-  const [active, setActive] = useState<string>(aiStyleOptions.find(o => o.active)?.id ?? "s1");
-  const [settings, setSettings] = useState({
-    grounding: true, autoReview: false, parentReports: true, bloomBalance: true, notifyWeak: true,
-  });
+const AI_STYLE_IDS: Record<string, TeacherAiSettings["activeStyle"]> = { s1: "socratic", s2: "explicit", s3: "analogy" };
 
-  function ToggleRow({ id, label, desc }: { id: keyof typeof settings; label: string; desc: string }) {
+function TeacherAIConfig() {
+  const { teacher, loading: teacherLoading } = useRealTeacherStatus();
+  const [settings, setSettings] = useState<TeacherAiSettings | null>(null);
+  const [savingKey, setSavingKey] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; tone: "success" | "danger" } | null>(null);
+
+  useEffect(() => {
+    if (!teacher) return;
+    let cancelled = false;
+    fetchTeacherAiSettings(teacher.id).then(s => { if (!cancelled) setSettings(s); });
+    return () => { cancelled = true; };
+  }, [teacher]);
+
+  // Every change is saved immediately (no separate "Simpan" button to
+  // forget) and rolled back with an error toast if the save fails.
+  async function update(patch: Partial<TeacherAiSettings>, key: string) {
+    if (!teacher || !settings) return;
+    const prev = settings;
+    const next = { ...settings, ...patch };
+    setSettings(next);
+    setSavingKey(key);
+    const err = await saveTeacherAiSettings(teacher.id, next);
+    setSavingKey(null);
+    if (err) {
+      setSettings(prev);
+      setToast({ message: `Gagal menyimpan pengaturan: ${err}`, tone: "danger" });
+    } else {
+      setToast({ message: "Pengaturan tersimpan", tone: "success" });
+    }
+  }
+
+  type ToggleKey = "grounding" | "autoReview" | "parentReports" | "bloomBalance" | "notifyWeak";
+  function ToggleRow({ id, label, desc }: { id: ToggleKey; label: string; desc: string }) {
+    const on = !!settings?.[id];
     return (
       <div className="flex items-start justify-between gap-4 py-3.5 border-b border-border last:border-0">
         <div className="flex-1">
           <div className="text-[13px] font-semibold text-ink">{label}</div>
           <div className="text-[12px] text-ink-secondary mt-0.5">{desc}</div>
         </div>
-        <button role="switch" aria-checked={settings[id]} aria-label={label}
-          onClick={() => setSettings(prev => ({ ...prev, [id]: !prev[id] }))}
-          className={cn("flex h-6 w-10 shrink-0 items-center rounded-full border transition-colors",
-            settings[id] ? "border-primary bg-primary" : "border-border bg-border"
+        <button role="switch" aria-checked={on} aria-label={label}
+          disabled={!settings || savingKey !== null}
+          onClick={() => update({ [id]: !on } as Partial<TeacherAiSettings>, id)}
+          className={cn("flex h-6 w-10 shrink-0 items-center rounded-full border transition-colors disabled:opacity-60",
+            on ? "border-primary bg-primary" : "border-border bg-border"
           )}>
           <span className={cn("h-4 w-4 rounded-full bg-white shadow-sm transition-transform",
-            settings[id] ? "translate-x-5" : "translate-x-0.5")} />
+            on ? "translate-x-5" : "translate-x-0.5")} />
         </button>
+      </div>
+    );
+  }
+
+  if (teacherLoading || (teacher && !settings)) {
+    return (
+      <div className="space-y-6 max-w-3xl">
+        <PageHeader eyebrow="Konfigurasi AI" title="Pengaturan AI Companion" />
+        <SectionLoading message="Memuat pengaturan AI..." />
       </div>
     );
   }
 
   return (
     <div className="space-y-6 max-w-3xl">
-      <PageHeader eyebrow="Konfigurasi AI" title="Pengaturan AI Companion" />
+      <PageHeader eyebrow="Konfigurasi AI" title="Pengaturan AI Companion"
+        description="Pengaturan ini langsung berlaku untuk AI Companion yang dipakai siswa di kelas yang kamu ajar." />
       <div className="rounded-card border border-border bg-surface shadow-sm p-5">
         <h3 className="text-[14px] font-bold text-ink mb-1">Gaya Mengajar AI</h3>
         <p className="text-[12px] text-ink-secondary mb-4">Pilih bagaimana AI membantu siswa menjawab pertanyaan.</p>
         <div className="space-y-3">
-          {aiStyleOptions.map(opt => (
-            <div key={opt.id} onClick={() => setActive(opt.id)}
-              className={cn("rounded-[10px] border p-4 cursor-pointer transition-all",
-                active === opt.id ? "border-primary/40 bg-primary-soft" : "border-border hover:border-primary/20"
-              )}>
-              <div className="flex items-start gap-3">
-                <div className={cn("mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
-                  active === opt.id ? "border-primary" : "border-border")}>
-                  {active === opt.id && <div className="h-2 w-2 rounded-full bg-primary" />}
-                </div>
-                <div className="flex-1">
-                  <div className="text-[13px] font-semibold text-ink">{opt.label}</div>
-                  <p className="text-[11px] text-ink-secondary mt-0.5 leading-relaxed">{opt.description}</p>
-                  <div className="mt-2 rounded-[6px] bg-background border border-border px-3 py-2">
-                    <p className="text-[11px] text-ink-secondary">Contoh: <em>{opt.example}</em></p>
+          {aiStyleOptions.map(opt => {
+            const style = AI_STYLE_IDS[opt.id];
+            const selected = settings?.activeStyle === style;
+            return (
+              <button key={opt.id} type="button" disabled={!settings || savingKey !== null}
+                onClick={() => !selected && update({ activeStyle: style }, "style")}
+                className={cn("w-full text-left rounded-[10px] border p-4 transition-all disabled:cursor-wait",
+                  selected ? "border-primary/40 bg-primary-soft" : "border-border hover:border-primary/20"
+                )}>
+                <div className="flex items-start gap-3">
+                  <div className={cn("mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border-2 transition-colors",
+                    selected ? "border-primary" : "border-border")}>
+                    {selected && <div className="h-2 w-2 rounded-full bg-primary" />}
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[13px] font-semibold text-ink">{opt.label}</div>
+                    <p className="text-[11px] text-ink-secondary mt-0.5 leading-relaxed">{opt.description}</p>
+                    <div className="mt-2 rounded-[6px] bg-background border border-border px-3 py-2">
+                      <p className="text-[11px] text-ink-secondary">Contoh: <em>{opt.example}</em></p>
+                    </div>
                   </div>
                 </div>
-              </div>
-            </div>
-          ))}
+              </button>
+            );
+          })}
         </div>
       </div>
       <div className="rounded-card border border-border bg-surface shadow-sm p-5">
         <h3 className="text-[14px] font-bold text-ink mb-4">Perilaku AI</h3>
-        <ToggleRow id="grounding" label="Grounded Responses" desc="AI hanya menjawab berdasarkan materi yang diunggah guru." />
-        <ToggleRow id="autoReview" label="Auto-approve soal AI" desc="Soal AI langsung masuk bank soal tanpa tinjauan manual." />
+        <ToggleRow id="grounding" label="Grounded Responses" desc="AI hanya menjawab berdasarkan materi yang diunggah guru. Jika dimatikan, AI boleh menjawab pertanyaan pelajaran di luar materi." />
+        <ToggleRow id="autoReview" label="Auto-approve soal AI" desc="Soal AI dari materi langsung masuk bank soal tanpa tinjauan manual." />
         <ToggleRow id="parentReports" label="Laporan orang tua otomatis" desc="Kirim ringkasan performa ke orang tua setiap minggu." />
         <ToggleRow id="bloomBalance" label="Keseimbangan Bloom" desc="Pastikan distribusi level kognitif merata di setiap asesmen." />
         <ToggleRow id="notifyWeak" label="Notifikasi topik lemah" desc="Beri tahu saat akurasi topik turun di bawah 60%." />
       </div>
+      {toast && <AppToast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>
   );
 }
@@ -4514,27 +5204,38 @@ function StudentApp({ page }: { page: string }) {
 // ── Student Materials ─────────────────────────────────────────────────────────
 
 function StudentMaterials() {
-  const [mats, setMats] = useState<MaterialWithFile[]>([]);
+  const [matRows, setMats] = useState<MaterialWithFile[] | null>(null);
+  const mats = matRows ?? [];
   const [search, setSearch] = useState("");
+  const [subjectFilter, setSubjectFilter] = useState<string>("Semua");
+  const subjectOptions = [...new Set(mats.map(m => m.subject).filter(Boolean))].sort((a, b) => a.localeCompare(b, "id"));
 
   useEffect(() => {
-    fetchStudentMaterialsReal().then(setMats);
+    let cancelled = false;
+    fetchStudentMaterialsReal().then(rows => { if (!cancelled) setMats(rows); });
+    return () => { cancelled = true; };
   }, []);
 
   // RLS already scopes the fetch to the student's own class - only text
   // search is applied client-side now.
   const filtered = mats.filter(m => {
-    return !search ||
-      m.title.toLowerCase().includes(search.toLowerCase()) ||
-      (m.subject ?? "").toLowerCase().includes(search.toLowerCase());
+    if (subjectFilter !== "Semua" && m.subject !== subjectFilter) return false;
+    const q = search.toLowerCase();
+    return !q ||
+      m.title.toLowerCase().includes(q) ||
+      (m.subject ?? "").toLowerCase().includes(q) ||
+      (m.chapter ?? "").toLowerCase().includes(q);
   });
 
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [downloadError, setDownloadError] = useState<{ id: string; message: string } | null>(null);
+
   async function downloadMaterial(mat: MaterialWithFile) {
-    if (mat.fileUrl) {
-      await downloadMaterialFile(mat.fileUrl, mat.title);
-      return;
-    }
-    alert("File tidak tersedia untuk diunduh. Hubungi gurumu untuk informasi lebih lanjut.");
+    setDownloadError(null);
+    setDownloadingId(mat.id);
+    const err = await downloadMaterialFile(mat.id);
+    setDownloadingId(null);
+    if (err) setDownloadError({ id: mat.id, message: err });
   }
 
   return (
@@ -4545,11 +5246,27 @@ function StudentMaterials() {
         description="Materi yang sudah diunggah gurumu untuk kelasmu."
       />
 
+      {matRows !== null && subjectOptions.length > 1 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-tertiary mr-1">Mata Pelajaran:</span>
+          {["Semua", ...subjectOptions].map(subj => {
+            const count = subj === "Semua" ? mats.length : mats.filter(m => m.subject === subj).length;
+            return (
+              <button key={subj} onClick={() => setSubjectFilter(subj)}
+                className={cn("rounded-full border px-3 py-1 text-[12px] font-semibold transition-colors",
+                  subjectFilter === subj ? "border-primary bg-primary text-white" : "border-border bg-background text-ink-secondary hover:border-primary/40 hover:text-ink")}>
+                {subj} <span className={cn("ml-0.5 text-[10px]", subjectFilter === subj ? "text-white/80" : "text-ink-tertiary")}>{count}</span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div className="flex items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-2 max-w-sm">
         <Search className="h-3.5 w-3.5 shrink-0 text-ink-tertiary" />
         <input
           type="text"
-          placeholder="Cari materi..."
+          placeholder="Cari judul, mapel, atau bab..."
           value={search}
           onChange={e => setSearch(e.target.value)}
           className="flex-1 bg-transparent text-[13px] placeholder:text-ink-tertiary focus:outline-none"
@@ -4558,17 +5275,19 @@ function StudentMaterials() {
 
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="border-b border-border px-5 py-3.5">
-          <h2 className="text-[14px] font-bold text-ink">{filtered.length} Materi Tersedia</h2>
+          <h2 className="text-[14px] font-bold text-ink">{matRows === null ? "Materi" : `${filtered.length} Materi Tersedia`}</h2>
         </div>
         <div className="p-4 space-y-3">
-          {filtered.length === 0 ? (
+          {matRows === null ? (
+            <SectionLoading message="Memuat materi..." />
+          ) : filtered.length === 0 ? (
             <div className="py-12 flex flex-col items-center gap-3 text-center">
               <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
                 <BookOpen className="h-6 w-6 text-ink-tertiary" />
               </div>
               <div>
-                <p className="text-[14px] font-semibold text-ink">Belum ada materi</p>
-                <p className="text-[12px] text-ink-secondary mt-1">Gurumu belum mengunggah materi. Pantau terus!</p>
+                <p className="text-[14px] font-semibold text-ink">{search || subjectFilter !== "Semua" ? "Materi tidak ditemukan" : "Belum ada materi"}</p>
+                <p className="text-[12px] text-ink-secondary mt-1">{search || subjectFilter !== "Semua" ? "Coba kata kunci atau mata pelajaran lain." : "Gurumu belum mengunggah materi untuk kelasmu. Pantau terus!"}</p>
               </div>
             </div>
           ) : (
@@ -4581,14 +5300,22 @@ function StudentMaterials() {
                   <div className="flex items-start justify-between gap-2 flex-wrap">
                     <div className="min-w-0">
                       <p className="text-[13px] font-semibold text-ink truncate">{mat.title}</p>
-                      <p className="text-[11px] text-ink-secondary mt-0.5">{mat.subject} · {mat.type} · {mat.uploadedAt}</p>
+                      <p className="text-[11px] text-ink-secondary mt-0.5">
+                        {[mat.subject, mat.chapter, mat.type, mat.academicYear && `TA ${mat.academicYear}`, mat.uploadedAt].filter(Boolean).join(" · ")}
+                      </p>
                     </div>
                     <button
                       onClick={() => downloadMaterial(mat)}
-                      className="flex items-center gap-1.5 rounded-[6px] border border-border bg-background px-2.5 py-1.5 text-[11px] font-semibold text-ink-secondary hover:border-success/40 hover:text-success transition-colors shrink-0">
-                      <Download className="h-3 w-3" />Unduh
+                      disabled={downloadingId === mat.id}
+                      className="flex items-center gap-1.5 rounded-[6px] border border-border bg-background px-2.5 py-1.5 text-[11px] font-semibold text-ink-secondary hover:border-success/40 hover:text-success transition-colors shrink-0 disabled:opacity-60">
+                      {downloadingId === mat.id
+                        ? <><span className="h-3 w-3 rounded-full border-2 border-current border-t-transparent animate-spin" />Mengunduh...</>
+                        : <><Download className="h-3 w-3" />Unduh</>}
                     </button>
                   </div>
+                  {downloadError?.id === mat.id && (
+                    <p role="alert" className="mt-1.5 text-[11px] font-medium text-danger">{downloadError.message}</p>
+                  )}
                 </div>
               </div>
             ))
@@ -4782,50 +5509,96 @@ function StudentDashboard() {
 // ── Student Simulator ─────────────────────────────────────────────────────────
 
 function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
-  const [items, setItems] = useState<SavedAssessment[]>([]);
+  // null = still loading
+  const [items, setItems] = useState<SavedAssessment[] | null>(null);
   useEffect(() => {
-    fetchStudentAssessments().then(rows => setItems(rows.filter(a => a.status === "Terjadwal")));
+    let cancelled = false;
+    fetchStudentAssessments().then(rows => { if (!cancelled) setItems(rows.filter(a => a.status === "Terjadwal")); });
+    return () => { cancelled = true; };
   }, []);
-  if (items.length === 0) return (
+
+  // Re-render exactly when any assessment opens or closes.
+  const now = useScheduleClock((items ?? []).flatMap(a => [
+    a.openAt ? new Date(a.openAt).getTime() : null,
+    a.closeAt ? new Date(a.closeAt).getTime() : null,
+  ]));
+
+  if (items === null) return <SectionLoading message="Memuat asesmen..." />;
+
+  const withState = items.map(a => {
+    const openMs = a.openAt ? new Date(a.openAt).getTime() : null;
+    const closeMs = a.closeAt ? new Date(a.closeAt).getTime() : null;
+    const notYetOpen = openMs !== null && now < openMs;
+    const alreadyClosed = closeMs !== null && now >= closeMs;
+    return { a, openMs, closeMs, notYetOpen, alreadyClosed, hasQuestions: a.totalQuestions > 0 };
+  }).filter(x => !x.alreadyClosed);
+
+  const openNow = withState.filter(x => !x.notYetOpen);
+  const upcoming = withState.filter(x => x.notYetOpen).sort((x, y) => (x.openMs ?? 0) - (y.openMs ?? 0));
+
+  if (withState.length === 0) return (
     <div className="flex items-center justify-center rounded-card border border-dashed border-border py-10">
       <p className="text-[13px] text-ink-tertiary">Belum ada asesmen terjadwal dari gurumu.</p>
     </div>
   );
-  const now = Date.now();
+
+  const fmt = (ms: number) => new Date(ms).toLocaleString("id-ID", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      {items.map(a => {
-        const hasQuestions = a.totalQuestions > 0;
-        const notYetOpen = a.openAt ? now < new Date(a.openAt).getTime() : false;
-        const alreadyClosed = a.closeAt ? now > new Date(a.closeAt).getTime() : false;
-        const accessible = hasQuestions && !notYetOpen && !alreadyClosed;
-        return (
-          <div key={a.id} role="button" tabIndex={0}
-            onClick={() => onStart(a.id)}
-            onKeyDown={e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onStart(a.id); } }}
-            className={cn("rounded-card border bg-surface p-5 transition-all cursor-pointer group",
-              accessible ? "border-border hover:border-primary/30 hover:shadow-soft" : "border-border opacity-60")}>
-            <div className="flex items-start gap-3">
-              <div className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px]",
-                accessible ? "bg-primary-soft" : "bg-background")}>
-                <ShieldCheck className={cn("h-5 w-5", accessible ? "text-primary" : "text-ink-tertiary")} />
-              </div>
-              <div className="flex-1">
-                <div className="text-[13px] font-bold text-ink">{a.title}</div>
-                <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.totalQuestions} soal · {a.duration} mnt</div>
-                <div className="flex items-center gap-2 mt-2 flex-wrap">
-                  {a.openAt && <Badge tone="neutral">Buka: {new Date(a.openAt).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}</Badge>}
-                  {a.closeAt && <Badge tone="neutral">Tutup: {new Date(a.closeAt).toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" })}</Badge>}
-                  {!hasQuestions && <Badge tone="warning">Belum ada soal</Badge>}
-                  {notYetOpen && <Badge tone="warning">Belum dibuka</Badge>}
-                  {alreadyClosed && <Badge tone="danger">Sudah ditutup</Badge>}
-                  {accessible && <Badge tone="danger">Mode Kiosk</Badge>}
+    <div className="space-y-6">
+      {openNow.length > 0 && (
+        <div className="space-y-3">
+          <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-success">Bisa dikerjakan sekarang</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {openNow.map(({ a, closeMs, hasQuestions }) => (
+              <div key={a.id} role="button" tabIndex={hasQuestions ? 0 : -1} aria-disabled={!hasQuestions}
+                onClick={() => hasQuestions && onStart(a.id)}
+                onKeyDown={e => { if (hasQuestions && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onStart(a.id); } }}
+                className={cn("rounded-card border bg-surface p-5 transition-all",
+                  hasQuestions ? "cursor-pointer border-border hover:border-primary/30 hover:shadow-soft" : "cursor-not-allowed border-border opacity-60")}>
+                <div className="flex items-start gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-primary-soft">
+                    <ShieldCheck className="h-5 w-5 text-primary" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[13px] font-bold text-ink">{a.title}</div>
+                    <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.totalQuestions} soal · {a.duration} mnt</div>
+                    <div className="flex items-center gap-2 mt-2 flex-wrap">
+                      {closeMs !== null && <Badge tone="warning">Ditutup {fmt(closeMs)} · {formatCountdown(closeMs - now)} lagi</Badge>}
+                      {hasQuestions ? <Badge tone="danger">Mode Kiosk</Badge> : <Badge tone="warning">Belum ada soal</Badge>}
+                    </div>
+                  </div>
                 </div>
               </div>
-            </div>
+            ))}
           </div>
-        );
-      })}
+        </div>
+      )}
+
+      {upcoming.length > 0 && (
+        <div className="space-y-3">
+          <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-primary">Akan datang</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {upcoming.map(({ a, openMs, closeMs }) => (
+              <div key={a.id} aria-disabled className="rounded-card border border-dashed border-primary/30 bg-primary-soft/40 p-5">
+                <div className="flex items-start gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-background border border-border">
+                    <Clock className="h-5 w-5 text-primary" />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-[13px] font-bold text-ink">{a.title}</div>
+                    <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.totalQuestions} soal · {a.duration} mnt</div>
+                    <p className="mt-2 text-[12px] text-ink">
+                      Dibuka <strong>{fmt(openMs!)}</strong>{closeMs !== null && <> · ditutup <strong>{fmt(closeMs)}</strong></>}
+                    </p>
+                    <Badge tone="primary" className="mt-2">Dibuka dalam {formatCountdown(openMs! - now)}</Badge>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -4890,6 +5663,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
         score?: number; correctCount?: number; totalQuestions?: number; allowReview?: boolean;
         review?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; yourAnswer: string | null; isCorrect: boolean }>;
       } | null;
+      refreshStudentOverview(); // score, rank, XP, streak changed
       const score = data?.score ?? 0;
       const correctCount = data?.correctCount ?? 0;
       setFinalScore(score);
@@ -4926,6 +5700,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
             options: r.options,
           }));
         if (incorrectQs.length > 0) saveIncorrectQuestions(incorrectQs);
+    refreshStudentOverview(); // XP, streak, weak topics changed
       }
     }
     setFinished(true);
@@ -5434,9 +6209,12 @@ function StudentAdaptive() {
   const [selectedTopic, setSelectedTopic] = useState<string>("Semua");
   const [sessionQs, setSessionQs] = useState<PracticeQuestion[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [subjects, setSubjects] = useState<{ id: string; name: string }[]>([]);
+  const [subjects, setSubjects] = useState<{ id: string; name: string }[] | null>(null);
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>("");
-  const [topics, setTopics] = useState<string[]>(["Semua"]);
+  const [topics, setTopics] = useState<string[] | null>(["Semua"]);
+  const [practiceError, setPracticeError] = useState<string | null>(null);
+  const studentWeakTopics = useStudentOverview()?.weakTopics ?? [];
+  const [sessionTopic, setSessionTopic] = useState("Semua");
 
   // Real schema note: `questions` is scoped by school+subject, not per-class,
   // and students have no direct RLS SELECT on it at all - subjects/topics are
@@ -5445,7 +6223,7 @@ function StudentAdaptive() {
   useEffect(() => {
     (async () => {
       const student = await getCurrentStudent();
-      if (!student?.class_id) return;
+      if (!student?.class_id) { setSubjects([]); return; }
       const { data } = await supabase
         .from("teacher_assignments")
         .select("subject_id, subjects(name)")
@@ -5462,23 +6240,31 @@ function StudentAdaptive() {
 
   useEffect(() => {
     if (!selectedSubjectId) { setTopics(["Semua"]); return; }
+    setTopics(null);
+    setSelectedTopic("Semua");
+    let cancelled = false;
     (async () => {
       const data = await authedFetch("/api/student/practice/topics", { subjectId: selectedSubjectId }) as { topics?: string[] } | null;
-      setTopics(["Semua", ...(data?.topics ?? [])]);
+      if (!cancelled) setTopics(["Semua", ...(data?.topics ?? [])]);
     })();
+    return () => { cancelled = true; };
   }, [selectedSubjectId]);
 
-  async function startSession(overrideTopic?: string) {
-    if (!selectedSubjectId) return;
+  async function startSession(overrideTopic?: string, overrideSubjectId?: string) {
+    const subjectId = overrideSubjectId ?? selectedSubjectId;
+    if (!subjectId) { setPracticeError("Tolong pilih mata pelajaran terlebih dahulu."); return; }
+    setPracticeError(null);
     const topic = overrideTopic ?? selectedTopic;
+    setSessionTopic(topic);
     setLoading(true);
     try {
       const data = await authedFetch("/api/student/practice/questions", {
-        subjectId: selectedSubjectId,
+        subjectId,
         topic: topic === "Semua" ? undefined : topic,
         difficulty: difficulty === "Campur" ? undefined : difficulty,
         count: 10,
-      }) as { questions?: PracticeQuestion[] } | null;
+      }) as { questions?: PracticeQuestion[]; error?: string } | null;
+      if (data?.error) { setPracticeError(data.error); return; }
       setSessionQs(data?.questions ?? []);
     } finally {
       setLoading(false);
@@ -5486,7 +6272,7 @@ function StudentAdaptive() {
   }
 
   if (sessionQs !== null) {
-    return <AdaptiveSession questions={sessionQs} difficulty={difficulty} topic={selectedTopic} onFinish={() => setSessionQs(null)} />;
+    return <AdaptiveSession questions={sessionQs} difficulty={difficulty} topic={sessionTopic} onFinish={() => setSessionQs(null)} />;
   }
 
   return (
@@ -5494,9 +6280,15 @@ function StudentAdaptive() {
       <PageHeader eyebrow="Latihan Adaptif" title="Latihan Disesuaikan AI"
         description="Pilih topik dan tingkat kesulitan. AI akan menyiapkan soal dari bank soal atau men-generate soal baru jika perlu." />
 
-      {subjects.length > 1 && (
+      {subjects === null && <SectionLoading message="Memuat mata pelajaran..." />}
+      {subjects !== null && subjects.length === 0 && (
+        <AlertPanel tone="primary" title="Belum ada mata pelajaran">
+          Kelasmu belum memiliki guru mata pelajaran. Hubungi wali kelas atau admin sekolah.
+        </AlertPanel>
+      )}
+      {subjects !== null && subjects.length > 1 && (
         <div>
-          <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Mata Pelajaran</label>
+          <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Mata Pelajaran <span className="text-danger">*</span></label>
           <div className="flex gap-2 flex-wrap">
             {subjects.map(s => (
               <button key={s.id} onClick={() => setSelectedSubjectId(s.id)}
@@ -5513,7 +6305,8 @@ function StudentAdaptive() {
         <div>
           <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Topik</label>
           <div className="flex gap-2 flex-wrap">
-            {topics.map(t => (
+            {topics === null && <span className="text-[12px] text-ink-secondary">Memuat topik...</span>}
+            {(topics ?? []).map(t => (
               <button key={t} onClick={() => setSelectedTopic(t)}
                 className={cn("rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors border",
                   selectedTopic === t ? "bg-primary text-white border-primary" : "bg-background text-ink-secondary border-border hover:border-primary/30")}>
@@ -5540,29 +6333,38 @@ function StudentAdaptive() {
         <p className="text-[12px] text-ink-secondary mb-4">
           AI akan menyiapkan soal dari bank soal atau men-generate soal baru jika perlu.
         </p>
-        <Button variant="default" className="w-full h-10" onClick={() => startSession()} disabled={loading || !selectedSubjectId}>
+        {practiceError && <p role="alert" className="mb-3 text-[12px] font-medium text-danger">{practiceError}</p>}
+        <Button variant="default" className="w-full h-10" onClick={() => startSession()} disabled={loading || subjects === null}>
           {loading ? "AI sedang menyiapkan soal..." : <><Zap className="mr-2 h-4 w-4" />Mulai Latihan Sekarang</>}
         </Button>
       </div>
 
-      {weakTopics.length > 0 && (
-        <div id="adaptive-topics" className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-          {weakTopics.slice(0, 3).map(t => (
-            <div key={t.id} className="rounded-card border border-border bg-surface p-4 hover:border-primary/30 hover:shadow-soft transition-all">
-              <div className="flex items-start justify-between gap-2 mb-3">
-                <div>
-                  <div className="text-[13px] font-semibold text-ink">{t.topic}</div>
-                  <div className="text-[11px] text-ink-secondary">{t.questionsAttempted} soal dicoba</div>
+      {studentWeakTopics.length > 0 && (
+        <div>
+          <h3 className="text-[13px] font-bold text-ink mb-3">Rekomendasi: topik terlemahmu</h3>
+          <div id="adaptive-topics" className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+            {studentWeakTopics.slice(0, 3).map(t => (
+              <div key={`${t.subject}-${t.topic}`} className="rounded-card border border-border bg-surface p-4 hover:border-primary/30 hover:shadow-soft transition-all">
+                <div className="flex items-start justify-between gap-2 mb-3">
+                  <div>
+                    <div className="text-[13px] font-semibold text-ink">{t.topic}</div>
+                    <div className="text-[11px] text-ink-secondary">{t.subject} · {t.attempted} soal dicoba</div>
+                  </div>
+                  <MasteryBadge level={weakTopicMastery(t.accuracy)} />
                 </div>
-                <MasteryBadge level={t.mastery} />
+                <TopicBar label="Akurasi" value={t.accuracy} />
+                <Button variant="default" className="w-full mt-3 h-7 text-[11px]" disabled={loading}
+                  onClick={() => {
+                    const subj = (subjects ?? []).find(x => x.name === t.subject);
+                    if (subj) setSelectedSubjectId(subj.id);
+                    setSelectedTopic(t.topic);
+                    startSession(t.topic, subj?.id);
+                  }}>
+                  <Zap className="mr-1.5 h-3 w-3" />Latihan Sekarang
+                </Button>
               </div>
-              <TopicBar label="Akurasi" value={t.accuracyRate} />
-              <Button variant="default" className="w-full mt-3 h-7 text-[11px]"
-                onClick={() => { setSelectedTopic(t.topic); startSession(t.topic); }}>
-                <Zap className="mr-1.5 h-3 w-3" />Latihan Sekarang
-              </Button>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       )}
     </div>
@@ -5573,10 +6375,12 @@ function StudentAdaptive() {
 
 function StudentReview() {
   const router = useRouter();
-  const [results, setResults] = useState<ReviewListItem[]>([]);
+  const [resultRows, setResults] = useState<ReviewListItem[] | null>(null);
+  const results = resultRows ?? [];
   const [reviewDetailId, setReviewDetailId] = useState<string | null>(null);
-  const [reviewQs, setReviewQs] = useState<ReviewQuestionDetail[]>([]);
+  const [reviewQs, setReviewQs] = useState<ReviewQuestionDetail[] | null>(null);
   const [materials, setMaterials] = useState<MaterialWithFile[]>([]);
+  const [sourceError, setSourceError] = useState<string | null>(null);
   const ownStats = useOwnStudentStats();
 
   useEffect(() => {
@@ -5587,8 +6391,12 @@ function StudentReview() {
   const reviewResult = results.find(r => r.attemptId === reviewDetailId) ?? null;
 
   useEffect(() => {
-    setReviewQs([]);
-    if (reviewResult?.allowReview) fetchAttemptReviewDetail(reviewResult.attemptId).then(setReviewQs);
+    if (!reviewResult) return;
+    if (!reviewResult.allowReview) { setReviewQs([]); return; }
+    setReviewQs(null);
+    let cancelled = false;
+    fetchAttemptReviewDetail(reviewResult.attemptId).then(rows => { if (!cancelled) setReviewQs(rows); });
+    return () => { cancelled = true; };
   }, [reviewResult?.attemptId, reviewResult?.allowReview]);
 
   return (
@@ -5602,7 +6410,9 @@ function StudentReview() {
           <h3 className="text-[14px] font-bold text-ink">Semua Asesmen</h3>
         </div>
         <div className="px-5 py-3">
-          {results.length === 0 ? (
+          {resultRows === null ? (
+            <SectionLoading message="Memuat riwayat asesmen..." />
+          ) : results.length === 0 ? (
             <div className="flex flex-col items-center gap-3 py-10 text-center">
               <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
                 <FileText className="h-6 w-6 text-ink-tertiary" />
@@ -5635,8 +6445,13 @@ function StudentReview() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-5 space-y-4">
-              {reviewQs.length === 0 ? (
-                <p className="text-[13px] text-ink-secondary text-center py-8">Detail soal tidak tersedia</p>
+              {sourceError && <AlertPanel tone="danger" title="Tidak dapat membuka sumber">{sourceError}</AlertPanel>}
+              {reviewQs === null ? (
+                <SectionLoading message="Memuat pembahasan..." />
+              ) : reviewQs.length === 0 ? (
+                <p className="text-[13px] text-ink-secondary text-center py-8">
+                  {reviewResult.allowReview ? "Detail soal tidak tersedia" : "Guru tidak mengizinkan pembahasan untuk asesmen ini."}
+                </p>
               ) : reviewQs.map((q, idx) => {
                 const studentAns = q.yourAnswer ?? undefined;
                 const isWrong = studentAns !== undefined && !q.isCorrect;
@@ -5679,8 +6494,11 @@ function StudentReview() {
                         <p className="text-[11px] text-ink leading-relaxed">{q.explanation}</p>
                         {q.sourceTitle && (
                           <button onClick={async () => {
+                            setSourceError(null);
                             const mat = materials.find(m => m.title.toLowerCase() === q.sourceTitle?.toLowerCase());
-                            if (mat?.fileUrl) await downloadMaterialFile(mat.fileUrl, mat.title);
+                            if (!mat) { setSourceError("Materi sumber ini sudah tidak tersedia di pustaka kelasmu."); return; }
+                            const err = await downloadMaterialFile(mat.id);
+                            if (err) setSourceError(err);
                           }}
                             className="inline-flex items-center gap-1 mt-2 rounded-[4px] border border-primary/30 bg-primary-soft px-1.5 py-0.5 text-[10px] font-semibold text-primary hover:bg-primary/10 transition-colors cursor-pointer">
                             <BookOpen className="h-3 w-3 shrink-0" />
@@ -5710,19 +6528,52 @@ function StudentReview() {
 
 // ── Student Weak Topics ───────────────────────────────────────────────────────
 
+function weakTopicMastery(accuracy: number): "Perlu Bantuan" | "Berkembang" {
+  return accuracy < 50 ? "Perlu Bantuan" : "Berkembang";
+}
+
 function StudentWeakTopics() {
+  const router = useRouter();
+  const overview = useStudentOverview();
+  const topics = overview?.weakTopics ?? [];
+  const critical = topics.filter(t => t.accuracy < 50);
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Topik Lemah" title="Area yang Perlu Diperkuat"
-        description="Topik ini masih memerlukan latihan lebih lanjut." />
-      {weakTopics.filter(t => t.accuracyRate < 50).length > 0 && (
-        <AlertPanel tone="warning" title={`${weakTopics.filter(t => t.accuracyRate < 50).length} topik perlu perhatian segera`}>
-          Akurasi di bawah 50% menunjukkan kesenjangan pemahaman yang perlu diperbaiki sebelum asesmen berikutnya.
-        </AlertPanel>
+        description="Topik dengan akurasi di bawah 70%, dihitung dari jawaban asesmen dan latihanmu." />
+      {overview === undefined ? (
+        <SectionLoading message="Menganalisis topik..." />
+      ) : overview === null ? (
+        <AlertPanel tone="danger" title="Gagal memuat topik lemah">Coba muat ulang halaman.</AlertPanel>
+      ) : topics.length === 0 ? (
+        <EmptyState icon={CheckCircle2} title="Belum ada topik lemah"
+          description="Topik lemah muncul setelah kamu mengerjakan asesmen atau latihan. Kalau sudah, berarti semua topikmu di atas 70% — mantap!" />
+      ) : (
+        <>
+          {critical.length > 0 && (
+            <AlertPanel tone="warning" title={`${critical.length} topik perlu perhatian segera`}>
+              Akurasi di bawah 50% menunjukkan kesenjangan pemahaman yang perlu diperbaiki sebelum asesmen berikutnya.
+            </AlertPanel>
+          )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {topics.map(t => (
+              <div key={`${t.subject}-${t.topic}`} className="rounded-card border border-border bg-surface p-4">
+                <div className="flex items-start justify-between gap-2 mb-3">
+                  <div>
+                    <div className="text-[13px] font-semibold text-ink">{t.topic}</div>
+                    <div className="text-[11px] text-ink-secondary">{t.subject} · {t.attempted} soal dicoba</div>
+                  </div>
+                  <MasteryBadge level={weakTopicMastery(t.accuracy)} />
+                </div>
+                <TopicBar label="Akurasi" value={t.accuracy} />
+                <Button variant="default" className="w-full mt-3 h-7 text-[11px]" onClick={() => router.push("/student/adaptive")}>
+                  <Zap className="mr-1.5 h-3 w-3" />Latihan Topik Ini
+                </Button>
+              </div>
+            ))}
+          </div>
+        </>
       )}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {weakTopics.map(t => <WeakTopicRow key={t.id} topic={t} />)}
-      </div>
     </div>
   );
 }
@@ -5795,17 +6646,21 @@ function StudentTutor() {
   const [isTyping, setIsTyping] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [localMats, setLocalMats] = useState<MaterialWithFile[]>([]);
+  // The AI is grounded on this list, so sending before it loads would
+  // wrongly answer "tidak ada materi".
+  const [matsLoaded, setMatsLoaded] = useState(false);
   const textareaRef = React.useRef<HTMLTextAreaElement>(null);
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
 
-  useEffect(() => { fetchStudentMaterialsReal().then(setLocalMats); }, []);
+  useEffect(() => { fetchStudentMaterialsReal().then(rows => { setLocalMats(rows); setMatsLoaded(true); }); }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   async function downloadMat(mat: MaterialWithFile) {
-    if (mat.fileUrl) await downloadMaterialFile(mat.fileUrl, mat.title);
+    const err = await downloadMaterialFile(mat.id);
+    if (err) setApiError(err);
   }
 
   function renderContent(content: string) {
@@ -5820,7 +6675,7 @@ function StudentTutor() {
             const mat = localMats.find(m => m.title.toLowerCase().includes(title.toLowerCase()) || title.toLowerCase().includes(m.title.toLowerCase()));
             return (
               <button key={i}
-                onClick={() => mat && downloadMat(mat)}
+                onClick={() => mat ? downloadMat(mat) : setApiError(`Materi "${title}" tidak ditemukan di pustaka kelasmu.`)}
                 title={mat ? `Unduh: ${mat.title}` : title}
                 className="inline-flex items-center gap-1 rounded-[4px] border border-primary/30 bg-primary-soft px-1.5 py-0.5 text-[11px] font-semibold text-primary hover:bg-primary/10 transition-colors cursor-pointer mx-0.5 align-middle">
                 <BookOpen className="h-3 w-3 shrink-0" />
@@ -5835,7 +6690,7 @@ function StudentTutor() {
   }
 
   async function send(text: string) {
-    if (!text.trim() || isTyping) return;
+    if (!text.trim() || isTyping || !matsLoaded) return;
     const userMsg: ChatMessage = { id: Date.now().toString(), role: "user", content: text, timestamp: "Baru saja" };
     setMessages(prev => [...prev, userMsg]);
     setInput("");
@@ -5850,9 +6705,15 @@ function StudentTutor() {
         .filter(m => m.id !== "greeting")
         .map(m => ({ role: m.role, content: m.content }));
 
+      // The bearer token lets the server apply this class's teacher AI
+      // settings (teaching style + grounding) to the reply.
+      const { data: { session } } = await supabase.auth.getSession();
       const res = await fetch("/api/chat", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
         body: JSON.stringify({
           messages: [...history, { role: "user", content: text }],
           materials: localMats.map(m => ({ title: m.title, topic: m.subject ?? "" })),
@@ -5864,29 +6725,37 @@ function StudentTutor() {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let accumulated = "";
+      let streamError: string | null = null;
+      let buffer = "";
 
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        for (const line of chunk.split("\n")) {
+        // SSE events can be split across network chunks - only parse
+        // complete lines and keep the remainder for the next read.
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        for (const line of lines) {
           if (!line.startsWith("data: ")) continue;
           const data = line.slice(6);
           if (data === "[DONE]") break;
-          try {
-            const parsed = JSON.parse(data) as { text?: string; error?: string };
-            if (parsed.error) throw new Error(parsed.error);
+          let parsed: { text?: string; error?: string };
+          try { parsed = JSON.parse(data); } catch { continue; /* skip malformed chunk */ }
+          if (parsed.error) { streamError = parsed.error; continue; }
+          {
             if (parsed.text) {
               accumulated += parsed.text;
               setMessages(prev => prev.map(m =>
                 m.id === assistantId ? { ...m, content: accumulated } : m
               ));
             }
-          } catch { /* skip malformed chunks */ }
+          }
         }
       }
+      if (streamError && !accumulated) throw new Error(streamError);
     } catch (err) {
-      const msg = err instanceof Error ? err.message : "Gagal menghubungi AI";
+      const msg = err instanceof Error ? `Gagal menghubungi AI Companion (${err.message}). Coba lagi sebentar lagi.` : "Gagal menghubungi AI Companion";
       setApiError(msg);
       setMessages(prev => prev.filter(m => m.id !== assistantId));
     } finally {
@@ -5922,7 +6791,7 @@ function StudentTutor() {
         {apiError && (
           <div className="flex items-center gap-2 rounded-[10px] border border-danger/20 bg-danger-light px-4 py-2.5">
             <AlertCircle className="h-4 w-4 shrink-0 text-danger" />
-            <span className="text-[12px] text-danger">{apiError} — pastikan API key sudah diisi di .env.local</span>
+            <span className="text-[12px] text-danger">{apiError}</span>
           </div>
         )}
       </div>
@@ -5945,10 +6814,10 @@ function StudentTutor() {
             }
           }}
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); } }}
-          placeholder="Tanyakan tentang materi pelajaran..."
+          placeholder={matsLoaded ? "Tanyakan tentang materi pelajaran..." : "Memuat materi kelasmu..."}
           rows={1}
           className="flex-1 resize-none bg-transparent text-[13px] text-ink placeholder:text-ink-tertiary focus:outline-none leading-relaxed" />
-        <Button variant="default" className="h-8 w-8 p-0 shrink-0" onClick={() => send(input)} disabled={!input.trim() || isTyping}>
+        <Button variant="default" className="h-8 w-8 p-0 shrink-0" onClick={() => send(input)} disabled={!input.trim() || isTyping || !matsLoaded}>
           <Send className="h-4 w-4" />
         </Button>
       </div>
@@ -5960,16 +6829,18 @@ function StudentTutor() {
 
 function StudentProgress() {
   const ownStats = useOwnStudentStats();
+  const [progressLoaded, setProgressLoaded] = useState(false);
   const [scoreTrendData, setScoreTrendData] = useState<ScoreTrendData>({ trend: [], labels: [] });
   const [subjectMasteryData, setSubjectMasteryData] = useState<SubjectMasteryEntry[]>([]);
 
   useEffect(() => {
-    getCurrentStudent().then(student => {
-      if (!student) return;
-      fetchScoreTrendAndSubjectMastery(student.id).then(({ scoreTrend, subjectMastery }) => {
+    getCurrentStudent().then(async student => {
+      if (student) {
+        const { scoreTrend, subjectMastery } = await fetchScoreTrendAndSubjectMastery(student.id);
         setScoreTrendData(scoreTrend);
         setSubjectMasteryData(subjectMastery);
-      });
+      }
+      setProgressLoaded(true);
     });
   }, []);
 
@@ -5983,7 +6854,9 @@ function StudentProgress() {
         <div className="col-span-1 lg:col-span-2 rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-1">Tren Nilai</h3>
           <p className="text-[12px] text-ink-secondary mb-4">Berdasarkan riwayat asesmen</p>
-          {scoreTrendData.trend.length === 0 ? (
+          {!progressLoaded ? (
+            <SectionLoading className="h-[100px] py-0" />
+          ) : scoreTrendData.trend.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah mengerjakan asesmen</p>
             </div>
@@ -5993,7 +6866,9 @@ function StudentProgress() {
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Penguasaan Materi</h3>
-          {subjectMasteryData.length === 0 ? (
+          {!progressLoaded ? (
+            <SectionLoading className="h-[100px] py-0" />
+          ) : subjectMasteryData.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Belum ada data penguasaan</p>
             </div>
@@ -6010,22 +6885,41 @@ function StudentProgress() {
 
 // ── Student Achievements ──────────────────────────────────────────────────────
 
+const ACHIEVEMENT_EMOJI: Record<string, string> = {
+  BookOpen: "📚", Gem: "💎", GraduationCap: "🎓", Zap: "⚡", Crown: "👑", Flame: "🔥",
+};
+
 function StudentAchievements() {
-  const ownStats = useOwnStudentStats();
-  const earned = achievements.filter(a => a.earned);
-  const notEarned = achievements.filter(a => !a.earned);
+  const overview = useStudentOverview();
+  const ownStats = overview?.stats ?? null;
+  const list = overview?.achievements ?? [];
+  const earned = list.filter(a => a.earned);
+  const notEarned = list.filter(a => !a.earned);
+  const loading = overview === undefined;
+
+  const card = (a: StudentAchievementRow, got: boolean) => (
+    <div key={a.id} className={cn("rounded-card border p-4 text-center", got ? "border-success/30 bg-success-light" : "border-border bg-background opacity-60")}>
+      <div className="text-[28px] mb-1">{ACHIEVEMENT_EMOJI[a.icon ?? ""] ?? "🏅"}</div>
+      <div className="text-[12px] font-bold text-ink">{a.title}</div>
+      <div className="text-[10px] text-ink-secondary mt-0.5">{a.description}</div>
+      <div className={cn("text-[11px] font-semibold mt-1.5", got ? "text-success" : "text-ink-tertiary")}>+{a.xp} XP</div>
+      {got && a.earnedAt && (
+        <div className="text-[10px] text-ink-tertiary mt-0.5">{new Date(parseDbTime(a.earnedAt)).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" })}</div>
+      )}
+    </div>
+  );
 
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Pencapaian" title="Koleksi Pencapaian" />
 
       <div className="rounded-card border border-border bg-gradient-hero text-white p-6">
-        <div className="flex items-center gap-6">
+        <div className="flex items-center gap-6 flex-wrap">
           {[
-            { val: ownStats ? ownStats.xp.toLocaleString("id-ID") : "-", label: "Total XP" },
-            { val: earned.length, label: "Pencapaian" },
-            { val: ownStats ? `#${ownStats.rank}` : "-", label: "Peringkat Kelas" },
-            { val: ownStats ? `🔥 ${ownStats.streak}` : "🔥 -", label: "Hari Streak" },
+            { val: ownStats ? ownStats.xp.toLocaleString("id-ID") : "…", label: "Total XP" },
+            { val: loading ? "…" : earned.length, label: "Pencapaian" },
+            { val: ownStats ? `#${ownStats.rank}` : "…", label: ownStats ? `Peringkat dari ${ownStats.classSize}` : "Peringkat Kelas" },
+            { val: ownStats ? `🔥 ${ownStats.streak}` : "🔥 …", label: "Hari Streak" },
           ].map((s, i) => (
             <React.Fragment key={s.label}>
               {i > 0 && <div className="h-10 w-px bg-white/20" />}
@@ -6038,32 +6932,26 @@ function StudentAchievements() {
         </div>
       </div>
 
-      <div>
-        <h3 className="text-[14px] font-bold text-ink mb-3">Sudah Diraih ({earned.length})</h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-          {earned.map(a => (
-            <div key={a.id} className="rounded-card border border-success/30 bg-success-light p-4 text-center">
-              <div className="text-[28px] mb-1">{a.icon}</div>
-              <div className="text-[12px] font-bold text-ink">{a.title}</div>
-              <div className="text-[10px] text-ink-secondary mt-0.5">{a.description}</div>
-              <div className="text-[11px] font-semibold text-success mt-1.5">+{a.xp} XP</div>
-            </div>
-          ))}
-        </div>
-      </div>
-      <div>
-        <h3 className="text-[14px] font-bold text-ink mb-3">Belum Diraih ({notEarned.length})</h3>
-        <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">
-          {notEarned.map(a => (
-            <div key={a.id} className="rounded-card border border-border bg-background p-4 text-center opacity-60">
-              <div className="text-[28px] mb-1">{a.icon}</div>
-              <div className="text-[12px] font-bold text-ink">{a.title}</div>
-              <div className="text-[10px] text-ink-secondary mt-0.5">{a.description}</div>
-              <div className="text-[11px] font-semibold text-ink-tertiary mt-1.5">+{a.xp} XP</div>
-            </div>
-          ))}
-        </div>
-      </div>
+      {loading ? (
+        <SectionLoading message="Memuat pencapaian..." />
+      ) : overview === null ? (
+        <AlertPanel tone="danger" title="Gagal memuat pencapaian">Coba muat ulang halaman.</AlertPanel>
+      ) : (
+        <>
+          <div>
+            <h3 className="text-[14px] font-bold text-ink mb-3">Sudah Diraih ({earned.length})</h3>
+            {earned.length === 0 ? (
+              <p className="text-[12px] text-ink-tertiary">Belum ada pencapaian. Kerjakan asesmen dan latihan untuk mulai mengumpulkan!</p>
+            ) : (
+              <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">{earned.map(a => card(a, true))}</div>
+            )}
+          </div>
+          <div>
+            <h3 className="text-[14px] font-bold text-ink mb-3">Belum Diraih ({notEarned.length})</h3>
+            <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-3">{notEarned.map(a => card(a, false))}</div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -6211,18 +7099,19 @@ function ParentDashboard() {
 
 function ParentProgress() {
   const [child, setChild] = useState<ParentChild | null | undefined>(undefined);
-  const [stats, setStats] = useState<OwnStudentStats | null>(null);
+  const stats = useStudentOverview(child ? child.studentId : null)?.stats ?? null;
   const [scoreTrendData, setScoreTrendData] = useState<ScoreTrendData>({ trend: [], labels: [] });
   const [subjectMasteryData, setSubjectMasteryData] = useState<SubjectMasteryEntry[]>([]);
+  const [progressLoaded, setProgressLoaded] = useState(false);
 
   useEffect(() => {
     fetchParentPrimaryChild().then(c => {
       setChild(c);
       if (c) {
-        fetchClassRankedStats(c.studentId, c.classId).then(setStats);
         fetchScoreTrendAndSubjectMastery(c.studentId).then(({ scoreTrend, subjectMastery }) => {
           setScoreTrendData(scoreTrend);
           setSubjectMasteryData(subjectMastery);
+          setProgressLoaded(true);
         });
       }
     });
@@ -6230,7 +7119,7 @@ function ParentProgress() {
 
   const firstName = child?.fullName.split(" ")[0] ?? "Anak";
 
-  if (child === undefined) return null;
+  if (child === undefined) return <SectionLoading message="Memuat data anak..." />;
   if (child === null) {
     return (
       <div className="space-y-6">
@@ -6251,7 +7140,9 @@ function ParentProgress() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Tren Nilai</h3>
-          {scoreTrendData.trend.length === 0 ? (
+          {!progressLoaded ? (
+            <SectionLoading className="h-[100px] py-0" />
+          ) : scoreTrendData.trend.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Data akan muncul setelah anak mengerjakan asesmen</p>
             </div>
@@ -6261,7 +7152,9 @@ function ParentProgress() {
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm p-5">
           <h3 className="text-[14px] font-bold text-ink mb-4">Penguasaan Topik</h3>
-          {subjectMasteryData.length === 0 ? (
+          {!progressLoaded ? (
+            <SectionLoading className="h-[100px] py-0" />
+          ) : subjectMasteryData.length === 0 ? (
             <div className="flex items-center justify-center h-[100px] rounded-[8px] border border-dashed border-border">
               <p className="text-[12px] text-ink-tertiary">Belum ada data penguasaan</p>
             </div>
@@ -6278,7 +7171,7 @@ function ParentProgress() {
 
 function ParentAssessments() {
   const [child, setChild] = useState<ParentChild | null | undefined>(undefined);
-  const [results, setResults] = useState<ReviewListItem[]>([]);
+  const [results, setResults] = useState<ReviewListItem[] | null>(null);
 
   useEffect(() => {
     fetchParentPrimaryChild().then(c => {
@@ -6289,7 +7182,7 @@ function ParentAssessments() {
 
   const firstName = child?.fullName.split(" ")[0] ?? "Anak";
 
-  if (child === undefined) return null;
+  if (child === undefined) return <SectionLoading message="Memuat data anak..." />;
   if (child === null) {
     return (
       <div className="space-y-6">
@@ -6307,7 +7200,9 @@ function ParentAssessments() {
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="border-b border-border px-5 py-3.5"><h3 className="text-[14px] font-bold text-ink">Semua Asesmen</h3></div>
         <div className="px-5 py-1">
-          {results.length === 0 ? (
+          {results === null ? (
+            <SectionLoading message="Memuat riwayat asesmen..." />
+          ) : results.length === 0 ? (
             <p className="text-[12px] text-ink-tertiary text-center py-6">Belum ada asesmen diselesaikan.</p>
           ) : results.map(r => (
             <RecentAssessmentRow key={r.attemptId} title={r.assessmentTitle} type={r.type} date={r.date} score={r.score} />
@@ -6321,30 +7216,58 @@ function ParentAssessments() {
 function ParentRecommendations() {
   const [child, setChild] = useState<ParentChild | null | undefined>(undefined);
   useEffect(() => { fetchParentPrimaryChild().then(setChild); }, []);
-  const childName = child?.fullName ?? "anak Anda";
-  const parentRecs = [...teachingRecommendations].sort((a, b) => b.wrongCount - a.wrongCount);
+  const overview = useStudentOverview(child ? child.studentId : null);
+  const firstName = child?.fullName.split(" ")[0] ?? "Anak";
+  const topics = overview?.weakTopics ?? [];
+
+  if (child === undefined) return <SectionLoading message="Memuat data anak..." />;
+  if (child === null) {
+    return (
+      <div className="space-y-6">
+        <PageHeader eyebrow="Rekomendasi Belajar" title="Belum ada anak terhubung" />
+        <AlertPanel tone="primary" title="Belum ada tautan ke akun siswa">
+          Akun ini belum terhubung ke akun anak manapun. Hubungi admin sekolah untuk menautkan akun anak Anda.
+        </AlertPanel>
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Rekomendasi Pengajaran" title="Saran Belajar dari Guru Kelas"
-        description={`Rekomendasi pengajaran untuk ${childName} berdasarkan analisis AI dan penilaian guru.`} />
-      {parentRecs.length >= 2 && (
-        <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
-          <p>{childName.split(" ")[0]} paling sering salah di <strong className="text-ink">{parentRecs[0].topic}</strong> ({parentRecs[0].wrongCount}× salah) dan <strong className="text-ink">{parentRecs[1].topic}</strong> ({parentRecs[1].wrongCount}× salah). Fokus latihan pada topik-topik ini.</p>
-        </AIInsightPanel>
-      )}
-      <div className="space-y-4">
-        {parentRecs.length === 0 ? (
-          <div className="flex flex-col items-center gap-3 py-10 text-center">
-            <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
-              <Lightbulb className="h-6 w-6 text-ink-tertiary" />
-            </div>
-            <p className="text-[14px] font-semibold text-ink">Belum ada rekomendasi</p>
-            <p className="text-[12px] text-ink-secondary">Rekomendasi akan muncul setelah ada hasil asesmen</p>
+      <PageHeader eyebrow="Rekomendasi Belajar" title={`Fokus Belajar ${firstName}`}
+        description={`Topik yang perlu diperkuat ${firstName}, dihitung dari jawaban asesmen dan latihannya.`} />
+      {overview === undefined ? (
+        <SectionLoading message="Menganalisis hasil belajar..." />
+      ) : overview === null ? (
+        <AlertPanel tone="danger" title="Gagal memuat rekomendasi">Coba muat ulang halaman.</AlertPanel>
+      ) : topics.length === 0 ? (
+        <EmptyState icon={Lightbulb} title="Belum ada topik yang perlu perhatian"
+          description={`Rekomendasi muncul setelah ${firstName} mengerjakan asesmen atau latihan dan ada topik dengan akurasi di bawah 70%.`} />
+      ) : (
+        <>
+          <AIInsightPanel title="Ringkasan untuk Orang Tua">
+            <p>
+              {firstName} paling perlu latihan di <strong className="text-ink">{topics[0].topic}</strong> ({topics[0].subject}, akurasi {topics[0].accuracy}%)
+              {topics[1] && <> dan <strong className="text-ink">{topics[1].topic}</strong> ({topics[1].accuracy}%)</>}.
+              Dorong {firstName} mengerjakan Latihan Adaptif 15 menit per hari pada topik-topik ini.
+            </p>
+          </AIInsightPanel>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {topics.slice(0, 6).map(t => (
+              <div key={`${t.subject}-${t.topic}`} className="rounded-card border border-border bg-surface p-4">
+                <div className="flex items-start justify-between gap-2 mb-3">
+                  <div>
+                    <div className="text-[13px] font-semibold text-ink">{t.topic}</div>
+                    <div className="text-[11px] text-ink-secondary">{t.subject} · {t.attempted} soal dicoba</div>
+                  </div>
+                  <MasteryBadge level={weakTopicMastery(t.accuracy)} />
+                </div>
+                <TopicBar label="Akurasi" value={t.accuracy} />
+              </div>
+            ))}
           </div>
-        ) : (
-          parentRecs.slice(0, 2).map(r => <RecommendationCard key={r.id} rec={r} />)
-        )}
-      </div>
+        </>
+      )}
     </div>
   );
 }
@@ -6380,69 +7303,33 @@ function AdminTableHead({ cols }: { cols: string[] }) {
 }
 
 function AdminApp({ page }: { page: string }) {
+  // dashboard / teachers / classes are standalone pages (src/app/admin/*).
   const screens: Record<string, React.ReactNode> = {
-    dashboard: <AdminDashboard />,
     schools: <AdminSchools />,
-    teachers: <AdminTeachers />,
     students: <AdminStudents />,
-    classes: <AdminClasses />,
     assessments: <AdminAssessments />,
     analytics: <AdminAnalytics />,
     settings: <AdminSettings />,
   };
   return (
     <AppShell role="admin" nav={adminNav}>
-      {screens[page] ?? <AdminDashboard />}
+      {screens[page] ?? <AdminSchools />}
     </AppShell>
   );
 }
 
-function AdminDashboard() {
-  return (
-    <div className="space-y-6">
-      <div>
-        <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-ink-secondary mb-1">Admin Platform</p>
-        <h1 className="text-2xl font-bold text-ink">Dasbor {school.name}</h1>
-        <p className="text-[13px] text-ink-secondary mt-1">Semester Ganjil 2025/2026 · 48 Guru · 1.312 Siswa</p>
-      </div>
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {adminStats.map(s => <StatCard key={s.label} {...s} />)}
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
-        <div className="col-span-1 lg:col-span-2 rounded-card border border-border bg-surface shadow-sm">
-          <div className="border-b border-border px-5 py-3.5">
-            <h3 className="text-[14px] font-bold text-ink">Aktivitas Platform — 7 Hari Terakhir</h3>
-          </div>
-          <div className="p-5">
-            <SimpleChart data={[142, 188, 165, 201, 178, 215, 198]} labels={["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]} height={120} />
-          </div>
-        </div>
-        <div className="rounded-card border border-border bg-surface shadow-sm p-5">
-          <h3 className="text-[14px] font-bold text-ink mb-4">Guru Aktif per Mapel</h3>
-          <div className="space-y-3">
-            {[
-              { label: "Matematika", value: 80 },
-              { label: "Fisika", value: 60 },
-              { label: "Biologi", value: 50 },
-              { label: "Kimia", value: 70 },
-              { label: "Bahasa Indonesia", value: 90 },
-            ].map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
-          </div>
-        </div>
-      </div>
-
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        <AlertPanel tone="danger" title="Kapasitas penyimpanan 78%">
-          Ruang penyimpanan hampir penuh. Pertimbangkan upgrade kapasitas atau arsipkan materi lama.
-        </AlertPanel>
-        <AlertPanel tone="warning" title="3 guru belum aktif minggu ini">
-          Pak Doni, Bu Wulan, dan 1 guru lain belum login sejak Senin. Hubungi untuk memastikan tidak ada kendala.
-        </AlertPanel>
-      </div>
-    </div>
-  );
+/** undefined = loading, { error } = failed */
+function useAdminData<T>(section: "students" | "assessments" | "analytics"): T | { error: string } | undefined {
+  const [data, setData] = useState<T | { error: string } | undefined>(undefined);
+  useEffect(() => {
+    let cancelled = false;
+    apiPost<T>("/api/admin/data", { section }).then(res => {
+      if (cancelled) return;
+      setData(res.error ? { error: res.error } : res);
+    });
+    return () => { cancelled = true; };
+  }, [section]);
+  return data;
 }
 
 type RealSchoolRow = { id: string; name: string; city: string | null; province: string | null; status: string; students: number; teachers: number };
@@ -6528,224 +7415,231 @@ function AdminSchools() {
   );
 }
 
-function AdminTeachers() {
-  const mockTeachers = [
-    { id: "t1", name: "Bu Ratna Dewi", school: "SMA Negeri 1 Bandung", subject: "Fisika", classes: 3, assessments: 12, status: "Aktif" },
-    { id: "t2", name: "Pak Budi Santoso", school: "SMA Negeri 1 Bandung", subject: "Matematika", classes: 4, assessments: 18, status: "Aktif" },
-    { id: "t3", name: "Bu Sari Utami", school: "SMA Negeri 2 Bandung", subject: "Kimia", classes: 3, assessments: 9, status: "Aktif" },
-    { id: "t4", name: "Pak Doni", school: "SMA Negeri 1 Bandung", subject: "Biologi", classes: 2, assessments: 4, status: "Tidak Aktif" },
-    { id: "t5", name: "Bu Wulan", school: "SMA Negeri 1 Bandung", subject: "Bahasa Indonesia", classes: 3, assessments: 7, status: "Tidak Aktif" },
-  ];
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <PageHeader eyebrow="Admin" title="Manajemen Guru" />
-        <Button variant="default" className="h-8 text-[12px]"><Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Guru</Button>
-      </div>
-      <div className="grid grid-cols-3 gap-4">
-        {[
-          { label: "Total Guru", value: "48", detail: "Platform", tone: "primary" as const },
-          { label: "Aktif Minggu Ini", value: "45", detail: "93.8% aktif", tone: "success" as const },
-          { label: "Perlu Perhatian", value: "3", detail: "Tidak login >7 hari", tone: "danger" as const },
-        ].map(s => <StatCard key={s.label} {...s} />)}
-      </div>
-      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
-        <table className="w-full">
-          <AdminTableHead cols={["Nama Guru", "Sekolah", "Mapel", "Kelas", "Asesmen", "Status", "Aksi"]} />
-          <tbody>
-            {mockTeachers.map(t => (
-              <tr key={t.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
-                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{t.name}</span></td>
-                <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary">{t.school}</span></td>
-                <td className="px-4 py-3 text-[12px] text-ink">{t.subject}</td>
-                <td className="px-4 py-3 text-[12px] text-ink">{t.classes}</td>
-                <td className="px-4 py-3 text-[12px] text-ink">{t.assessments}</td>
-                <td className="px-4 py-3 text-[12px]"><Badge tone={t.status === "Aktif" ? "success" : "danger"}>{t.status}</Badge></td>
-                <td className="px-4 py-3 text-right">
-                  <div className="flex justify-end gap-1.5">
-                    <Button variant="ghost" className="h-7 px-2 text-[11px]"><Eye className="h-3.5 w-3.5" /></Button>
-                    <Button variant="ghost" className="h-7 px-2 text-[11px]"><MessageCircle className="h-3.5 w-3.5" /></Button>
-                  </div>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
+type AdminStudentRow = {
+  id: string; name: string; nis: string | null; school: string; className: string | null; status: string;
+  avgScore: number | null; assessments: number; xp: number; streak: number; lastActiveDate: string | null;
+};
+
+const STUDENT_STATUS_LABEL: Record<string, { label: string; tone: "success" | "warning" | "danger" }> = {
+  ACTIVE: { label: "Aktif", tone: "success" },
+  PENDING: { label: "Menunggu", tone: "warning" },
+  REJECTED: { label: "Ditolak", tone: "danger" },
+};
+
+function formatLastActive(date: string | null): string {
+  if (!date) return "Belum pernah";
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
+  const days = Math.round((new Date(today).getTime() - new Date(date).getTime()) / 86400000);
+  if (days <= 0) return "Hari ini";
+  if (days === 1) return "Kemarin";
+  if (days < 7) return `${days} hari lalu`;
+  return new Date(date).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" });
+}
+
+function downloadCsv(fileName: string, rows: (string | number | null)[][]) {
+  const csv = "\uFEFF" + rows.map(r => r.map(c => `"${String(c ?? "").replace(/"/g, '""')}"`).join(",")).join("\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8;" }));
+  const a = document.createElement("a");
+  a.href = url; a.download = fileName; a.click();
+  URL.revokeObjectURL(url);
 }
 
 function AdminStudents() {
-  const mockStudentList = [
-    { id: "s1", name: "Adi Pratama", school: "SMA N 1 Bandung", class: "XI IPA 2", avgScore: 88, lastActive: "Hari ini" },
-    { id: "s2", name: "Budi Rahmat", school: "SMA N 1 Bandung", class: "XI IPA 2", avgScore: 76, lastActive: "Kemarin" },
-    { id: "s3", name: "Citra Lestari", school: "SMA N 2 Bandung", class: "X IPS 1", avgScore: 91, lastActive: "Hari ini" },
-    { id: "s4", name: "Dewi Amalia", school: "SMA N 1 Bandung", class: "XII IPA 1", avgScore: 82, lastActive: "3 hari lalu" },
-    { id: "s5", name: "Eko Susanto", school: "SMP N 5 Bandung", class: "IX A", avgScore: 68, lastActive: "1 minggu lalu" },
-  ];
+  const data = useAdminData<{ students: AdminStudentRow[] }>("students");
+  const [search, setSearch] = useState("");
+  const [statusFilter, setStatusFilter] = useState("ALL");
+  const students = data && "students" in data ? data.students : [];
+  const filtered = students.filter(s =>
+    (statusFilter === "ALL" || s.status === statusFilter) &&
+    (!search || `${s.name} ${s.nis ?? ""} ${s.className ?? ""} ${s.school}`.toLowerCase().includes(search.toLowerCase())));
+  const active = students.filter(s => s.status === "ACTIVE");
+  const scored = active.filter(s => s.avgScore != null);
+  const today = new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Jakarta" });
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <PageHeader eyebrow="Admin" title="Manajemen Siswa" />
-        <div className="flex gap-2">
-          <Button variant="outline" className="h-8 text-[12px]"><Upload className="mr-1.5 h-3.5 w-3.5" />Import CSV</Button>
-          <Button variant="default" className="h-8 text-[12px]"><Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Siswa</Button>
-        </div>
-      </div>
-      <div className="grid grid-cols-3 gap-4">
+      <PageHeader eyebrow="Admin" title="Manajemen Siswa"
+        description="Siswa mendaftar sendiri lewat halaman Daftar, lalu disetujui dan ditempatkan di kelas dari Dasbor."
+        actions={
+          <div className="flex gap-2">
+            <Link href="/admin/dashboard"><Button variant="outline" className="h-8 text-[12px]"><Users className="mr-1.5 h-3.5 w-3.5" />Persetujuan Siswa</Button></Link>
+            <Button variant="default" className="h-8 text-[12px]" disabled={filtered.length === 0} onClick={() => downloadCsv("siswa.csv", [
+              ["Nama", "NIS", "Sekolah", "Kelas", "Status", "Rata-rata", "Asesmen", "XP", "Streak", "Terakhir Aktif"],
+              ...filtered.map(s => [s.name, s.nis, s.school, s.className, STUDENT_STATUS_LABEL[s.status]?.label ?? s.status, s.avgScore, s.assessments, s.xp, s.streak, formatLastActive(s.lastActiveDate)]),
+            ])}><Download className="mr-1.5 h-3.5 w-3.5" />Ekspor CSV</Button>
+          </div>
+        } />
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {[
-          { label: "Total Siswa", value: "1.312", detail: "Seluruh sekolah", tone: "primary" as const },
-          { label: "Aktif Bulan Ini", value: "1.189", detail: "90.6% aktif", tone: "success" as const },
-          { label: "Rata-rata Nilai", value: "79.4", detail: "Semua asesmen", tone: "neutral" as const },
+          { label: "Siswa Aktif", value: data === undefined ? "…" : `${active.length}`, detail: `${students.length - active.length} menunggu/ditolak`, tone: "primary" as const },
+          { label: "Aktif Hari Ini", value: data === undefined ? "…" : `${active.filter(s => s.lastActiveDate === today).length}`, detail: "Mengerjakan latihan/asesmen", tone: "success" as const },
+          { label: "Rata-rata Nilai", value: data === undefined ? "…" : scored.length ? `${Math.round(scored.reduce((a, s) => a + (s.avgScore ?? 0), 0) / scored.length)}` : "—", detail: "Siswa yang sudah dinilai", tone: "neutral" as const },
         ].map(s => <StatCard key={s.label} {...s} />)}
       </div>
-      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
-        <table className="w-full">
-          <AdminTableHead cols={["Nama Siswa", "Sekolah", "Kelas", "Rata-rata Nilai", "Terakhir Aktif", "Aksi"]} />
-          <tbody>
-            {mockStudentList.map(s => (
-              <tr key={s.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
-                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{s.name}</span></td>
-                <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary">{s.school}</span></td>
-                <td className="px-4 py-3 text-[12px] text-ink">{s.class}</td>
-                <td className="px-4 py-3 text-[12px]">
-                  <span className={cn("font-semibold", s.avgScore >= 80 ? "text-success" : s.avgScore >= 70 ? "text-warning" : "text-danger")}>{s.avgScore}</span>
-                </td>
-                <td className="px-4 py-3 text-[12px] text-ink">{s.lastActive}</td>
-                <td className="px-4 py-3 text-right">
-                  <Button variant="ghost" className="h-7 px-2 text-[11px]"><Eye className="h-3.5 w-3.5" /></Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="flex flex-wrap items-center gap-3">
+        <div className="flex items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-2 w-full max-w-sm">
+          <Search className="h-3.5 w-3.5 shrink-0 text-ink-tertiary" />
+          <input type="text" placeholder="Cari nama, NIS, kelas, sekolah..." value={search} onChange={e => setSearch(e.target.value)}
+            className="flex-1 bg-transparent text-[13px] placeholder:text-ink-tertiary focus:outline-none" />
+        </div>
+        <div className="w-44">
+          <SelectField value={statusFilter} onChange={setStatusFilter} options={[
+            { value: "ALL", label: "Semua status" }, { value: "ACTIVE", label: "Aktif" }, { value: "PENDING", label: "Menunggu" }, { value: "REJECTED", label: "Ditolak" },
+          ]} />
+        </div>
       </div>
+      {data === undefined ? <SectionLoading message="Memuat data siswa..." /> : "error" in data ? (
+        <AlertPanel tone="danger" title="Gagal memuat data siswa">{data.error}</AlertPanel>
+      ) : filtered.length === 0 ? (
+        <EmptyState icon={Users} title={students.length === 0 ? "Belum ada siswa" : "Tidak ada siswa yang cocok"} description={students.length === 0 ? "Siswa akan muncul setelah mendaftar." : "Ubah pencarian atau filter status."} />
+      ) : (
+        <div className="rounded-card border border-border bg-surface shadow-sm overflow-x-auto">
+          <table className="w-full min-w-[720px]">
+            <AdminTableHead cols={["Nama Siswa", "Sekolah", "Kelas", "Rata-rata", "XP · Streak", "Terakhir Aktif", "Status"]} />
+            <tbody>
+              {filtered.map(s => {
+                const st = STUDENT_STATUS_LABEL[s.status] ?? { label: s.status, tone: "warning" as const };
+                return (
+                  <tr key={s.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
+                    <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{s.name}</span>{s.nis && <span className="block text-[10px] text-ink-tertiary">NIS {s.nis}</span>}</td>
+                    <td className="px-4 py-3 text-[12px] text-ink-secondary">{s.school}</td>
+                    <td className="px-4 py-3 text-[12px] text-ink">{s.className ?? <span className="text-warning">Belum ditempatkan</span>}</td>
+                    <td className="px-4 py-3 text-[12px]">
+                      {s.avgScore == null ? <span className="text-ink-tertiary">—</span> : <span className={cn("font-semibold", s.avgScore >= 80 ? "text-success" : s.avgScore >= 65 ? "text-warning" : "text-danger")}>{s.avgScore}</span>}
+                      <span className="block text-[10px] text-ink-tertiary">{s.assessments} asesmen</span>
+                    </td>
+                    <td className="px-4 py-3 text-[12px] text-ink">{s.xp.toLocaleString("id-ID")} XP · 🔥{s.streak}</td>
+                    <td className="px-4 py-3 text-[12px] text-ink">{formatLastActive(s.lastActiveDate)}</td>
+                    <td className="px-4 py-3 text-[12px]"><Badge tone={st.tone}>{st.label}</Badge></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
 
-function AdminClasses() {
-  const mockClasses = [
-    { id: "c1", name: "XI IPA 2", school: "SMA N 1 Bandung", teacher: "Bu Ratna Dewi", students: 32, avgScore: 82 },
-    { id: "c2", name: "XI IPA 1", school: "SMA N 1 Bandung", teacher: "Pak Budi Santoso", students: 34, avgScore: 78 },
-    { id: "c3", name: "XII IPA 1", school: "SMA N 1 Bandung", teacher: "Bu Ratna Dewi", students: 30, avgScore: 86 },
-    { id: "c4", name: "X IPS 1", school: "SMA N 2 Bandung", teacher: "Bu Sari Utami", students: 28, avgScore: 74 },
-    { id: "c5", name: "IX A", school: "SMP N 5 Bandung", teacher: "Pak Hendra", students: 35, avgScore: 71 },
-  ];
-  return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <PageHeader eyebrow="Admin" title="Manajemen Kelas" />
-        <Button variant="default" className="h-8 text-[12px]"><Plus className="mr-1.5 h-3.5 w-3.5" />Buat Kelas</Button>
-      </div>
-      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
-        <table className="w-full">
-          <AdminTableHead cols={["Kelas", "Sekolah", "Wali Kelas", "Jumlah Siswa", "Rata-rata Nilai", "Aksi"]} />
-          <tbody>
-            {mockClasses.map(c => (
-              <tr key={c.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
-                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{c.name}</span></td>
-                <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary">{c.school}</span></td>
-                <td className="px-4 py-3 text-[12px] text-ink">{c.teacher}</td>
-                <td className="px-4 py-3 text-[12px] text-ink">{c.students}</td>
-                <td className="px-4 py-3 text-[12px]">
-                  <div className="flex items-center gap-2">
-                    <div className="h-1.5 w-16 rounded-full bg-border overflow-hidden">
-                      <div className="h-full rounded-full bg-primary" style={{ width: `${c.avgScore}%` }} />
-                    </div>
-                    <span className="font-semibold text-ink">{c.avgScore}</span>
-                  </div>
-                </td>
-                <td className="px-4 py-3 text-right">
-                  <Button variant="ghost" className="h-7 px-2 text-[11px]"><Eye className="h-3.5 w-3.5" /></Button>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </div>
-  );
+type AdminAssessmentRow = {
+  id: string; title: string; type: string | null; status: string; openAt: string | null; closeAt: string | null;
+  school: string; className: string; subject: string; teacher: string; participants: number; avgScore: number | null;
+};
+
+function adminAssessmentStatus(a: AdminAssessmentRow, now: number): { label: string; tone: "success" | "warning" | "primary" | "neutral" } {
+  if (a.status === "draft") return { label: "Draf", tone: "neutral" };
+  if (a.status === "archived") return { label: "Diarsipkan", tone: "neutral" };
+  if (a.openAt && now < parseDbTime(a.openAt)) return { label: "Terjadwal", tone: "warning" };
+  if (a.closeAt && now >= parseDbTime(a.closeAt)) return { label: "Selesai", tone: "success" };
+  return { label: "Berlangsung", tone: "primary" };
 }
 
 function AdminAssessments() {
-  const platformAssessments = [
-    { id: "a1", title: "Tes Diagnostik Fisika XI", school: "SMA N 1 Bandung", teacher: "Bu Ratna", participants: 32, avgScore: 78, status: "Selesai" },
-    { id: "a2", title: "Kuis Fungsi Kuadrat", school: "SMA N 1 Bandung", teacher: "Pak Budi", participants: 34, avgScore: 82, status: "Selesai" },
-    { id: "a3", title: "UTS Kimia X", school: "SMA N 2 Bandung", teacher: "Bu Sari", participants: 28, avgScore: 0, status: "Terjadwal" },
-    { id: "a4", title: "Latihan Adaptif Biologi", school: "SMA N 1 Bandung", teacher: "Pak Doni", participants: 30, avgScore: 71, status: "Selesai" },
-  ];
+  const data = useAdminData<{ assessments: AdminAssessmentRow[] }>("assessments");
+  const list = data && "assessments" in data ? data.assessments : [];
+  const now = Date.now();
+  const published = list.filter(a => a.status === "published");
+  const withScores = list.filter(a => a.avgScore != null);
+
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <PageHeader eyebrow="Admin" title="Asesmen Platform" />
-        <Button variant="outline" className="h-8 text-[12px]"><Download className="mr-1.5 h-3.5 w-3.5" />Ekspor Laporan</Button>
-      </div>
-      <div className="grid grid-cols-3 gap-4">
+      <PageHeader eyebrow="Admin" title="Asesmen"
+        actions={
+          <Button variant="outline" className="h-8 text-[12px]" disabled={list.length === 0} onClick={() => downloadCsv("laporan-asesmen.csv", [
+            ["Judul", "Tipe", "Sekolah", "Kelas", "Mapel", "Guru", "Status", "Dibuka", "Ditutup", "Peserta", "Rata-rata"],
+            ...list.map(a => [a.title, a.type, a.school, a.className, a.subject, a.teacher, adminAssessmentStatus(a, now).label,
+              a.openAt ? new Date(parseDbTime(a.openAt)).toLocaleString("id-ID") : "", a.closeAt ? new Date(parseDbTime(a.closeAt)).toLocaleString("id-ID") : "",
+              a.participants, a.avgScore]),
+          ])}><Download className="mr-1.5 h-3.5 w-3.5" />Ekspor Laporan</Button>
+        } />
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {[
-          { label: "Total Asesmen", value: "247", detail: "Semester ini", tone: "primary" as const },
-          { label: "Partisipasi Rata-rata", value: "96%", detail: "Seluruh kelas", tone: "success" as const },
-          { label: "Rata-rata Platform", value: "78.4", detail: "Semua sekolah", tone: "neutral" as const },
+          { label: "Asesmen Dipublikasikan", value: data === undefined ? "…" : `${published.length}`, detail: `${list.length - published.length} draf/arsip`, tone: "primary" as const },
+          { label: "Total Pengerjaan", value: data === undefined ? "…" : `${list.reduce((a, x) => a + x.participants, 0)}`, detail: "Asesmen yang sudah dikumpulkan", tone: "success" as const },
+          { label: "Rata-rata Nilai", value: data === undefined ? "…" : withScores.length ? `${Math.round(withScores.reduce((a, x) => a + (x.avgScore ?? 0), 0) / withScores.length)}` : "—", detail: "Rata-rata per asesmen", tone: "neutral" as const },
         ].map(s => <StatCard key={s.label} {...s} />)}
       </div>
-      <div className="rounded-card border border-border bg-surface shadow-sm overflow-hidden">
-        <table className="w-full">
-          <AdminTableHead cols={["Judul Asesmen", "Sekolah", "Guru", "Peserta", "Rata-rata", "Status"]} />
-          <tbody>
-            {platformAssessments.map(a => (
-              <tr key={a.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
-                <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{a.title}</span></td>
-                <td className="px-4 py-3 text-[12px]"><span className="text-ink-secondary text-[11px]">{a.school}</span></td>
-                <td className="px-4 py-3 text-[12px] text-ink">{a.teacher}</td>
-                <td className="px-4 py-3 text-[12px] text-ink">{a.participants}</td>
-                <td className="px-4 py-3 text-[12px]">
-                  {a.status === "Terjadwal" ? <span className="text-ink-tertiary">—</span> : <span className="font-semibold text-ink">{a.avgScore}</span>}
-                </td>
-                <td className="px-4 py-3 text-[12px]"><Badge tone={a.status === "Selesai" ? "success" : "warning"}>{a.status}</Badge></td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {data === undefined ? <SectionLoading message="Memuat asesmen..." /> : "error" in data ? (
+        <AlertPanel tone="danger" title="Gagal memuat asesmen">{data.error}</AlertPanel>
+      ) : list.length === 0 ? (
+        <EmptyState icon={ClipboardList} title="Belum ada asesmen" description="Asesmen yang dibuat guru akan muncul di sini." />
+      ) : (
+        <div className="rounded-card border border-border bg-surface shadow-sm overflow-x-auto">
+          <table className="w-full min-w-[760px]">
+            <AdminTableHead cols={["Judul Asesmen", "Sekolah · Kelas", "Guru", "Jadwal", "Peserta", "Rata-rata", "Status"]} />
+            <tbody>
+              {list.map(a => {
+                const st = adminAssessmentStatus(a, now);
+                return (
+                  <tr key={a.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
+                    <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{a.title}</span><span className="block text-[10px] text-ink-tertiary">{a.type ?? "-"} · {a.subject}</span></td>
+                    <td className="px-4 py-3 text-[11px] text-ink-secondary">{a.school}<span className="block">{a.className}</span></td>
+                    <td className="px-4 py-3 text-[12px] text-ink">{a.teacher}</td>
+                    <td className="px-4 py-3 text-[11px] text-ink-secondary">
+                      {a.openAt ? new Date(parseDbTime(a.openAt)).toLocaleString("id-ID", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "-"}
+                      {a.closeAt && <span className="block">s/d {new Date(parseDbTime(a.closeAt)).toLocaleString("id-ID", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}</span>}
+                    </td>
+                    <td className="px-4 py-3 text-[12px] text-ink">{a.participants}</td>
+                    <td className="px-4 py-3 text-[12px]">{a.avgScore == null ? <span className="text-ink-tertiary">—</span> : <span className="font-semibold text-ink">{a.avgScore}</span>}</td>
+                    <td className="px-4 py-3 text-[12px]"><Badge tone={st.tone}>{st.label}</Badge></td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }
 
+type AdminAnalyticsData = {
+  activeStudents: number; activeToday: number; activeTeachers: number; publishedAssessments: number;
+  gradedAttempts: number; avgScore: number | null;
+  activity: { label: string; value: number }[];
+  schoolScores: { label: string; value: number }[];
+};
+
 function AdminAnalytics() {
+  const data = useAdminData<{ analytics: AdminAnalyticsData }>("analytics");
+  const a = data && "analytics" in data ? data.analytics : null;
+  const v = (x: string) => (data === undefined ? "…" : x);
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Admin" title="Analitik Platform"
-        description="Ringkasan performa dan keterlibatan seluruh sekolah yang terdaftar." />
+      <PageHeader eyebrow="Admin" title="Analitik"
+        description="Ringkasan keterlibatan dan performa dari data asesmen dan latihan siswa." />
+      {data && "error" in data && <AlertPanel tone="danger" title="Gagal memuat analitik">{data.error}</AlertPanel>}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {[
-          { label: "Pengguna Aktif Hari Ini", value: "842", detail: "+12% vs kemarin", tone: "primary" as const },
-          { label: "Soal Dijawab Hari Ini", value: "14.320", detail: "Seluruh platform", tone: "success" as const },
-          { label: "Rata-rata Sesi", value: "18 mnt", detail: "Per siswa aktif", tone: "neutral" as const },
-          { label: "Tingkat Penyelesaian", value: "94%", detail: "Asesmen selesai", tone: "neutral" as const },
+          { label: "Siswa Aktif Hari Ini", value: v(a ? `${a.activeToday}` : "—"), detail: a ? `dari ${a.activeStudents} siswa aktif` : "-", tone: "primary" as const },
+          { label: "Guru Aktif", value: v(a ? `${a.activeTeachers}` : "—"), detail: "Akun guru disetujui", tone: "neutral" as const },
+          { label: "Asesmen Dikerjakan", value: v(a ? `${a.gradedAttempts}` : "—"), detail: a ? `${a.publishedAssessments} asesmen dipublikasikan` : "-", tone: "success" as const },
+          { label: "Rata-rata Nilai", value: v(a?.avgScore != null ? `${a.avgScore}` : "—"), detail: "Semua asesmen dinilai", tone: "neutral" as const },
         ].map(s => <StatCard key={s.label} {...s} />)}
       </div>
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <div className="rounded-card border border-border bg-surface shadow-sm">
           <div className="border-b border-border px-5 py-3.5">
-            <h3 className="text-[14px] font-bold text-ink">Pengguna Aktif — 30 Hari Terakhir</h3>
+            <h3 className="text-[14px] font-bold text-ink">Aktivitas Belajar — 14 Hari Terakhir</h3>
+            <p className="text-[11px] text-ink-secondary">Jumlah soal latihan dijawab + asesmen dikumpulkan per hari</p>
           </div>
           <div className="p-5">
-            <SimpleChart data={[620, 680, 710, 695, 730, 780, 810, 842, 798, 820, 860, 842, 790, 830]} labels={[]} height={130} />
+            {data === undefined ? <SectionLoading className="h-[130px] py-0" /> : !a || a.activity.every(d => d.value === 0) ? (
+              <p className="py-10 text-center text-[12px] text-ink-tertiary">Belum ada aktivitas dalam 14 hari terakhir.</p>
+            ) : (
+              <SimpleChart data={a.activity.map(d => d.value)} labels={a.activity.map(d => d.label)} type="bar" height={130} />
+            )}
           </div>
         </div>
         <div className="rounded-card border border-border bg-surface shadow-sm">
           <div className="border-b border-border px-5 py-3.5">
-            <h3 className="text-[14px] font-bold text-ink">Performa per Sekolah</h3>
+            <h3 className="text-[14px] font-bold text-ink">Rata-rata Nilai per Sekolah</h3>
           </div>
           <div className="p-5 space-y-3">
-            {[
-              { label: "SMA N 1 Bandung", value: 84 },
-              { label: "SMA N 2 Bandung", value: 78 },
-              { label: "SMP N 5 Bandung", value: 72 },
-              { label: "SMK N 3 Bandung", value: 69 },
-              { label: "SMA Swasta Al-Ikhlas", value: 75 },
-            ].map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
+            {data === undefined ? <SectionLoading /> : !a || a.schoolScores.length === 0 ? (
+              <p className="py-10 text-center text-[12px] text-ink-tertiary">Belum ada asesmen yang dinilai.</p>
+            ) : a.schoolScores.map(s => <TopicBar key={s.label} label={s.label} value={s.value} />)}
           </div>
         </div>
       </div>
@@ -6754,39 +7648,68 @@ function AdminAnalytics() {
 }
 
 function AdminSettings() {
-  const [saved, setSaved] = useState(false);
-  const settings = [
-    { section: "Umum", fields: [
-      { label: "Nama Platform", value: "Catch Up — Platform Diagnostik Sekolah" },
-      { label: "Email Kontak Admin", value: "admin@catchup.id" },
-    ]},
-    { section: "Keamanan", fields: [
-      { label: "Batas Percobaan Login", value: "5" },
-      { label: "Masa Berlaku Sesi (jam)", value: "8" },
-    ]},
-    { section: "Notifikasi", fields: [
-      { label: "Email Notifikasi Laporan", value: "laporan@catchup.id" },
-    ]},
-  ];
+  type SettingsRes = { kind: "platform" | "school"; values: Record<string, string>; status?: string | null };
+  const [loaded, setLoaded] = useState<SettingsRes | { error: string } | undefined>(undefined);
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [attempted, setAttempted] = useState(false);
+  const [toast, setToast] = useState<{ message: string; tone: "success" | "danger" } | null>(null);
+
+  useEffect(() => {
+    apiPost<SettingsRes>("/api/admin/settings", { action: "get" }).then(res => {
+      if (res.error) { setLoaded({ error: res.error }); return; }
+      setLoaded(res);
+      setValues(res.values);
+    });
+  }, []);
+
+  if (loaded === undefined) return <div className="space-y-6 max-w-2xl"><PageHeader eyebrow="Admin" title="Pengaturan" /><SectionLoading message="Memuat pengaturan..." /></div>;
+  if ("error" in loaded) return <div className="space-y-6 max-w-2xl"><PageHeader eyebrow="Admin" title="Pengaturan" /><AlertPanel tone="danger" title="Gagal memuat pengaturan">{loaded.error}</AlertPanel></div>;
+
+  const fields = loaded.kind === "platform"
+    ? [
+        { key: "platformName", label: "Nama Platform", required: true, type: "text", ph: "Catch Up" },
+        { key: "adminContactEmail", label: "Email Kontak Admin", required: false, type: "email", ph: "admin@contoh.id" },
+        { key: "reportNotificationEmail", label: "Email Notifikasi Laporan", required: false, type: "email", ph: "laporan@contoh.id" },
+      ]
+    : [
+        { key: "name", label: "Nama Sekolah", required: true, type: "text", ph: "SMA Negeri 1 ..." },
+        { key: "npsn", label: "NPSN", required: false, type: "text", ph: "8 digit angka" },
+        { key: "city", label: "Kota/Kabupaten", required: false, type: "text", ph: "Bandung" },
+        { key: "province", label: "Provinsi", required: false, type: "text", ph: "Jawa Barat" },
+      ];
+  const missing = fields.filter(f => f.required && !(values[f.key] ?? "").trim()).map(f => f.key);
+
+  async function save() {
+    setAttempted(true);
+    if (missing.length > 0) return;
+    setSaving(true);
+    const res = await apiPost<SettingsRes>("/api/admin/settings", { action: "save", values });
+    setSaving(false);
+    if (res.error) { setToast({ message: res.error, tone: "danger" }); return; }
+    setValues(res.values);
+    setAttempted(false);
+    setToast({ message: "Pengaturan berhasil disimpan", tone: "success" });
+  }
+
   return (
     <div className="space-y-6 max-w-2xl">
-      <PageHeader eyebrow="Admin" title="Pengaturan Platform" />
-      {settings.map(sec => (
-        <div key={sec.section} className="rounded-card border border-border bg-surface shadow-sm p-6 space-y-4">
-          <h3 className="text-[13px] font-bold text-ink border-b border-border pb-3">{sec.section}</h3>
-          {sec.fields.map(f => (
-            <div key={f.label}>
-              <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">{f.label}</label>
-              <input defaultValue={f.value}
-                className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] focus:border-primary focus:outline-none" />
-            </div>
-          ))}
-        </div>
-      ))}
-      <div className="flex justify-end gap-2">
-        <Button variant="default" className="h-8 text-[12px]" onClick={() => setSaved(true)}>Simpan Pengaturan</Button>
+      <PageHeader eyebrow="Admin" title={loaded.kind === "platform" ? "Pengaturan Platform" : "Profil Sekolah"}
+        description={loaded.kind === "platform" ? "Berlaku untuk seluruh platform." : "Data sekolah yang kamu kelola."} />
+      <div className="rounded-card border border-border bg-surface shadow-sm p-6 space-y-4">
+        {fields.map(f => (
+          <FormField key={f.key} label={f.label} required={f.required} error={attempted && missing.includes(f.key) ? "Wajib diisi" : null}>
+            <input type={f.type} value={values[f.key] ?? ""} placeholder={f.ph}
+              onChange={e => setValues(p => ({ ...p, [f.key]: e.target.value }))}
+              className={fieldClass(attempted && missing.includes(f.key))} />
+          </FormField>
+        ))}
       </div>
-      {saved && <AppToast message="Pengaturan berhasil disimpan" tone="success" onDismiss={() => setSaved(false)} />}
+      <div className="flex items-center justify-end gap-3">
+        {attempted && missing.length > 0 && <span className="mr-auto text-[12px] font-medium text-danger">Tolong lengkapi kolom bertanda *.</span>}
+        <Button variant="default" className="h-8 text-[12px]" disabled={saving} onClick={save}>{saving ? "Menyimpan..." : "Simpan Pengaturan"}</Button>
+      </div>
+      {toast && <AppToast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>
   );
 }

@@ -67,10 +67,10 @@ export async function POST(req: Request) {
       is_correct: isCorrect,
     });
 
-    if (isCorrect) {
-      await awardXpAndStreak(student.id, XP_PER_CORRECT_PRACTICE);
-      await checkAndAwardAchievements(student.id, {});
-    }
+    // Any answered practice question counts as activity for the daily
+    // streak; only correct answers earn XP.
+    await awardXpAndStreak(student.id, isCorrect ? XP_PER_CORRECT_PRACTICE : 0);
+    await checkAndAwardAchievements(student.id, {});
 
     return Response.json({
       isCorrect,

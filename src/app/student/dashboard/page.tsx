@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { BookOpen, CheckCircle2, Clock, FileQuestion } from "lucide-react";
+import { BookOpen, CheckCircle2, Clock, FileQuestion, Flame, Star, Trophy } from "lucide-react";
 import { AppShell } from "@/components/product-shell";
 import { PageHeader, StatCard, EmptyState, AlertPanel, LoadingPanel } from "@/components/product-primitives";
 import { Badge } from "@/components/ui/badge";
@@ -10,7 +10,8 @@ import { studentNav } from "@/lib/db";
 import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentStudent } from "@/lib/auth/authorization";
 import { supabase } from "@/lib/supabase/client";
-import { getAssessmentAvailability, type AssessmentAvailability } from "@/lib/auth/assessment-availability";
+import { getAssessmentAvailability, parseDbTime, type AssessmentAvailability } from "@/lib/auth/assessment-availability";
+import { useScheduleClock, formatCountdown } from "@/lib/hooks/use-schedule-clock";
 import type { Assessment, AssessmentAttempt } from "@/lib/supabase/types";
 
 type AssessmentRow = Assessment & { subjects: { name: string } | null };
@@ -44,6 +45,32 @@ export default function StudentDashboardPage() {
   const [schoolName, setSchoolName] = useState("");
   const [assessments, setAssessments] = useState<AssessmentRow[]>([]);
   const [attemptsByAssessment, setAttemptsByAssessment] = useState<Record<string, AssessmentAttempt[]>>({});
+  // Streak / rank / XP come from /api/student/overview (class ranking needs
+  // classmates' scores, which RLS hides from the student's own session).
+  // undefined = loading.
+  const [overview, setOverview] = useState<{ streak: number; rank: number; classSize: number; xp: number } | null | undefined>(undefined);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (!session) return;
+      try {
+        const res = await fetch("/api/student/overview", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+          body: "{}",
+        });
+        const json = await res.json();
+        if (!cancelled) setOverview(res.ok && json.stats ? json.stats : null);
+      } catch {
+        if (!cancelled) setOverview(null);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -149,10 +176,24 @@ export default function StudentDashboardPage() {
     };
   }, [router]);
 
-  const availability = assessments.map((a) => ({
-    assessment: a,
-    info: getAssessmentAvailability(a, attemptsByAssessment[a.id] ?? []),
-  }));
+  // Re-evaluates availability exactly when an assessment opens/closes, so
+  // "Akan Datang" flips to "Bisa Dikerjakan" at the scheduled minute.
+  const now = useScheduleClock(
+    assessments.flatMap((a) => [a.open_at ? parseDbTime(a.open_at) : null, a.close_at ? parseDbTime(a.close_at) : null])
+  );
+
+  const availability = assessments
+    .map((a) => ({
+      assessment: a,
+      info: getAssessmentAvailability(a, attemptsByAssessment[a.id] ?? [], new Date(now)),
+    }))
+    .sort((x, y) => {
+      // Open first, then upcoming (soonest first), then everything else.
+      const rank = (s: AssessmentAvailability) => (s === "OPEN" ? 0 : s === "UPCOMING" ? 1 : 2);
+      const r = rank(x.info.state) - rank(y.info.state);
+      if (r !== 0) return r;
+      return (x.assessment.open_at ? parseDbTime(x.assessment.open_at) : 0) - (y.assessment.open_at ? parseDbTime(y.assessment.open_at) : 0);
+    });
 
   const openCount = availability.filter((a) => a.info.state === "OPEN").length;
   const upcomingCount = availability.filter((a) => a.info.state === "UPCOMING").length;
@@ -194,6 +235,30 @@ export default function StudentDashboardPage() {
           <>
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
               <StatCard
+                label="Streak Belajar"
+                value={overview === undefined ? "…" : overview ? `${overview.streak} hari` : "-"}
+                detail="Kerjakan latihan/asesmen tiap hari"
+                tone="warning"
+                icon={Flame}
+              />
+              <StatCard
+                label="Peringkat Kelas"
+                value={overview === undefined ? "…" : overview ? `#${overview.rank}` : "-"}
+                detail={overview ? `dari ${overview.classSize} siswa` : "Berdasarkan rata-rata nilai"}
+                tone="primary"
+                icon={Trophy}
+              />
+              <StatCard
+                label="Total XP"
+                value={overview === undefined ? "…" : overview ? overview.xp.toLocaleString("id-ID") : "-"}
+                detail="Poin pengalaman belajar"
+                tone="success"
+                icon={Star}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <StatCard
                 label="Bisa Dikerjakan"
                 value={String(openCount)}
                 detail="Asesmen tersedia sekarang"
@@ -232,6 +297,12 @@ export default function StudentDashboardPage() {
                         <div className="text-[13px] font-semibold text-ink truncate">{assessment.title}</div>
                         <div className="text-[11px] text-ink-secondary mt-0.5">
                           {assessment.subjects?.name ?? "Umum"} · {info.message}
+                          {info.state === "UPCOMING" && assessment.open_at && (
+                            <> · dibuka dalam {formatCountdown(parseDbTime(assessment.open_at) - now)}</>
+                          )}
+                          {info.state === "OPEN" && assessment.close_at && (
+                            <> · ditutup dalam {formatCountdown(parseDbTime(assessment.close_at) - now)}</>
+                          )}
                         </div>
                       </div>
                       <Badge tone={availabilityTone[info.state]}>{availabilityLabel[info.state]}</Badge>

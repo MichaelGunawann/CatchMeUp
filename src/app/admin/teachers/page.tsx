@@ -6,6 +6,7 @@ import { GraduationCap, Plus, X } from "lucide-react";
 import { AppShell } from "@/components/product-shell";
 import { PageHeader, EmptyState, AlertPanel, LoadingPanel } from "@/components/product-primitives";
 import { Button } from "@/components/ui/button";
+import { SelectField } from "@/components/ui/form-field";
 import { adminNav } from "@/lib/db";
 import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentSchoolAdminSchools } from "@/lib/auth/authorization";
@@ -151,15 +152,19 @@ export default function AdminTeachersPage() {
     };
   }, [selectedSchoolId]);
 
+  const [attemptedTeacherId, setAttemptedTeacherId] = useState<string | null>(null);
+
   async function handleAddAssignment(teacherId: string) {
     setRowError(null);
     const classId = pickedClassByTeacher[teacherId];
     const subjectId = pickedSubjectByTeacher[teacherId];
 
     if (!classId || !subjectId) {
+      setAttemptedTeacherId(teacherId);
       setRowError("Pilih kelas dan mata pelajaran terlebih dahulu");
       return;
     }
+    setAttemptedTeacherId(null);
 
     setBusyId(teacherId);
     try {
@@ -236,18 +241,13 @@ export default function AdminTeachersPage() {
                 <label htmlFor="school-select" className="mb-1.5 block text-[12px] font-semibold text-ink">
                   Sekolah
                 </label>
-                <select
-                  id="school-select"
-                  className="h-9 w-full max-w-sm rounded-button border border-border bg-background px-3 text-[13px] text-ink"
-                  value={selectedSchoolId ?? ""}
-                  onChange={(e) => setSelectedSchoolId(e.target.value)}
-                >
-                  {schools.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
+                <div className="max-w-sm">
+                  <SelectField
+                    value={selectedSchoolId ?? ""}
+                    options={schools.map((s) => ({ value: s.id, label: s.name }))}
+                    onChange={(v) => setSelectedSchoolId(v)}
+                  />
+                </div>
               </div>
             )}
 
@@ -308,34 +308,24 @@ export default function AdminTeachersPage() {
                         )}
 
                         <div className="flex flex-wrap items-center gap-2">
-                          <select
-                            className="h-8 rounded-[6px] border border-border bg-background px-2 text-[12px] text-ink"
-                            value={pickedClassByTeacher[t.id] ?? ""}
-                            onChange={(e) =>
-                              setPickedClassByTeacher((prev) => ({ ...prev, [t.id]: e.target.value }))
-                            }
-                          >
-                            <option value="">Pilih kelas</option>
-                            {classes.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </select>
-                          <select
-                            className="h-8 rounded-[6px] border border-border bg-background px-2 text-[12px] text-ink"
-                            value={pickedSubjectByTeacher[t.id] ?? ""}
-                            onChange={(e) =>
-                              setPickedSubjectByTeacher((prev) => ({ ...prev, [t.id]: e.target.value }))
-                            }
-                          >
-                            <option value="">Pilih mata pelajaran</option>
-                            {subjects.map((s) => (
-                              <option key={s.id} value={s.id}>
-                                {s.name}
-                              </option>
-                            ))}
-                          </select>
+                          <div className="w-44">
+                            <SelectField
+                              value={pickedClassByTeacher[t.id] ?? ""}
+                              options={classes.map((c) => ({ value: c.id, label: c.name }))}
+                              placeholder="Pilih kelas *"
+                              invalid={attemptedTeacherId === t.id && !pickedClassByTeacher[t.id]}
+                              onChange={(v) => setPickedClassByTeacher((prev) => ({ ...prev, [t.id]: v }))}
+                            />
+                          </div>
+                          <div className="w-52">
+                            <SelectField
+                              value={pickedSubjectByTeacher[t.id] ?? ""}
+                              options={subjects.map((s) => ({ value: s.id, label: s.name }))}
+                              placeholder="Pilih mata pelajaran *"
+                              invalid={attemptedTeacherId === t.id && !pickedSubjectByTeacher[t.id]}
+                              onChange={(v) => setPickedSubjectByTeacher((prev) => ({ ...prev, [t.id]: v }))}
+                            />
+                          </div>
                           <Button
                             type="button"
                             size="sm"

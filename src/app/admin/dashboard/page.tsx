@@ -7,6 +7,7 @@ import { AppShell } from "@/components/product-shell";
 import { PageHeader, StatCard, EmptyState, AlertPanel, LoadingPanel } from "@/components/product-primitives";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { SelectField } from "@/components/ui/form-field";
 import { adminNav } from "@/lib/db";
 import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentSchoolAdminSchools } from "@/lib/auth/authorization";
@@ -489,20 +490,14 @@ export default function AdminDashboardPage() {
                           </div>
                         </div>
                         {schoolClasses.length > 0 && (
-                          <select
-                            className="h-7 rounded-[4px] border border-border bg-background px-2 text-[11px] text-ink-secondary"
-                            value={selectedClassByStudent[s.id] ?? ""}
-                            onChange={(e) =>
-                              setSelectedClassByStudent((prev) => ({ ...prev, [s.id]: e.target.value }))
-                            }
-                          >
-                            <option value="">Belum pilih kelas</option>
-                            {schoolClasses.map((c) => (
-                              <option key={c.id} value={c.id}>
-                                {c.name}
-                              </option>
-                            ))}
-                          </select>
+                          <div className="w-40">
+                            <SelectField
+                              value={selectedClassByStudent[s.id] ?? ""}
+                              options={schoolClasses.map((c) => ({ value: c.id, label: c.name }))}
+                              placeholder="Belum pilih kelas"
+                              onChange={(v) => setSelectedClassByStudent((prev) => ({ ...prev, [s.id]: v }))}
+                            />
+                          </div>
                         )}
                         <div className="flex shrink-0 gap-2">
                           <Button

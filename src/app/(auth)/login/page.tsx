@@ -3,11 +3,11 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { getCurrentProfile, signInWithPassword } from "@/lib/auth/session";
+import { getCurrentSession, signInWithPassword } from "@/lib/auth/session";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AuthShell, AuthFieldLabel } from "@/components/auth-shell";
-import { AlertPanel, LoadingPanel } from "@/components/product-primitives";
+import { AlertPanel } from "@/components/product-primitives";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -15,22 +15,17 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [checkingSession, setCheckingSession] = useState(true);
-
+  // The form renders immediately - no blocking "Memeriksa sesi..." screen.
+  // An already signed-in visitor is redirected in the background using the
+  // locally stored session (no network round-trip); /dashboard does the
+  // authoritative profile check and role routing.
   useEffect(() => {
     let cancelled = false;
-    getCurrentProfile()
-      .then((profile) => {
-        if (cancelled) return;
-        if (profile) {
-          router.push("/dashboard");
-          return;
-        }
-        setCheckingSession(false);
+    getCurrentSession()
+      .then((session) => {
+        if (!cancelled && session) router.replace("/dashboard");
       })
-      .catch(() => {
-        if (!cancelled) setCheckingSession(false);
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -44,7 +39,7 @@ export default function LoginPage() {
     try {
       const session = await signInWithPassword(email, password);
       if (session) {
-        router.push("/dashboard");
+        router.replace("/dashboard");
       } else {
         setError("Email atau kata sandi salah");
       }
@@ -54,14 +49,6 @@ export default function LoginPage() {
       setLoading(false);
     }
   };
-
-  if (checkingSession) {
-    return (
-      <div className="min-h-dvh flex items-center justify-center bg-background">
-        <LoadingPanel message="Memeriksa sesi..." />
-      </div>
-    );
-  }
 
   return (
     <AuthShell

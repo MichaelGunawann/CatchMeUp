@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
-import { getAssessmentAvailability } from "@/lib/auth/assessment-availability";
+import { getAssessmentAvailability, parseDbTime } from "@/lib/auth/assessment-availability";
 import type { Assessment, AssessmentAttempt, Question } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
@@ -29,6 +29,85 @@ function seededShuffle<T>(arr: T[], seed: string): T[] {
     [copy[i], copy[j]] = [copy[j], copy[i]];
   }
   return copy;
+}
+
+type PoolRow = { id: string; question_id: string; question_order: number; points: number; questions: Question };
+
+/**
+ * Adaptive ("Adaptif per Siswa") selection: the assessment's linked
+ * questions are a pool, and each student gets `count` of them weighted
+ * toward the topics THEY are weakest in. Per-topic accuracy comes from
+ * the student's own graded history (assessment question_attempts +
+ * practice_attempts). Topics the student has never attempted are treated
+ * as 50% so they still get covered. Selection is round-robin across
+ * topics from weakest to strongest so one weak topic can't swallow the
+ * whole test, and ties/ordering are seeded by the attempt id so a reload
+ * of the same attempt always yields the same set.
+ */
+async function pickAdaptiveQuestions(studentId: string, pool: PoolRow[], count: number, seed: string): Promise<PoolRow[]> {
+  if (pool.length <= count) return pool;
+
+  const stats = new Map<string, { correct: number; total: number }>();
+  const bump = (topic: string | null | undefined, correct: boolean) => {
+    const key = (topic ?? "").trim().toLowerCase();
+    if (!key) return;
+    const cur = stats.get(key) ?? { correct: 0, total: 0 };
+    cur.total += 1;
+    if (correct) cur.correct += 1;
+    stats.set(key, cur);
+  };
+
+  const { data: attempts } = await supabaseAdmin
+    .from("assessment_attempts")
+    .select("id")
+    .eq("student_id", studentId)
+    .in("status", ["submitted", "graded"]);
+  const attemptIds = (attempts ?? []).map(a => a.id as string);
+  if (attemptIds.length > 0) {
+    const { data: qa } = await supabaseAdmin
+      .from("question_attempts")
+      .select("is_correct, assessment_questions(questions(topic))")
+      .in("assessment_attempt_id", attemptIds);
+    for (const row of (qa ?? []) as unknown as Array<{ is_correct: boolean | null; assessment_questions: { questions: { topic: string } | null } | null }>) {
+      bump(row.assessment_questions?.questions?.topic, !!row.is_correct);
+    }
+  }
+  const { data: practice } = await supabaseAdmin
+    .from("practice_attempts")
+    .select("is_correct, questions(topic)")
+    .eq("student_id", studentId);
+  for (const row of (practice ?? []) as unknown as Array<{ is_correct: boolean; questions: { topic: string } | null }>) {
+    bump(row.questions?.topic, row.is_correct);
+  }
+
+  const accuracy = (topic: string) => {
+    const s = stats.get(topic.trim().toLowerCase());
+    return s && s.total > 0 ? s.correct / s.total : 0.5;
+  };
+
+  const byTopic = new Map<string, PoolRow[]>();
+  for (const row of seededShuffle(pool, seed)) {
+    const t = row.questions.topic || "Umum";
+    byTopic.set(t, [...(byTopic.get(t) ?? []), row]);
+  }
+  const topics = [...byTopic.keys()].sort((a, b) => accuracy(a) - accuracy(b));
+
+  // Weakest topics get proportionally more turns: a topic at 20% accuracy
+  // gets 3 picks per round, 50% gets 2, 80%+ gets 1.
+  const weight = (t: string) => (accuracy(t) < 0.4 ? 3 : accuracy(t) < 0.7 ? 2 : 1);
+  const picked: PoolRow[] = [];
+  while (picked.length < count) {
+    let progressed = false;
+    for (const t of topics) {
+      const bucket = byTopic.get(t)!;
+      for (let i = 0; i < weight(t) && bucket.length > 0 && picked.length < count; i++) {
+        picked.push(bucket.shift()!);
+        progressed = true;
+      }
+    }
+    if (!progressed) break;
+  }
+  return picked;
 }
 
 export async function POST(req: Request, { params }: { params: Promise<{ assessmentId: string }> }) {
@@ -126,8 +205,25 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
       .eq("assessment_id", assessmentId)
       .order("question_order", { ascending: true });
 
-    type AQRow = { id: string; question_id: string; question_order: number; points: number; questions: Question };
-    let rows = (aqRows ?? []) as unknown as AQRow[];
+    let rows = (aqRows ?? []) as unknown as PoolRow[];
+
+    const adaptive = (assessment as { distribution_mode?: string }).distribution_mode === "adaptive";
+    if (adaptive) {
+      const stored = (attempt as { selected_question_ids?: string[] | null }).selected_question_ids;
+      if (stored && stored.length > 0) {
+        // Resuming an in-progress attempt: keep exactly the subset this
+        // student was already given, in the same order.
+        const byId = new Map(rows.map(r => [r.id, r]));
+        rows = stored.map(id => byId.get(id)).filter((r): r is PoolRow => !!r);
+      } else {
+        const count = (assessment as { question_count?: number | null }).question_count ?? rows.length;
+        rows = await pickAdaptiveQuestions(student.id, rows, count, attempt.id);
+        await supabaseAdmin
+          .from("assessment_attempts")
+          .update({ selected_question_ids: rows.map(r => r.id) })
+          .eq("id", attempt.id);
+      }
+    }
 
     if (a.randomize_questions) {
       rows = seededShuffle(rows, attempt.id);
@@ -151,7 +247,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
 
     const startedAtMs = new Date(attempt.started_at).getTime();
     const durationDeadline = a.duration_minutes ? startedAtMs + a.duration_minutes * 60000 : null;
-    const closeDeadline = a.close_at ? new Date(a.close_at).getTime() : null;
+    const closeDeadline = a.close_at ? parseDbTime(a.close_at) : null;
     const deadlineAt = [durationDeadline, closeDeadline].filter((d): d is number => d !== null).sort((x, y) => x - y)[0] ?? null;
 
     return Response.json({

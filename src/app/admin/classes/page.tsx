@@ -7,6 +7,12 @@ import { AppShell } from "@/components/product-shell";
 import { PageHeader, EmptyState, AlertPanel, LoadingPanel } from "@/components/product-primitives";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { SelectField, type SelectOption } from "@/components/ui/form-field";
+import { cn } from "@/lib/utils";
+
+const GRADE_OPTIONS: SelectOption[] = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"].map((g) => ({ value: g, label: `Kelas ${g}` }));
+const CURRENT_YEAR = new Date().getFullYear();
+const YEAR_OPTIONS: SelectOption[] = [CURRENT_YEAR - 1, CURRENT_YEAR, CURRENT_YEAR + 1].map((y) => ({ value: String(y), label: String(y) }));
 import { adminNav } from "@/lib/db";
 import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentSchoolAdminSchools } from "@/lib/auth/authorization";
@@ -35,6 +41,7 @@ export default function AdminClassesPage() {
   const [selectedSchoolId, setSelectedSchoolId] = useState<string | null>(null);
   const [classes, setClasses] = useState<Class[]>([]);
   const [subjects, setSubjects] = useState<Subject[]>([]);
+  const [schoolDataLoading, setSchoolDataLoading] = useState(true);
 
   const [className, setClassName] = useState("");
   const [classGrade, setClassGrade] = useState("");
@@ -108,6 +115,7 @@ export default function AdminClassesPage() {
     }
 
     let cancelled = false;
+    setSchoolDataLoading(true);
 
     async function loadSchoolData() {
       const [{ data: classRows, error: classError }, { data: subjectRows, error: subjectError }] =
@@ -119,6 +127,7 @@ export default function AdminClassesPage() {
       if (cancelled) return;
       if (!classError) setClasses((classRows ?? []) as Class[]);
       if (!subjectError) setSubjects((subjectRows ?? []) as Subject[]);
+      setSchoolDataLoading(false);
     }
 
     loadSchoolData();
@@ -225,18 +234,13 @@ export default function AdminClassesPage() {
                 <label htmlFor="school-select" className="mb-1.5 block text-[12px] font-semibold text-ink">
                   Sekolah
                 </label>
-                <select
-                  id="school-select"
-                  className="h-9 w-full max-w-sm rounded-button border border-border bg-background px-3 text-[13px] text-ink"
-                  value={selectedSchoolId ?? ""}
-                  onChange={(e) => setSelectedSchoolId(e.target.value)}
-                >
-                  {schools.map((s) => (
-                    <option key={s.id} value={s.id}>
-                      {s.name}
-                    </option>
-                  ))}
-                </select>
+                <div className="max-w-sm">
+                  <SelectField
+                    value={selectedSchoolId ?? ""}
+                    options={schools.map((s) => ({ value: s.id, label: s.name }))}
+                    onChange={(v) => setSelectedSchoolId(v)}
+                  />
+                </div>
               </div>
             )}
 
@@ -253,24 +257,17 @@ export default function AdminClassesPage() {
                   )}
                   <Input
                     value={className}
-                    onChange={(e) => setClassName(e.target.value)}
-                    placeholder="Nama kelas, contoh: XI IPA 2"
+                    onChange={(e) => { setClassName(e.target.value); setClassFormError(null); }}
+                    placeholder="Nama kelas, contoh: XI IPA 2 *"
                     disabled={savingClass}
+                    aria-invalid={!!classFormError && !className.trim()}
+                    className={cn(classFormError && !className.trim() && "border-danger bg-danger/5")}
                   />
                   <div className="grid grid-cols-2 gap-2.5">
-                    <Input
-                      value={classGrade}
-                      onChange={(e) => setClassGrade(e.target.value)}
-                      placeholder="Tingkat (opsional)"
-                      disabled={savingClass}
-                    />
-                    <Input
-                      value={classYear}
-                      onChange={(e) => setClassYear(e.target.value)}
-                      placeholder="Tahun (opsional)"
-                      inputMode="numeric"
-                      disabled={savingClass}
-                    />
+                    <SelectField value={classGrade} options={GRADE_OPTIONS} placeholder="Tingkat (opsional)"
+                      disabled={savingClass} onChange={setClassGrade} />
+                    <SelectField value={classYear} options={YEAR_OPTIONS} placeholder="Tahun (opsional)"
+                      disabled={savingClass} onChange={setClassYear} />
                   </div>
                   <Button type="submit" size="sm" disabled={savingClass} className="w-full">
                     <Plus className="h-3.5 w-3.5" />
@@ -278,7 +275,9 @@ export default function AdminClassesPage() {
                   </Button>
                 </form>
 
-                {classes.length === 0 ? (
+                {schoolDataLoading ? (
+                  <LoadingPanel message="Memuat kelas..." />
+                ) : classes.length === 0 ? (
                   <EmptyState
                     icon={BookOpen}
                     title="Belum ada kelas"
@@ -310,9 +309,11 @@ export default function AdminClassesPage() {
                   )}
                   <Input
                     value={subjectName}
-                    onChange={(e) => setSubjectName(e.target.value)}
-                    placeholder="Nama mata pelajaran, contoh: Matematika"
+                    onChange={(e) => { setSubjectName(e.target.value); setSubjectFormError(null); }}
+                    placeholder="Nama mata pelajaran, contoh: Matematika *"
                     disabled={savingSubject}
+                    aria-invalid={!!subjectFormError && !subjectName.trim()}
+                    className={cn(subjectFormError && !subjectName.trim() && "border-danger bg-danger/5")}
                   />
                   <Button type="submit" size="sm" disabled={savingSubject} className="w-full">
                     <Plus className="h-3.5 w-3.5" />
@@ -320,7 +321,9 @@ export default function AdminClassesPage() {
                   </Button>
                 </form>
 
-                {subjects.length === 0 ? (
+                {schoolDataLoading ? (
+                  <LoadingPanel message="Memuat mata pelajaran..." />
+                ) : subjects.length === 0 ? (
                   <EmptyState
                     icon={GraduationCap}
                     title="Belum ada mata pelajaran"
