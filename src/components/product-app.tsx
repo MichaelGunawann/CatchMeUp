@@ -372,14 +372,14 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
               dragOver ? "border-primary bg-primary/5" : "border-border hover:border-primary/40 bg-background"
             )}
           >
-            <input ref={fileInputRef} type="file" accept=".pdf,.ppt,.pptx,.doc,.docx" className="hidden"
+            <input ref={fileInputRef} type="file" accept={MATERIAL_ACCEPT} className="hidden"
               onChange={e => setFile(e.target.files?.[0] ?? null)} />
             <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-surface">
               <Upload className="h-5 w-5 text-primary" />
             </div>
             <div>
               <p className="text-[13px] font-semibold text-ink">Tarik & lepas file di sini</p>
-              <p className="text-[11px] text-ink-secondary mt-0.5">PDF, PPT, DOCX · Maks. 50 MB</p>
+              <p className="text-[11px] text-ink-secondary mt-0.5">PDF, DOCX, PPTX, TXT · Maks. 50 MB</p>
             </div>
           </div>
 
@@ -1894,7 +1894,7 @@ function deleteIncorrectQuestion(id: string) {
 
 const MATERIAL_TYPE_OPTIONS: SelectOption[] = ["Modul Ajar", "Buku Teks", "PPT", "RPP", "LKS", "Ringkasan Materi", "Lainnya"].map(v => ({ value: v, label: v }));
 const MATERIAL_SOURCE_OPTIONS: SelectOption[] = ["Buku wajib", "Materi guru", "Internal sekolah", "Lainnya"].map(v => ({ value: v, label: v }));
-const MATERIAL_ACCEPT = ".pdf,.ppt,.pptx,.doc,.docx";
+const MATERIAL_ACCEPT = ".pdf,.docx,.pptx,.txt";
 const MATERIAL_MAX_BYTES = 50 * 1024 * 1024;
 
 // Indonesian school years start in July: Oct 2026 -> "2026/2027".
@@ -1975,7 +1975,9 @@ function TeacherMaterials() {
     const ext = "." + (file.name.split(".").pop() ?? "").toLowerCase();
     if (!MATERIAL_ACCEPT.split(",").includes(ext)) {
       setUploadedFile(null);
-      setFileError("Format tidak didukung. Gunakan PDF, PPT/PPTX, atau DOC/DOCX.");
+      setFileError(ext === ".doc" || ext === ".ppt"
+        ? `Format lama ${ext} tidak bisa dibaca AI. Simpan ulang sebagai ${ext === ".ppt" ? "PPTX" : "DOCX"} atau PDF.`
+        : "Format tidak didukung. Gunakan PDF, DOCX, PPTX, atau TXT.");
       return;
     }
     if (file.size > MATERIAL_MAX_BYTES) {
@@ -2240,7 +2242,7 @@ function TeacherMaterials() {
           <div className="rounded-card border-2 border-dashed border-primary bg-surface px-10 py-8 text-center shadow-xl">
             <Upload className="mx-auto h-8 w-8 text-primary" />
             <p className="mt-3 text-[15px] font-bold text-ink">Lepaskan file untuk mengunggah</p>
-            <p className="mt-1 text-[12px] text-ink-secondary">PDF, PPT, DOCX · Maks. 50 MB</p>
+            <p className="mt-1 text-[12px] text-ink-secondary">PDF, DOCX, PPTX, TXT · Maks. 50 MB</p>
           </div>
         </div>
       )}
@@ -2290,7 +2292,7 @@ function TeacherMaterials() {
                   </div>
                   <div>
                     <p className="text-[14px] font-bold text-ink">Tarik & lepas file di mana saja di halaman ini <span className="text-danger">*</span></p>
-                    <p className="text-[12px] text-ink-secondary mt-1">atau klik untuk memilih · PDF, PPT, DOCX · Maks. 50 MB</p>
+                    <p className="text-[12px] text-ink-secondary mt-1">atau klik untuk memilih · PDF, DOCX, PPTX, TXT · Maks. 50 MB</p>
                   </div>
                 </>
               )}

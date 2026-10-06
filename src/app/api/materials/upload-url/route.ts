@@ -3,7 +3,9 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 
 export const dynamic = "force-dynamic";
 
-const ALLOWED_EXT = ["pdf", "ppt", "pptx", "doc", "docx"];
+// Only formats the AI extraction can actually read (legacy binary .ppt/.doc
+// can't be parsed, so accepting them just produced unprocessable materials).
+const ALLOWED_EXT = ["pdf", "docx", "pptx", "txt"];
 const MAX_BYTES = 50 * 1024 * 1024;
 
 /**
@@ -55,7 +57,7 @@ export async function POST(req: Request) {
     }
     const ext = (fileName.split(".").pop() ?? "").toLowerCase();
     if (!ALLOWED_EXT.includes(ext)) {
-      return Response.json({ error: "Format tidak didukung. Gunakan PDF, PPT/PPTX, atau DOC/DOCX." }, { status: 400 });
+      return Response.json({ error: "Format tidak didukung. Gunakan PDF, DOCX, PPTX, atau TXT. File .doc/.ppt lama: simpan ulang sebagai DOCX/PPTX." }, { status: 400 });
     }
     if (typeof fileSize === "number" && fileSize > MAX_BYTES) {
       return Response.json({ error: "Ukuran file melebihi 50 MB." }, { status: 400 });

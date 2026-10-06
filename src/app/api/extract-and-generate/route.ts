@@ -3,6 +3,7 @@ export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
+import { extractPptxText, sampleTextForPrompt } from "@/lib/office-text";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -36,7 +37,12 @@ export async function POST(req: Request) {
   if (contentType.includes("application/json")) {
     const body = await req.json() as { storagePath?: string; fileName?: string; count?: number; materialTitle?: string; subject?: string };
     if (!body.storagePath) return Response.json({ error: "storagePath tidak ditemukan.", questions: [] }, { status: 400 });
-    fileName = body.fileName ?? body.storagePath;
+    // The format comes from the stored object's real extension - callers
+    // pass the material TITLE as fileName (no extension), which used to make
+    // every material fail with 'Format "<judul>" tidak didukung'.
+    const storedExt = body.storagePath.split(".").pop() ?? "";
+    const displayName = body.fileName ?? body.storagePath;
+    fileName = displayName.toLowerCase().endsWith(`.${storedExt.toLowerCase()}`) ? displayName : `${displayName}.${storedExt}`;
     count = body.count ?? 5;
     materialTitle = body.materialTitle ?? "";
     subject = body.subject ?? "";
@@ -68,11 +74,18 @@ export async function POST(req: Request) {
       const mammoth = await import("mammoth");
       const result = await mammoth.extractRawText({ buffer });
       extractedText = result.value.trim();
+    } else if (name.endsWith(".pptx")) {
+      extractedText = extractPptxText(buffer);
     } else if (name.endsWith(".txt")) {
       extractedText = await file.text();
+    } else if (name.endsWith(".ppt") || name.endsWith(".doc")) {
+      return Response.json({
+        error: `Format lama .${name.split(".").pop()} tidak bisa dibaca AI. Simpan ulang file sebagai ${name.endsWith(".ppt") ? "PPTX" : "DOCX"} atau PDF, lalu unggah ulang.`,
+        questions: [],
+      }, { status: 400 });
     } else {
       return Response.json({
-        error: `Format "${name.split(".").pop()?.toUpperCase()}" tidak didukung. Gunakan PDF, DOCX, atau TXT.`,
+        error: `Format ".${name.split(".").pop()}" tidak didukung. Gunakan PDF, DOCX, PPTX, atau TXT.`,
         questions: [],
       }, { status: 400 });
     }
@@ -81,8 +94,15 @@ export async function POST(req: Request) {
     return Response.json({ error: `Gagal membaca file: ${msg}`, questions: [] }, { status: 500 });
   }
 
-  extractedText = extractedText.replace(/\s+/g, " ").trim().slice(0, 10000);
-  if (!extractedText) return Response.json({ error: "File kosong atau tidak dapat dibaca.", questions: [] }, { status: 400 });
+  // Sample evenly across the whole document instead of only its first
+  // pages (which for a textbook are just the cover and table of contents).
+  extractedText = sampleTextForPrompt(extractedText);
+  if (!extractedText) {
+    return Response.json({
+      error: "Tidak ada teks yang bisa dibaca dari file ini. Kalau ini PDF hasil scan (gambar), AI belum bisa membacanya — gunakan PDF yang teksnya bisa diseleksi.",
+      questions: [],
+    }, { status: 400 });
+  }
 
   const prompt = `Kamu adalah pembuat soal profesional untuk ujian SMA Indonesia.
 Berikut adalah isi materi dari file "${materialTitle}" (${subject}):
