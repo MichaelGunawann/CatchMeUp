@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { supabaseAdmin } from "@/lib/supabase/server";
+import { groqErrorResponse } from "@/lib/groq-error";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -108,13 +109,29 @@ Format WAJIB — kembalikan HANYA JSON array, tanpa teks lain:
 
 Pastikan:
 - sourceTitle harus sama dengan "${materialTitle}"
-- sourcePage harus angka halaman di materi (estimasi atau asli jika terlihat)`;
+- sourcePage harus angka halaman di materi (estimasi atau asli jika terlihat)
+- SANGAT PENTING: Sebelum menuliskan correctAnswer, hitung ulang jawabannya
+  langkah demi langkah, PASTIKAN hasil perhitunganmu benar-benar cocok
+  dengan salah satu dari 4 pilihan yang kamu buat. Jika hasil hitunganmu
+  tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
+  agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
+  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.`;
 
   try {
+    // Scaled to the actual question count instead of a flat 4096 - see
+    // generate-questions/route.ts for why (Groq's daily-token rate limiter
+    // checks requested max_tokens against remaining quota, not just actual
+    // usage, so an oversized fixed value rejects small requests needlessly).
+    const maxTokens = Math.min(8192, count * 350 + 500);
     const completion = await getGroq().chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 4096,
+      max_tokens: maxTokens,
+      // Low temperature specifically to reduce answer-key inconsistency -
+      // see generate-questions/route.ts for the empirical test that found
+      // the default temperature let the model compute the right answer in
+      // its own explanation and then pick a different, wrong option anyway.
+      temperature: 0.3,
     });
 
     const text = completion.choices[0].message.content ?? "[]";
@@ -124,7 +141,7 @@ Pastikan:
     if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal. Coba lagi.", questions: [] }, { status: 500 });
     return Response.json({ questions });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    return Response.json({ error: msg, questions: [] }, { status: 500 });
+    const { message, status } = groqErrorResponse(err);
+    return Response.json({ error: message, questions: [] }, { status });
   }
 }

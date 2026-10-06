@@ -97,6 +97,7 @@ import {
   Filter,
   HelpCircle,
   Lightbulb,
+  Mail,
   MessageCircle,
   Pencil,
   Plus,
@@ -894,13 +895,26 @@ function resetTeacherCaches() {
   _aiSettingsCache = null;
 }
 
+// Module-level caches outlive client-side navigation, so switching accounts
+// in the same tab must drop them. Only a real account change resets: Supabase
+// also emits SIGNED_IN when a tab regains focus, and wiping the caches then
+// would blank the class bar every time the teacher switched tabs.
 let _authResetAttached = false;
+let _cachedForUserId: string | null = null;
 function attachAuthReset() {
   if (_authResetAttached || typeof window === "undefined") return;
   _authResetAttached = true;
-  supabase.auth.onAuthStateChange(event => {
-    if (event === "SIGNED_OUT") resetTeacherCaches();
+  supabase.auth.onAuthStateChange((event, session) => {
+    const userId = session?.user.id ?? null;
+    if (event === "SIGNED_OUT" || (event === "SIGNED_IN" && _cachedForUserId && userId !== _cachedForUserId)) {
+      resetTeacherCaches();
+      _overviewCache.clear();
+      _bankListeners.forEach(fn => fn());
+      if (userId && _teacherListeners.size > 0) loadRealTeacher();
+    }
+    _cachedForUserId = userId;
   });
+  supabase.auth.getSession().then(({ data }) => { _cachedForUserId ??= data.session?.user.id ?? null; });
 }
 
 async function loadRealTeacher(): Promise<RealTeacherContext | null> {
@@ -4878,6 +4892,10 @@ function TeacherAnalytics() {
                   <p className="text-[12px] text-ink">{popupRec.suggestion}</p>
                 </div>
               </div>
+            ) : popupTopic && popupTopic.value < 50 ? (
+              <p className="text-[13px] text-danger">Akurasi kelas untuk topik ini masih rendah ({popupTopic.value}%). Perlu perhatian khusus - pertimbangkan sesi remedial atau latihan tambahan sebelum lanjut ke topik berikutnya.</p>
+            ) : popupTopic && popupTopic.value < 70 ? (
+              <p className="text-[13px] text-warning">Akurasi kelas untuk topik ini masih di bawah target ({popupTopic.value}%). Latihan tambahan akan membantu memperkuat pemahaman siswa.</p>
             ) : (
               <p className="text-[13px] text-ink-secondary">Topik ini performanya sudah baik. Tidak ada intervensi khusus yang diperlukan.</p>
             )}
@@ -7108,11 +7126,21 @@ function ParentProgress() {
     fetchParentPrimaryChild().then(c => {
       setChild(c);
       if (c) {
-        fetchScoreTrendAndSubjectMastery(c.studentId).then(({ scoreTrend, subjectMastery }) => {
-          setScoreTrendData(scoreTrend);
-          setSubjectMasteryData(subjectMastery);
-          setProgressLoaded(true);
-        });
+        // Score trend only needs assessment_attempts (safe for a parent's own
+        // RLS access); topic mastery is real per-topic accuracy from the
+        // server-side aggregation in /api/parent/topic-stats, since a parent
+        // has no direct RLS access to question_attempts/questions.
+        Promise.all([
+          fetchScoreTrendAndSubjectMastery(c.studentId).then(({ scoreTrend }) => setScoreTrendData(scoreTrend)),
+          authedFetch("/api/parent/topic-stats", { studentId: c.studentId }).then((data) => {
+            const topicStats = (data as { topicStats?: Array<{ topic: string; avgSuccessRate: number }> } | null)?.topicStats ?? [];
+            setSubjectMasteryData(topicStats.map(t => ({
+              label: t.topic,
+              value: t.avgSuccessRate,
+              tone: t.avgSuccessRate >= 80 ? "success" : t.avgSuccessRate >= 60 ? "primary" : "warning",
+            })));
+          }),
+        ]).finally(() => setProgressLoaded(true));
       }
     });
   }, []);
@@ -7215,58 +7243,124 @@ function ParentAssessments() {
 
 function ParentRecommendations() {
   const [child, setChild] = useState<ParentChild | null | undefined>(undefined);
-  useEffect(() => { fetchParentPrimaryChild().then(setChild); }, []);
-  const overview = useStudentOverview(child ? child.studentId : null);
-  const firstName = child?.fullName.split(" ")[0] ?? "Anak";
-  const topics = overview?.weakTopics ?? [];
+  const [recs, setRecs] = useState<typeof teachingRecommendations>([]);
+  const [summary, setSummary] = useState("");
+  // true until the child AND their recommendations are known - never show
+  // "Belum ada rekomendasi" before the data has actually been checked.
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [doneMap, setDoneMap] = useState<Map<string, number>>(new Map());
 
-  if (child === undefined) return <SectionLoading message="Memuat data anak..." />;
+  useEffect(() => { setDoneMap(loadRecDone()); }, []);
+  useEffect(() => { fetchParentPrimaryChild().then(setChild); }, []);
+
+  useEffect(() => {
+    if (child === undefined) return;
+    if (child === null) { setLoading(false); return; }
+    setLoading(true);
+    setError("");
+    authedFetch("/api/parent/topic-stats", { studentId: child.studentId })
+      .then((data) => {
+        const topicStats = (data as { topicStats?: Array<{ topic: string; avgSuccessRate: number; count: number }> } | null)?.topicStats ?? [];
+        if (topicStats.length === 0) { setLoading(false); return; }
+        return fetch("/api/recommendations", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ topicStats, className: child.className }),
+        })
+          .then(r => r.json())
+          .then((res: { summary?: string; recommendations?: typeof teachingRecommendations; error?: string }) => {
+            if (res.error) { setError(res.error); return; }
+            setSummary(res.summary ?? "");
+            setRecs(res.recommendations ?? []);
+          });
+      })
+      .catch(e => setError(e instanceof Error ? e.message : "Gagal memuat rekomendasi"))
+      .finally(() => setLoading(false));
+  }, [child]);
+
+  function toggleDone(id: string) {
+    setDoneMap(prev => {
+      const next = new Map(prev);
+      if (next.has(id)) next.delete(id); else next.set(id, Date.now());
+      saveRecDone(next);
+      return next;
+    });
+  }
+
+  const childName = child?.fullName ?? "anak Anda";
+
   if (child === null) {
     return (
       <div className="space-y-6">
-        <PageHeader eyebrow="Rekomendasi Belajar" title="Belum ada anak terhubung" />
+        <PageHeader eyebrow="Rekomendasi Pengajaran" title="Belum ada anak terhubung" />
         <AlertPanel tone="primary" title="Belum ada tautan ke akun siswa">
           Akun ini belum terhubung ke akun anak manapun. Hubungi admin sekolah untuk menautkan akun anak Anda.
         </AlertPanel>
       </div>
     );
   }
+  const pending = recs.filter(r => !doneMap.has(r.id));
+  const done = recs.filter(r => doneMap.has(r.id)).sort((a, b) => (doneMap.get(b.id) ?? 0) - (doneMap.get(a.id) ?? 0));
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Rekomendasi Belajar" title={`Fokus Belajar ${firstName}`}
-        description={`Topik yang perlu diperkuat ${firstName}, dihitung dari jawaban asesmen dan latihannya.`} />
-      {overview === undefined ? (
-        <SectionLoading message="Menganalisis hasil belajar..." />
-      ) : overview === null ? (
-        <AlertPanel tone="danger" title="Gagal memuat rekomendasi">Coba muat ulang halaman.</AlertPanel>
-      ) : topics.length === 0 ? (
-        <EmptyState icon={Lightbulb} title="Belum ada topik yang perlu perhatian"
-          description={`Rekomendasi muncul setelah ${firstName} mengerjakan asesmen atau latihan dan ada topik dengan akurasi di bawah 70%.`} />
-      ) : (
-        <>
-          <AIInsightPanel title="Ringkasan untuk Orang Tua">
-            <p>
-              {firstName} paling perlu latihan di <strong className="text-ink">{topics[0].topic}</strong> ({topics[0].subject}, akurasi {topics[0].accuracy}%)
-              {topics[1] && <> dan <strong className="text-ink">{topics[1].topic}</strong> ({topics[1].accuracy}%)</>}.
-              Dorong {firstName} mengerjakan Latihan Adaptif 15 menit per hari pada topik-topik ini.
-            </p>
-          </AIInsightPanel>
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {topics.slice(0, 6).map(t => (
-              <div key={`${t.subject}-${t.topic}`} className="rounded-card border border-border bg-surface p-4">
-                <div className="flex items-start justify-between gap-2 mb-3">
-                  <div>
-                    <div className="text-[13px] font-semibold text-ink">{t.topic}</div>
-                    <div className="text-[11px] text-ink-secondary">{t.subject} · {t.attempted} soal dicoba</div>
-                  </div>
-                  <MasteryBadge level={weakTopicMastery(t.accuracy)} />
-                </div>
-                <TopicBar label="Akurasi" value={t.accuracy} />
-              </div>
-            ))}
+      <PageHeader eyebrow="Rekomendasi Pengajaran" title="Saran Belajar dari Guru Kelas"
+        description={`Rekomendasi pengajaran untuk ${childName} berdasarkan analisis AI atas hasil asesmen yang sudah dikerjakan.`} />
+
+      {loading && (
+        <div className="rounded-card border border-border bg-surface p-8 text-center space-y-3">
+          <div className="flex justify-center">
+            <div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" />
           </div>
-        </>
+          <p className="text-[13px] text-ink-secondary">AI sedang menganalisis hasil asesmen {childName.split(" ")[0]}...</p>
+        </div>
+      )}
+
+      {error && !loading && (
+        <AlertPanel tone="danger" title="Gagal memuat rekomendasi">{error}</AlertPanel>
+      )}
+
+      {!loading && !error && summary && (
+        <AIInsightPanel title="Ringkasan AI untuk Orang Tua">
+          <p>{summary}</p>
+        </AIInsightPanel>
+      )}
+
+      {!loading && !error && recs.length === 0 && (
+        <div className="flex flex-col items-center gap-3 py-10 text-center">
+          <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
+            <Lightbulb className="h-6 w-6 text-ink-tertiary" />
+          </div>
+          <p className="text-[14px] font-semibold text-ink">Belum ada rekomendasi</p>
+          <p className="text-[12px] text-ink-secondary">Rekomendasi akan muncul setelah ada hasil asesmen</p>
+        </div>
+      )}
+
+      {!loading && pending.length > 0 && (
+        <div className="space-y-4">
+          {pending.map(r => <RecommendationCard key={r.id} rec={r} done={false} onToggle={() => toggleDone(r.id)} />)}
+        </div>
+      )}
+
+      {!loading && recs.length > 0 && pending.length === 0 && (
+        <div className="rounded-[10px] border border-success/20 bg-success/5 px-5 py-4 text-center">
+          <p className="text-[13px] font-semibold text-success">Semua rekomendasi sudah diselesaikan!</p>
+        </div>
+      )}
+
+      {!loading && done.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <h3 className="text-[13px] font-bold text-ink">Rekomendasi yang Sudah Diselesaikan</h3>
+              <p className="text-[11px] text-ink-tertiary mt-0.5">Disimpan selama 7 hari · {done.length} item</p>
+            </div>
+          </div>
+          <div className="space-y-3">
+            {done.map(r => <RecommendationCard key={r.id} rec={r} done={true} onToggle={() => toggleDone(r.id)} />)}
+          </div>
+        </div>
       )}
     </div>
   );
@@ -7444,10 +7538,143 @@ function downloadCsv(fileName: string, rows: (string | number | null)[][]) {
   URL.revokeObjectURL(url);
 }
 
+function InviteParentModal({ students, preselectedId, onClose, onDone }: {
+  students: AdminStudentRow[]; preselectedId: string; onClose: () => void; onDone: () => void;
+}) {
+  const [email, setEmail] = useState("");
+  const [relationship, setRelationship] = useState("Wali");
+  const [selected, setSelected] = useState<Set<string>>(new Set([preselectedId]));
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState("");
+  const [result, setResult] = useState<{ linked: boolean; url: string | null } | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [attempted, setAttempted] = useState(false);
+  const emailError = !email.trim() ? "Wajib diisi" : !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) ? "Format email tidak valid" : null;
+  const studentError = selected.size === 0 ? "Pilih minimal satu siswa" : null;
+
+  function toggle(id: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }
+
+  async function handleSend() {
+    setAttempted(true);
+    if (emailError || studentError) return;
+    setSending(true);
+    setError("");
+    const res = await authedFetch("/api/parent-invite", {
+      studentIds: [...selected], parentEmail: email.trim(), relationship,
+    }) as { success?: boolean; error?: string; linked?: boolean; invitationUrl?: string } | null;
+    setSending(false);
+    if (!res || res.error) { setError(res?.error ?? "Gagal mengirim undangan."); return; }
+    setResult({
+      linked: !!res.linked,
+      url: res.invitationUrl ? `${window.location.origin}${res.invitationUrl}` : null,
+    });
+  }
+
+  function copyLink() {
+    if (!result?.url) return;
+    navigator.clipboard.writeText(result.url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  }
+
+  if (result) {
+    return (
+      <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+        <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={onDone} />
+        <div className="relative w-full max-w-md rounded-card border border-border bg-surface shadow-xl p-6">
+          <div className="flex items-center gap-2.5 mb-4">
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-success-light">
+              <CheckCircle2 className="h-5 w-5 text-success" />
+            </div>
+            <h2 className="text-[16px] font-bold text-ink">
+              {result.linked ? "Langsung Terhubung" : "Undangan Dibuat"}
+            </h2>
+          </div>
+          {result.linked ? (
+            <p className="text-[13px] text-ink-secondary leading-relaxed mb-5">
+              Akun orang tua dengan email ini sudah ada, jadi langsung terhubung ke {selected.size} siswa yang dipilih. Tidak perlu link registrasi.
+            </p>
+          ) : (
+            <>
+              <p className="text-[13px] text-ink-secondary leading-relaxed mb-3">
+                Belum ada pengiriman email otomatis - kirimkan link ini sendiri ke orang tua (WhatsApp, email, dsb). Membuka link ini akan menghubungkan semua {selected.size} siswa yang dipilih ke akun yang mereka buat.
+              </p>
+              <div className="flex items-center gap-2 rounded-[8px] border border-border bg-background px-3 py-2 mb-5">
+                <span className="flex-1 text-[12px] text-ink truncate">{result.url}</span>
+                <Button variant="outline" className="h-7 px-2 text-[11px] shrink-0" onClick={copyLink}>
+                  {copied ? "Tersalin!" : "Salin"}
+                </Button>
+              </div>
+            </>
+          )}
+          <div className="flex justify-end">
+            <Button variant="default" className="h-8 text-[12px]" onClick={onDone}>Selesai</Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => !sending && onClose()} />
+      <div className="relative w-full max-w-md rounded-card border border-border bg-surface shadow-xl p-6 max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-[16px] font-bold text-ink">Undang Orang Tua</h2>
+          <button onClick={() => !sending && onClose()} className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-4 overflow-y-auto pr-1">
+          <FormField label="Email Orang Tua" required error={attempted ? emailError : null}>
+            <input type="email" value={email} onChange={e => setEmail(e.target.value)} placeholder="orangtua@email.com"
+              className={fieldClass(attempted && !!emailError)} />
+          </FormField>
+          <FormField label="Hubungan" required>
+            <SelectField value={relationship} onChange={setRelationship}
+              options={["Ibu", "Ayah", "Wali"].map(r => ({ value: r, label: r }))} />
+          </FormField>
+          <div>
+            <label className="block text-[11px] font-semibold text-ink-secondary mb-1.5">
+              Siswa yang Terhubung <span className="text-danger">*</span> ({selected.size} dipilih)
+            </label>
+            <p className="text-[11px] text-ink-tertiary mb-2">Satu orang tua bisa memiliki lebih dari satu anak - centang semua anak yang terhubung ke email ini.</p>
+            <div className="rounded-[8px] border border-border max-h-52 overflow-y-auto divide-y divide-border">
+              {students.map(s => (
+                <label key={s.id} className="flex items-center gap-2.5 px-3 py-2 text-[12px] cursor-pointer hover:bg-background">
+                  <input type="checkbox" checked={selected.has(s.id)} onChange={() => toggle(s.id)} className="h-3.5 w-3.5" />
+                  <span className="flex-1 text-ink">{s.name}</span>
+                  <span className="text-ink-tertiary">{s.className}</span>
+                </label>
+              ))}
+            </div>
+          </div>
+          {attempted && studentError && <p className="text-[11px] font-medium text-danger">{studentError}</p>}
+          {error && <p className="text-[12px] text-danger">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-2 mt-5 pt-4 border-t border-border shrink-0">
+          <Button variant="outline" className="h-8 text-[12px]" onClick={onClose} disabled={sending}>Batal</Button>
+          <Button variant="default" className="h-8 text-[12px]" onClick={handleSend} disabled={sending}>
+            {sending ? "Mengirim..." : "Kirim Undangan"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AdminStudents() {
   const data = useAdminData<{ students: AdminStudentRow[] }>("students");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
+  const [inviteFor, setInviteFor] = useState<string | null>(null);
   const students = data && "students" in data ? data.students : [];
   const filtered = students.filter(s =>
     (statusFilter === "ALL" || s.status === statusFilter) &&
@@ -7495,7 +7722,7 @@ function AdminStudents() {
       ) : (
         <div className="rounded-card border border-border bg-surface shadow-sm overflow-x-auto">
           <table className="w-full min-w-[720px]">
-            <AdminTableHead cols={["Nama Siswa", "Sekolah", "Kelas", "Rata-rata", "XP · Streak", "Terakhir Aktif", "Status"]} />
+            <AdminTableHead cols={["Nama Siswa", "Sekolah", "Kelas", "Rata-rata", "XP · Streak", "Terakhir Aktif", "Status", "Aksi"]} />
             <tbody>
               {filtered.map(s => {
                 const st = STUDENT_STATUS_LABEL[s.status] ?? { label: s.status, tone: "warning" as const };
@@ -7511,12 +7738,27 @@ function AdminStudents() {
                     <td className="px-4 py-3 text-[12px] text-ink">{s.xp.toLocaleString("id-ID")} XP · 🔥{s.streak}</td>
                     <td className="px-4 py-3 text-[12px] text-ink">{formatLastActive(s.lastActiveDate)}</td>
                     <td className="px-4 py-3 text-[12px]"><Badge tone={st.tone}>{st.label}</Badge></td>
+                    <td className="px-4 py-3 text-right">
+                      {s.status === "ACTIVE" ? (
+                        <Button variant="ghost" className="h-7 px-2 text-[11px] whitespace-nowrap" onClick={() => setInviteFor(s.id)}>
+                          <Mail className="h-3.5 w-3.5 mr-1" />Undang Ortu
+                        </Button>
+                      ) : <span className="text-[11px] text-ink-tertiary">—</span>}
+                    </td>
                   </tr>
                 );
               })}
             </tbody>
           </table>
         </div>
+      )}
+      {inviteFor && (
+        <InviteParentModal
+          students={active}
+          preselectedId={inviteFor}
+          onClose={() => setInviteFor(null)}
+          onDone={() => setInviteFor(null)}
+        />
       )}
     </div>
   );

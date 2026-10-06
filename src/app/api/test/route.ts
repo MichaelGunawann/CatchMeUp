@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
+import { groqErrorResponse } from "@/lib/groq-error";
 
 export async function GET() {
   const key = process.env.GROQ_API_KEY;
@@ -9,14 +10,19 @@ export async function GET() {
   try {
     const groq = new Groq({ apiKey: key });
     const completion = await groq.chat.completions.create({
-      model: "llama-3.1-8b-instant",
+      model: "openai/gpt-oss-20b",
       messages: [{ role: "user", content: "Say OK in one word." }],
-      max_tokens: 10,
+      // gpt-oss models spend a variable, non-deterministic amount of the
+      // token budget on internal reasoning before the visible answer even
+      // for a trivial prompt (observed 30-64 reasoning tokens across
+      // identical calls) - 200 gives enough headroom that an empty
+      // response reliably means a real problem, not reasoning variance.
+      max_tokens: 200,
     });
     const text = completion.choices[0].message.content ?? "";
     return Response.json({ success: true, response: text });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    return Response.json({ success: false, error: msg });
+    const { message } = groqErrorResponse(err);
+    return Response.json({ success: false, error: message });
   }
 }

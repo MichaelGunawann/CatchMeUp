@@ -6,7 +6,7 @@ import { Assessment, AssessmentAttempt } from "@/lib/supabase/types";
  * writes UTC ISO strings, but PostgREST hands them back WITHOUT an offset
  * ("2026-10-23T03:00:00"), which `new Date()` would read as the viewer's
  * local time - shifting every schedule by +7h in WIB. Values without an
- * explicit offset are therefore treated as UTC. (Migration 016 converts
+ * explicit offset are therefore treated as UTC. (Migration 020 converts
  * the columns to TIMESTAMPTZ; this stays correct either way.)
  */
 export function parseDbTime(value: string): number {

@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { supabaseAdmin } from "@/lib/supabase/server";
+import { groqErrorResponse } from "@/lib/groq-error";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -111,7 +112,7 @@ ${materialList || "(belum ada materi yang diunggah guru)"}`;
     async start(controller) {
       try {
         const response = await getGroq().chat.completions.create({
-          model: "llama-3.3-70b-versatile",
+          model: "openai/gpt-oss-120b",
           messages: [
             { role: "system", content: systemPrompt },
             ...messages.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
@@ -129,8 +130,8 @@ ${materialList || "(belum ada materi yang diunggah guru)"}`;
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       } catch (err) {
-        const msg = err instanceof Error ? err.message : "Unknown error";
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: msg })}\n\n`));
+        const { message } = groqErrorResponse(err);
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ error: message })}\n\n`));
         controller.close();
       }
     },

@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
+import { groqErrorResponse } from "@/lib/groq-error";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -37,13 +38,30 @@ Pastikan:
 - Ada 4 pilihan (A, B, C, D) per soal
 - Penjelasan jawaban lengkap dan edukatif
 - Jawaban tersebar merata (tidak selalu A)
-- Jangan include sourceTitle atau sourcePage (tidak ada materi spesifik)`;
+- Jangan include sourceTitle atau sourcePage (tidak ada materi spesifik)
+- SANGAT PENTING: Sebelum menuliskan correctAnswer, hitung ulang jawabannya
+  langkah demi langkah, PASTIKAN hasil perhitunganmu benar-benar cocok
+  dengan salah satu dari 4 pilihan yang kamu buat. Jika hasil hitunganmu
+  tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
+  agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
+  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.`;
 
   try {
+    // Scaled to the actual question count instead of a flat 8192 - Groq's
+    // daily-token rate limiter checks the requested max_tokens against
+    // remaining quota, so a fixed oversized value rejects small requests
+    // even when there'd be plenty of real headroom for them.
+    const maxTokens = Math.min(8192, count * 300 + 500);
     const completion = await getGroq().chat.completions.create({
-      model: "llama-3.3-70b-versatile",
+      model: "openai/gpt-oss-120b",
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 8192,
+      max_tokens: maxTokens,
+      // Low temperature specifically to reduce answer-key inconsistency -
+      // verified empirically that the default temperature let the model
+      // compute the right answer in its own explanation and then pick a
+      // different, wrong option anyway; 0.3 + the self-verification
+      // instruction above eliminated that in repeated testing.
+      temperature: 0.3,
     });
 
     const text = completion.choices[0].message.content ?? "[]";
@@ -51,7 +69,7 @@ Pastikan:
     const questions = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
     return Response.json({ questions });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "Unknown error";
-    return Response.json({ error: msg, questions: [] }, { status: 500 });
+    const { message, status } = groqErrorResponse(err);
+    return Response.json({ error: message, questions: [] }, { status });
   }
 }

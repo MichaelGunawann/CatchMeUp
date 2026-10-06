@@ -98,11 +98,13 @@ export async function POST(req: Request) {
         const { data: subjectRow } = await supabaseAdmin.from("subjects").select("name").eq("id", subjectId).single();
         const prompt = `Buat ${shortfall} soal pilihan ganda (A-D) bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
           topic ? ` topik "${topic}"` : ""
-        } tingkat kesulitan "${difficulty ?? "Sedang"}". Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":"","C":"","D":""},"correctAnswer":"A","explanation":"","topic":""}]}`;
+        } tingkat kesulitan "${difficulty ?? "Sedang"}". Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":"","C":"","D":""},"correctAnswer":"A","explanation":"","topic":""}]}
+SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langkah demi langkah dan pastikan hasilnya benar-benar cocok dengan salah satu dari 4 pilihan. correctAnswer HARUS konsisten dengan explanation.`;
         const completion = await getGroq().chat.completions.create({
-          model: "llama-3.3-70b-versatile",
+          model: "openai/gpt-oss-120b",
           messages: [{ role: "user", content: prompt }],
           max_tokens: 2000,
+          temperature: 0.3,
         });
         const text = completion.choices[0].message.content ?? "{}";
         const jsonMatch = text.match(/\{[\s\S]*\}/);
