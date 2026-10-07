@@ -2,6 +2,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { groqErrorResponse } from "@/lib/groq-error";
+import { MAX_QUESTIONS_PER_CALL, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -11,13 +12,17 @@ function getGroq(): Groq {
 }
 
 export async function POST(req: Request) {
-  const { materialTitle, topic, subject, count = 5, difficulty = "Sedang" } = await req.json() as {
+  const body = await req.json() as {
     materialTitle: string;
     topic: string;
     subject: string;
     count?: number;
     difficulty?: string;
+    avoid?: string[];
   };
+  const { materialTitle, topic, subject, difficulty = "Sedang" } = body;
+  // Capped per call - callers batch larger requests (45 at once timed out).
+  const count = Math.min(Math.max(1, body.count ?? 5), MAX_QUESTIONS_PER_CALL);
 
   const prompt = `Buatkan ${count} soal pilihan ganda tingkat ${difficulty} untuk topik "${topic}" pada mata pelajaran ${subject} (materi: ${materialTitle}).
 
@@ -44,7 +49,7 @@ Pastikan:
   dengan salah satu dari 4 pilihan yang kamu buat. Jika hasil hitunganmu
   tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
   agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
-  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.`;
+  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.${avoidListPrompt(body.avoid)}`;
 
   try {
     // Scaled to the actual question count instead of a flat 8192 - Groq's
@@ -64,9 +69,8 @@ Pastikan:
       temperature: 0.3,
     });
 
-    const text = completion.choices[0].message.content ?? "[]";
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-    const questions = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+    const questions = parseQuestionsJson(completion.choices[0].message.content ?? "");
+    if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal yang valid. Coba lagi.", questions: [] }, { status: 502 });
     return Response.json({ questions });
   } catch (err) {
     const { message, status } = groqErrorResponse(err);

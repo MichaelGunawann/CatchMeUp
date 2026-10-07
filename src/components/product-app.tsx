@@ -3424,6 +3424,7 @@ function TeacherAssessmentBuilder() {
   const [aiGenerating, setAiGenerating] = useState(false);
   const [aiGenerated, setAiGenerated] = useState(false);
   const [aiGeneratedQuestions, setAiGeneratedQuestions] = useState<typeof questionBank>([]);
+  const [aiProgress, setAiProgress] = useState<{ done: number; total: number } | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editDraft, setEditDraft] = useState<typeof questionBank[number] | null>(null);
@@ -3566,65 +3567,111 @@ function TeacherAssessmentBuilder() {
     setAiGeneratedQuestions([]);
   }
 
-  async function generateAI() {
+  // Generates questions in small batches (the server caps each call; one
+  // 45-question request ran past the 60s function limit). Materials with a
+  // stored file are generated from their actual contents, each batch from a
+  // different part of the file, with already-made questions passed along to
+  // avoid duplicates. `append` tops up to the target count after a partial run.
+  async function generateAI(append = false) {
     if (selectedMaterials.size === 0) return;
-    setAiGenerating(true);
-    setAiGeneratedQuestions([]);
-
     const matList = (materials ?? []).filter(m => selectedMaterials.has(m.id));
-    const allGenerated: typeof questionBank = [];
-    const totalCount = formQuestionCount;
-    const perMat = Math.max(1, Math.ceil(totalCount / matList.length));
+    const existing = append ? aiGeneratedQuestions : [];
+    const target = Math.max(0, formQuestionCount - existing.length);
+    if (target === 0) return;
 
-    for (let matIdx = 0; matIdx < matList.length; matIdx++) {
-      const mat = matList[matIdx];
-      // Last material gets remainder to hit exact total
-      const remaining = totalCount - allGenerated.length;
-      const count = matIdx === matList.length - 1 ? remaining : Math.min(perMat, remaining);
-      if (count <= 0) break;
-      try {
-        const res = await fetch("/api/generate-questions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            materialTitle: mat.title,
-            topic: mat.subject ?? mat.title,
-            subject: mat.subject ?? "Umum",
-            count,
-            difficulty: "Sedang",
-          }),
-        });
-        const data = await res.json() as { questions?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }>; error?: string };
-        if (data.questions?.length) {
-          allGenerated.push(...data.questions.map((q, i) => ({
-            id: `gen-${mat.id}-${i}`,
-            question: q.question,
-            topic: q.topic,
-            subtopic: q.topic,
-            bloom: "Menerapkan" as const,
-            difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
-            styleType: "TKA" as const,
-            source: mat.title,
-            usageCount: 0,
-            successRate: 0,
-            status: "Disetujui" as const,
-            isLocked: false,
-            options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
-            correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
-            explanation: q.explanation,
-          })));
+    setAiGenerating(true);
+    if (!append) { setAiGeneratedQuestions([]); setSelectedQuestions(new Set()); }
+
+    const BATCH = 8;
+    type Job = { mat: MaterialWithFile; count: number; segment: number; segments: number };
+    const jobs: Job[] = [];
+    matList.forEach((mat, i) => {
+      // Spread the target evenly across materials (first ones take the remainder).
+      const share = Math.floor(target / matList.length) + (i < target % matList.length ? 1 : 0);
+      const segments = Math.max(1, Math.ceil(share / BATCH));
+      for (let k = 0; k < segments; k++) {
+        const count = Math.min(BATCH, share - k * BATCH);
+        if (count > 0) jobs.push({ mat, count, segment: k, segments });
+      }
+    });
+
+    const generated: typeof questionBank = [...existing];
+    let lastError = "";
+    let done = 0;
+    setAiProgress({ done: 0, total: jobs.length });
+
+    type ApiQ = { question: string; options: Record<string, string>; correctAnswer: string; explanation?: string; topic?: string; difficulty?: string };
+    async function runJob(job: Job): Promise<void> {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const avoid = generated.map(q => q.question);
+        const useFile = !!job.mat.fileUrl;
+        try {
+          const res = await fetch(useFile ? "/api/extract-and-generate" : "/api/generate-questions", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(useFile
+              ? { storagePath: job.mat.fileUrl, fileName: job.mat.title, materialTitle: job.mat.title, subject: job.mat.subject ?? "Umum",
+                  count: job.count, segment: job.segment, segments: job.segments, avoid }
+              : { materialTitle: job.mat.title, topic: job.mat.chapter || job.mat.subject || job.mat.title, subject: job.mat.subject ?? "Umum",
+                  count: job.count, difficulty: "Sedang", avoid }),
+          });
+          const data = await res.json().catch(() => null) as { questions?: ApiQ[]; error?: string } | null;
+          if (!data) { lastError = res.status === 504 ? "Server AI terlalu lama merespons" : `Server error (${res.status})`; }
+          else if (data.questions?.length) {
+            for (const q of data.questions) {
+              generated.push({
+                id: `gen-${job.mat.id}-${Date.now().toString(36)}-${generated.length}`,
+                question: q.question,
+                topic: q.topic || job.mat.chapter || job.mat.subject || "Umum",
+                subtopic: q.topic || "Umum",
+                bloom: "Menerapkan" as const,
+                difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty ?? "") ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
+                styleType: "TKA" as const,
+                source: job.mat.title,
+                usageCount: 0,
+                successRate: 0,
+                status: "Disetujui" as const,
+                isLocked: false,
+                options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
+                correctAnswer: (["A", "B", "C", "D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
+                explanation: q.explanation ?? "",
+              });
+            }
+            return;
+          } else {
+            lastError = data.error ?? "AI tidak menghasilkan soal";
+            if (res.status === 429 || res.status === 400) return; // quota / unreadable file: retrying won't help
+          }
+        } catch {
+          lastError = "Gagal menghubungi server. Periksa koneksi internet.";
         }
-      } catch { /* fallback to db bank below */ }
+      }
     }
 
-    if (allGenerated.length === 0) {
-      setToast({ message: "Gagal generate soal. Periksa koneksi dan API key di .env.local.", tone: "primary" });
-    }
+    // Up to 3 batches in flight at once.
+    const queue = [...jobs];
+    await Promise.all(Array.from({ length: Math.min(3, queue.length) }, async () => {
+      while (queue.length) {
+        const job = queue.shift()!;
+        await runJob(job);
+        done += 1;
+        setAiProgress({ done, total: jobs.length });
+        setAiGeneratedQuestions([...generated]);
+      }
+    }));
 
-    setAiGeneratedQuestions(allGenerated);
-    setSelectedQuestions(new Set(allGenerated.map(q => q.id)));
+    const finalList = generated.slice(0, formQuestionCount);
+    setAiGeneratedQuestions(finalList);
+    setSelectedQuestions(new Set(finalList.map(q => q.id)));
+    setAiProgress(null);
     setAiGenerating(false);
     setAiGenerated(true);
+
+    if (finalList.length === 0) {
+      setToast({ message: `Gagal membuat soal: ${lastError || "AI tidak merespons"}`, tone: "danger" });
+    } else if (finalList.length < formQuestionCount) {
+      setToast({ message: `Baru ${finalList.length} dari ${formQuestionCount} soal yang berhasil dibuat${lastError ? ` (${lastError})` : ""}. Klik "Lengkapi Soal" untuk mencoba lagi.`, tone: "primary" });
+    }
   }
 
   function toggleQuestion(id: string) {
@@ -3844,15 +3891,23 @@ function TeacherAssessmentBuilder() {
                     ? "Pilih minimal 1 materi untuk generate soal"
                     : `${selectedMaterials.size} materi dipilih · akan generate ${formQuestionCount} soal`}
                 </span>
-                <Button variant="default" className="h-8 text-[12px]"
-                  disabled={selectedMaterials.size === 0 || aiGenerating}
-                  onClick={generateAI}>
-                  {aiGenerating ? (
-                    <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />Membuat Soal...</>
-                  ) : (
-                    <><Sparkles className="mr-1.5 h-3.5 w-3.5" />Generate Soal AI</>
+                <div className="flex items-center gap-2">
+                  {aiGenerated && !aiGenerating && aiGeneratedQuestions.length > 0 && aiGeneratedQuestions.length < formQuestionCount && (
+                    <Button variant="outline" className="h-8 text-[12px]" onClick={() => generateAI(true)}>
+                      <Plus className="mr-1.5 h-3.5 w-3.5" />Lengkapi Soal ({formQuestionCount - aiGeneratedQuestions.length} lagi)
+                    </Button>
                   )}
-                </Button>
+                  <Button variant="default" className="h-8 text-[12px]"
+                    disabled={selectedMaterials.size === 0 || aiGenerating}
+                    onClick={() => generateAI(false)}>
+                    {aiGenerating ? (
+                      <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />
+                        {aiProgress ? `Membuat soal… ${aiGeneratedQuestions.length}/${formQuestionCount}` : "Membuat Soal..."}</>
+                    ) : (
+                      <><Sparkles className="mr-1.5 h-3.5 w-3.5" />{aiGenerated ? "Generate Ulang" : "Generate Soal AI"}</>
+                    )}
+                  </Button>
+                </div>
               </div>
             </div>
 
@@ -5528,12 +5583,29 @@ function StudentDashboard() {
 
 // ── Student Simulator ─────────────────────────────────────────────────────────
 
+type StudentAssessmentItem = {
+  id: string; title: string; type: string | null; subject: string;
+  durationMinutes: number | null; openAt: string | null; closeAt: string | null;
+  questionCount: number; state: "DRAFT" | "UPCOMING" | "OPEN" | "COMPLETED" | "MISSED" | "CLOSED";
+  inProgress: boolean; message: string; score: number | null;
+};
+
+// Question counts come from /api/student/assessments: students can't read
+// assessment_questions directly (by design), so a client-side count was
+// always 0 and every assessment showed "0 soal · Belum ada soal".
 function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
-  // null = still loading
-  const [items, setItems] = useState<SavedAssessment[] | null>(null);
+  const [items, setItems] = useState<StudentAssessmentItem[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [noClass, setNoClass] = useState(false);
+
   useEffect(() => {
     let cancelled = false;
-    fetchStudentAssessments().then(rows => { if (!cancelled) setItems(rows.filter(a => a.status === "Terjadwal")); });
+    apiPost<{ assessments: StudentAssessmentItem[]; noClass?: boolean }>("/api/student/assessments", {}).then(res => {
+      if (cancelled) return;
+      if (res.error) { setLoadError(res.error); setItems([]); return; }
+      setNoClass(!!res.noClass);
+      setItems(res.assessments ?? []);
+    });
     return () => { cancelled = true; };
   }, []);
 
@@ -5544,25 +5616,33 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
   ]));
 
   if (items === null) return <SectionLoading message="Memuat asesmen..." />;
+  if (loadError) return <AlertPanel tone="danger" title="Gagal memuat asesmen">{loadError}</AlertPanel>;
+  if (noClass) return <AlertPanel tone="primary" title="Belum ditempatkan di kelas">Hubungi admin sekolahmu agar kamu ditempatkan di kelas.</AlertPanel>;
 
-  const withState = items.map(a => {
+  // State is recomputed against the live clock so cards move between
+  // sections at the scheduled minute without a reload.
+  const live = items.map(a => {
     const openMs = a.openAt ? new Date(a.openAt).getTime() : null;
     const closeMs = a.closeAt ? new Date(a.closeAt).getTime() : null;
-    const notYetOpen = openMs !== null && now < openMs;
-    const alreadyClosed = closeMs !== null && now >= closeMs;
-    return { a, openMs, closeMs, notYetOpen, alreadyClosed, hasQuestions: a.totalQuestions > 0 };
-  }).filter(x => !x.alreadyClosed);
+    let state = a.state;
+    if (state === "UPCOMING" && openMs !== null && now >= openMs) state = "OPEN";
+    if ((state === "OPEN" || state === "UPCOMING") && !a.inProgress && closeMs !== null && now >= closeMs) state = "MISSED";
+    return { ...a, state, openMs, closeMs };
+  });
 
-  const openNow = withState.filter(x => !x.notYetOpen);
-  const upcoming = withState.filter(x => x.notYetOpen).sort((x, y) => (x.openMs ?? 0) - (y.openMs ?? 0));
+  const openNow = live.filter(x => x.state === "OPEN");
+  const upcoming = live.filter(x => x.state === "UPCOMING").sort((x, y) => (x.openMs ?? 0) - (y.openMs ?? 0));
+  const past = live.filter(x => x.state === "COMPLETED" || x.state === "MISSED" || x.state === "CLOSED");
 
-  if (withState.length === 0) return (
+  if (live.length === 0) return (
     <div className="flex items-center justify-center rounded-card border border-dashed border-border py-10">
-      <p className="text-[13px] text-ink-tertiary">Belum ada asesmen terjadwal dari gurumu.</p>
+      <p className="text-[13px] text-ink-tertiary">Belum ada asesmen dari gurumu untuk kelasmu.</p>
     </div>
   );
 
   const fmt = (ms: number) => new Date(ms).toLocaleString("id-ID", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const meta = (a: StudentAssessmentItem) =>
+    [a.subject, a.type, `${a.questionCount} soal`, a.durationMinutes ? `${a.durationMinutes} mnt` : "tanpa batas waktu"].filter(Boolean).join(" · ");
 
   return (
     <div className="space-y-6">
@@ -5570,27 +5650,31 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
         <div className="space-y-3">
           <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-success">Bisa dikerjakan sekarang</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {openNow.map(({ a, closeMs, hasQuestions }) => (
-              <div key={a.id} role="button" tabIndex={hasQuestions ? 0 : -1} aria-disabled={!hasQuestions}
-                onClick={() => hasQuestions && onStart(a.id)}
-                onKeyDown={e => { if (hasQuestions && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onStart(a.id); } }}
-                className={cn("rounded-card border bg-surface p-5 transition-all",
-                  hasQuestions ? "cursor-pointer border-border hover:border-primary/30 hover:shadow-soft" : "cursor-not-allowed border-border opacity-60")}>
-                <div className="flex items-start gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-primary-soft">
-                    <ShieldCheck className="h-5 w-5 text-primary" />
-                  </div>
-                  <div className="flex-1">
-                    <div className="text-[13px] font-bold text-ink">{a.title}</div>
-                    <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.totalQuestions} soal · {a.duration} mnt</div>
-                    <div className="flex items-center gap-2 mt-2 flex-wrap">
-                      {closeMs !== null && <Badge tone="warning">Ditutup {fmt(closeMs)} · {formatCountdown(closeMs - now)} lagi</Badge>}
-                      {hasQuestions ? <Badge tone="danger">Mode Kiosk</Badge> : <Badge tone="warning">Belum ada soal</Badge>}
+            {openNow.map(a => {
+              const ready = a.questionCount > 0;
+              return (
+                <div key={a.id} role="button" tabIndex={ready ? 0 : -1} aria-disabled={!ready}
+                  onClick={() => ready && onStart(a.id)}
+                  onKeyDown={e => { if (ready && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onStart(a.id); } }}
+                  className={cn("rounded-card border bg-surface p-5 transition-all",
+                    ready ? "cursor-pointer border-border hover:border-primary/30 hover:shadow-soft" : "cursor-not-allowed border-border opacity-60")}>
+                  <div className="flex items-start gap-3">
+                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-primary-soft">
+                      <ShieldCheck className="h-5 w-5 text-primary" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[13px] font-bold text-ink">{a.title}</div>
+                      <div className="text-[11px] text-ink-secondary mt-0.5">{meta(a)}</div>
+                      <div className="flex items-center gap-2 mt-2 flex-wrap">
+                        {a.inProgress && <Badge tone="primary">Lanjutkan pengerjaan</Badge>}
+                        {a.closeMs !== null && <Badge tone="warning">Ditutup {fmt(a.closeMs)} · {formatCountdown(a.closeMs - now)} lagi</Badge>}
+                        {ready ? <Badge tone="danger">Mode Kiosk</Badge> : <Badge tone="warning">Guru belum menambahkan soal</Badge>}
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -5599,21 +5683,46 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
         <div className="space-y-3">
           <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-primary">Akan datang</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {upcoming.map(({ a, openMs, closeMs }) => (
+            {upcoming.map(a => (
               <div key={a.id} aria-disabled className="rounded-card border border-dashed border-primary/30 bg-primary-soft/40 p-5">
                 <div className="flex items-start gap-3">
                   <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-background border border-border">
                     <Clock className="h-5 w-5 text-primary" />
                   </div>
-                  <div className="flex-1">
+                  <div className="flex-1 min-w-0">
                     <div className="text-[13px] font-bold text-ink">{a.title}</div>
-                    <div className="text-[11px] text-ink-secondary mt-0.5">{a.type} · {a.totalQuestions} soal · {a.duration} mnt</div>
+                    <div className="text-[11px] text-ink-secondary mt-0.5">{meta(a)}</div>
                     <p className="mt-2 text-[12px] text-ink">
-                      Dibuka <strong>{fmt(openMs!)}</strong>{closeMs !== null && <> · ditutup <strong>{fmt(closeMs)}</strong></>}
+                      Dibuka <strong>{fmt(a.openMs!)}</strong>{a.closeMs !== null && <> · ditutup <strong>{fmt(a.closeMs)}</strong></>}
                     </p>
-                    <Badge tone="primary" className="mt-2">Dibuka dalam {formatCountdown(openMs! - now)}</Badge>
+                    <Badge tone="primary" className="mt-2">Dibuka dalam {formatCountdown(a.openMs! - now)}</Badge>
                   </div>
                 </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {openNow.length === 0 && upcoming.length === 0 && (
+        <div className="flex items-center justify-center rounded-card border border-dashed border-border py-8">
+          <p className="text-[13px] text-ink-tertiary">Tidak ada asesmen yang sedang dibuka atau terjadwal.</p>
+        </div>
+      )}
+
+      {past.length > 0 && (
+        <div className="space-y-3">
+          <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-ink-tertiary">Sudah selesai / ditutup</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {past.map(a => (
+              <div key={a.id} className="flex items-center gap-3 rounded-card border border-border bg-background p-4">
+                <div className="flex-1 min-w-0">
+                  <div className="text-[13px] font-semibold text-ink truncate">{a.title}</div>
+                  <div className="text-[11px] text-ink-secondary mt-0.5">{meta(a)}</div>
+                </div>
+                {a.state === "COMPLETED"
+                  ? <Badge tone="success">{a.score != null ? `Nilai ${a.score}` : "Selesai"}</Badge>
+                  : <Badge tone="danger">{a.state === "MISSED" ? "Terlewat" : "Ditutup"}</Badge>}
               </div>
             ))}
           </div>

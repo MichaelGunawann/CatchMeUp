@@ -3,7 +3,8 @@ export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
-import { extractPptxText, sampleTextForPrompt } from "@/lib/office-text";
+import { extractPptxText, sampleTextForPrompt, documentSegment } from "@/lib/office-text";
+import { MAX_QUESTIONS_PER_CALL, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -33,9 +34,20 @@ export async function POST(req: Request) {
   let count = 5;
   let materialTitle = "";
   let subject = "";
+  let segment = 0;
+  let segments = 1;
+  let avoid: string[] = [];
 
   if (contentType.includes("application/json")) {
-    const body = await req.json() as { storagePath?: string; fileName?: string; count?: number; materialTitle?: string; subject?: string };
+    const body = await req.json() as {
+      storagePath?: string; fileName?: string; count?: number; materialTitle?: string; subject?: string;
+      // Batched callers: which part of the document this call should use,
+      // and question texts already generated (to avoid duplicates).
+      segment?: number; segments?: number; avoid?: string[];
+    };
+    segment = body.segment ?? 0;
+    segments = body.segments ?? 1;
+    avoid = Array.isArray(body.avoid) ? body.avoid : [];
     if (!body.storagePath) return Response.json({ error: "storagePath tidak ditemukan.", questions: [] }, { status: 400 });
     // The format comes from the stored object's real extension - callers
     // pass the material TITLE as fileName (no extension), which used to make
@@ -96,7 +108,8 @@ export async function POST(req: Request) {
 
   // Sample evenly across the whole document instead of only its first
   // pages (which for a textbook are just the cover and table of contents).
-  extractedText = sampleTextForPrompt(extractedText);
+  count = Math.min(Math.max(1, count || 5), MAX_QUESTIONS_PER_CALL);
+  extractedText = sampleTextForPrompt(documentSegment(extractedText, segment, segments));
   if (!extractedText) {
     return Response.json({
       error: "Tidak ada teks yang bisa dibaca dari file ini. Kalau ini PDF hasil scan (gambar), AI belum bisa membacanya — gunakan PDF yang teksnya bisa diseleksi.",
@@ -135,7 +148,7 @@ Pastikan:
   dengan salah satu dari 4 pilihan yang kamu buat. Jika hasil hitunganmu
   tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
   agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
-  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.`;
+  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.${avoidListPrompt(avoid)}`;
 
   try {
     // Scaled to the actual question count instead of a flat 4096 - see
@@ -154,11 +167,8 @@ Pastikan:
       temperature: 0.3,
     });
 
-    const text = completion.choices[0].message.content ?? "[]";
-    const jsonMatch = text.match(/\[[\s\S]*\]/);
-    const questions = jsonMatch ? JSON.parse(jsonMatch[0]) : [];
-
-    if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal. Coba lagi.", questions: [] }, { status: 500 });
+    const questions = parseQuestionsJson(completion.choices[0].message.content ?? "");
+    if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal yang valid. Coba lagi.", questions: [] }, { status: 502 });
     return Response.json({ questions });
   } catch (err) {
     const { message, status } = groqErrorResponse(err);

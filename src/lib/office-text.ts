@@ -79,3 +79,17 @@ export function sampleTextForPrompt(text: string, budget = 12000, slices = 6): s
   }
   return parts.join(" … ");
 }
+
+/**
+ * The `segment`-th of `segments` equal parts of a document (0-based), so
+ * batched generation can give each batch a different part of the material
+ * instead of the same excerpt (which produced near-duplicate questions).
+ */
+export function documentSegment(text: string, segment: number, segments: number): string {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (!segments || segments <= 1) return clean;
+  const n = Math.max(1, Math.floor(segments));
+  const i = Math.min(Math.max(0, Math.floor(segment)), n - 1);
+  const size = Math.ceil(clean.length / n);
+  return clean.slice(i * size, (i + 1) * size);
+}
