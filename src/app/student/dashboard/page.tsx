@@ -1,38 +1,50 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { BookOpen, CheckCircle2, Clock, FileQuestion, Flame, Star, Trophy } from "lucide-react";
+import { ArrowRight, Zap } from "lucide-react";
 import { AppShell } from "@/components/product-shell";
-import { PageHeader, StatCard, EmptyState, AlertPanel, LoadingPanel } from "@/components/product-primitives";
-import { Badge } from "@/components/ui/badge";
+import { AlertPanel, LoadingPanel } from "@/components/product-primitives";
+import { SubjectBadge } from "@/components/subject-ui";
 import { studentNav } from "@/lib/db";
 import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentStudent } from "@/lib/auth/authorization";
 import { supabase } from "@/lib/supabase/client";
-import { getAssessmentAvailability, parseDbTime, type AssessmentAvailability } from "@/lib/auth/assessment-availability";
+import { subjectStyle } from "@/lib/subject-style";
 import { useScheduleClock, formatCountdown } from "@/lib/hooks/use-schedule-clock";
-import type { Assessment, AssessmentAttempt } from "@/lib/supabase/types";
+import { cn } from "@/lib/utils";
 
-type AssessmentRow = Assessment & { subjects: { name: string } | null };
+/**
+ * Beranda (student home), designed for SD students after UAT feedback that
+ * the old dashboard showed too much at once. It answers one question first
+ * - "what should I do now?" - with a single big action, then three small
+ * numbers, then one card per subject (a shortcut to that subject's exams).
+ * The full exam list lives on the Ujian page.
+ */
 
-const availabilityTone: Record<AssessmentAvailability, "primary" | "success" | "warning" | "danger" | "neutral"> = {
-  DRAFT: "neutral",
-  UPCOMING: "primary",
-  OPEN: "success",
-  COMPLETED: "primary",
-  MISSED: "danger",
-  CLOSED: "neutral",
+type Item = {
+  id: string; title: string; subject: string; type: string | null;
+  durationMinutes: number | null; openAt: string | null; closeAt: string | null;
+  questionCount: number; state: "DRAFT" | "UPCOMING" | "OPEN" | "COMPLETED" | "MISSED" | "CLOSED";
+  inProgress: boolean; score: number | null;
 };
+type Stats = { streak: number; rank: number; classSize: number; xp: number };
 
-const availabilityLabel: Record<AssessmentAvailability, string> = {
-  DRAFT: "Draf",
-  UPCOMING: "Akan Datang",
-  OPEN: "Bisa Dikerjakan",
-  COMPLETED: "Selesai",
-  MISSED: "Terlewat",
-  CLOSED: "Ditutup",
-};
+async function authedPost<T>(path: string): Promise<T | null> {
+  const { data: { session } } = await supabase.auth.getSession();
+  if (!session) return null;
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
+      body: "{}",
+    });
+    return res.ok ? ((await res.json()) as T) : null;
+  } catch {
+    return null;
+  }
+}
 
 export default function StudentDashboardPage() {
   const router = useRouter();
@@ -40,56 +52,21 @@ export default function StudentDashboardPage() {
   const [error, setError] = useState<string | null>(null);
   const [accountStatus, setAccountStatus] = useState<"PENDING" | "REJECTED" | null>(null);
   const [noClassAssigned, setNoClassAssigned] = useState(false);
-  const [studentName, setStudentName] = useState("");
-  const [className, setClassName] = useState("");
-  const [schoolName, setSchoolName] = useState("");
-  const [assessments, setAssessments] = useState<AssessmentRow[]>([]);
-  const [attemptsByAssessment, setAttemptsByAssessment] = useState<Record<string, AssessmentAttempt[]>>({});
-  // Streak / rank / XP come from /api/student/overview (class ranking needs
-  // classmates' scores, which RLS hides from the student's own session).
-  // undefined = loading.
-  const [overview, setOverview] = useState<{ streak: number; rank: number; classSize: number; xp: number } | null | undefined>(undefined);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const { data: { session } } = await supabase.auth.getSession();
-      if (!session) return;
-      try {
-        const res = await fetch("/api/student/overview", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Authorization: `Bearer ${session.access_token}` },
-          body: "{}",
-        });
-        const json = await res.json();
-        if (!cancelled) setOverview(res.ok && json.stats ? json.stats : null);
-      } catch {
-        if (!cancelled) setOverview(null);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const [firstName, setFirstName] = useState("");
+  const [items, setItems] = useState<Item[]>([]);
+  const [classSubjects, setClassSubjects] = useState<string[]>([]);
+  // undefined = still loading
+  const [stats, setStats] = useState<Stats | null | undefined>(undefined);
 
   useEffect(() => {
     let cancelled = false;
 
     async function load() {
-      // Guard checks run before the try/finally below so that an
-      // unauthenticated or wrong-role visit never flips `loading` to
-      // false while navigating away (which would otherwise flash an
-      // empty dashboard shell for a frame before the redirect lands).
       const profile = await getCurrentProfile();
       if (cancelled) return;
-      if (!profile) {
-        router.push("/login");
-        return;
-      }
-      if (profile.role !== "STUDENT") {
-        router.push("/dashboard");
-        return;
-      }
+      if (!profile) { router.push("/login"); return; }
+      if (profile.role !== "STUDENT") { router.push("/dashboard"); return; }
+      setFirstName(profile.full_name.split(" ")[0]);
 
       const student = await getCurrentStudent();
       if (cancelled) return;
@@ -98,221 +75,144 @@ export default function StudentDashboardPage() {
         setLoading(false);
         return;
       }
+      if (student.status !== "ACTIVE") { setAccountStatus(student.status); setLoading(false); return; }
+      if (!student.class_id) { setNoClassAssigned(true); setLoading(false); return; }
 
-      // Pending/rejected accounts must not reach dashboard content, even
-      // though RLS would already return empty results for every query
-      // below - this check makes that explicit and skips the queries
-      // entirely rather than relying on them silently coming back empty.
-      if (student.status !== "ACTIVE") {
-        setStudentName(profile.full_name);
-        setAccountStatus(student.status);
-        setLoading(false);
-        return;
-      }
+      authedPost<{ stats: Stats }>("/api/student/overview").then(r => { if (!cancelled) setStats(r?.stats ?? null); });
 
-      // Approved but not yet placed in a class by the school admin -
-      // nothing class-scoped to show yet, and class_id is null so the
-      // queries below can't run meaningfully.
-      if (!student.class_id) {
-        setStudentName(profile.full_name);
-        setNoClassAssigned(true);
-        setLoading(false);
-        return;
-      }
-
-      try {
-        const [{ data: classData }, { data: schoolData }, { data: assessmentData, error: assessmentError }] =
-          await Promise.all([
-            supabase.from("classes").select("name").eq("id", student.class_id).single(),
-            supabase.from("schools").select("name").eq("id", student.school_id).single(),
-            supabase
-              .from("assessments")
-              .select("*, subjects(name)")
-              .eq("class_id", student.class_id)
-              .eq("status", "published"),
-          ]);
-
-        if (assessmentError) throw assessmentError;
-        if (cancelled) return;
-
-        setStudentName(profile.full_name);
-        setClassName(classData?.name ?? "");
-        setSchoolName(schoolData?.name ?? "");
-
-        const list = (assessmentData ?? []) as unknown as AssessmentRow[];
-        setAssessments(list);
-
-        if (list.length > 0) {
-          const { data: attemptData, error: attemptError } = await supabase
-            .from("assessment_attempts")
-            .select("*")
-            .eq("student_id", student.id)
-            .in(
-              "assessment_id",
-              list.map((a) => a.id)
-            );
-
-          if (attemptError) throw attemptError;
-          if (cancelled) return;
-
-          const grouped: Record<string, AssessmentAttempt[]> = {};
-          for (const attempt of (attemptData ?? []) as AssessmentAttempt[]) {
-            grouped[attempt.assessment_id] = [...(grouped[attempt.assessment_id] ?? []), attempt];
-          }
-          setAttemptsByAssessment(grouped);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Gagal memuat data dasbor");
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
+      const [list, { data: assignments }] = await Promise.all([
+        authedPost<{ assessments: Item[]; error?: string }>("/api/student/assessments"),
+        supabase.from("teacher_assignments").select("subjects(name)").eq("class_id", student.class_id),
+      ]);
+      if (cancelled) return;
+      if (!list) setError("Gagal memuat ujian. Coba muat ulang halaman.");
+      setItems(list?.assessments ?? []);
+      const names = ((assignments ?? []) as unknown as Array<{ subjects: { name: string } | null }>)
+        .map(a => a.subjects?.name).filter((n): n is string => !!n);
+      setClassSubjects([...new Set(names)]);
+      setLoading(false);
     }
 
     load();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [router]);
 
-  // Re-evaluates availability exactly when an assessment opens/closes, so
-  // "Akan Datang" flips to "Bisa Dikerjakan" at the scheduled minute.
-  const now = useScheduleClock(
-    assessments.flatMap((a) => [a.open_at ? parseDbTime(a.open_at) : null, a.close_at ? parseDbTime(a.close_at) : null])
-  );
+  const now = useScheduleClock(items.flatMap(a => [
+    a.openAt ? new Date(a.openAt).getTime() : null,
+    a.closeAt ? new Date(a.closeAt).getTime() : null,
+  ]));
 
-  const availability = assessments
-    .map((a) => ({
-      assessment: a,
-      info: getAssessmentAvailability(a, attemptsByAssessment[a.id] ?? [], new Date(now)),
-    }))
-    .sort((x, y) => {
-      // Open first, then upcoming (soonest first), then everything else.
-      const rank = (s: AssessmentAvailability) => (s === "OPEN" ? 0 : s === "UPCOMING" ? 1 : 2);
-      const r = rank(x.info.state) - rank(y.info.state);
-      if (r !== 0) return r;
-      return (x.assessment.open_at ? parseDbTime(x.assessment.open_at) : 0) - (y.assessment.open_at ? parseDbTime(y.assessment.open_at) : 0);
-    });
-
-  const openCount = availability.filter((a) => a.info.state === "OPEN").length;
-  const upcomingCount = availability.filter((a) => a.info.state === "UPCOMING").length;
-  const completedCount = availability.filter((a) => a.info.state === "COMPLETED").length;
+  // Live state against the clock (an exam opens/closes without a reload).
+  const live = items.map(a => {
+    const openMs = a.openAt ? new Date(a.openAt).getTime() : null;
+    const closeMs = a.closeAt ? new Date(a.closeAt).getTime() : null;
+    let state = a.state;
+    if (state === "UPCOMING" && openMs !== null && now >= openMs) state = "OPEN";
+    if ((state === "OPEN" || state === "UPCOMING") && !a.inProgress && closeMs !== null && now >= closeMs) state = "MISSED";
+    return { ...a, state, openMs, closeMs };
+  });
+  const openNow = live.filter(a => a.state === "OPEN" && a.questionCount > 0)
+    .sort((x, y) => (x.closeMs ?? Infinity) - (y.closeMs ?? Infinity)); // closing soonest first
+  const upcoming = live.filter(a => a.state === "UPCOMING").sort((x, y) => (x.openMs ?? 0) - (y.openMs ?? 0));
+  const subjects = [...new Set([...classSubjects, ...live.map(a => a.subject)])].sort((x, y) => x.localeCompare(y, "id"));
 
   return (
     <AppShell role="student" nav={studentNav}>
       <div className="space-y-6">
-        <PageHeader
-          eyebrow={schoolName || undefined}
-          title={studentName ? `Halo, ${studentName.split(" ")[0]}` : "Dasbor Siswa"}
-          description={className ? `Kelas ${className}` : undefined}
-        />
+        <h1 className="text-[26px] font-bold text-ink">{firstName ? `Halo, ${firstName}! 👋` : "Halo! 👋"}</h1>
 
-        {error && (
-          <AlertPanel tone="danger" title="Tidak dapat memuat data">
-            {error}
-          </AlertPanel>
-        )}
+        {error && <AlertPanel tone="danger" title="Tidak dapat memuat data">{error}</AlertPanel>}
 
         {loading ? (
-          <LoadingPanel message="Memuat dasbor..." />
+          <LoadingPanel message="Memuat beranda..." />
         ) : accountStatus === "PENDING" ? (
-          <AlertPanel tone="warning" title="Menunggu persetujuan admin sekolah">
-            Akun kamu sudah terdaftar tapi belum disetujui oleh admin sekolah. Kamu belum bisa mengakses
-            data atau fitur apa pun sampai akun ini disetujui.
+          <AlertPanel tone="warning" title="Menunggu persetujuan sekolah">
+            Akunmu sudah terdaftar, tapi belum disetujui admin sekolah. Tunggu sebentar, ya.
           </AlertPanel>
         ) : accountStatus === "REJECTED" ? (
           <AlertPanel tone="danger" title="Pendaftaran ditolak">
-            Pendaftaran akun siswa ini ditolak oleh admin sekolah. Hubungi admin sekolahmu jika menurutmu
-            ini keliru.
+            Pendaftaran akunmu ditolak admin sekolah. Hubungi admin sekolahmu.
           </AlertPanel>
         ) : noClassAssigned ? (
-          <AlertPanel tone="primary" title="Belum ditempatkan di kelas">
-            Akunmu sudah disetujui, tapi kamu belum ditempatkan di kelas mana pun. Hubungi admin sekolahmu
-            untuk penempatan kelas.
+          <AlertPanel tone="primary" title="Kamu belum punya kelas">
+            Akunmu sudah disetujui, tapi belum dimasukkan ke kelas. Minta admin sekolah menempatkanmu di kelas.
           </AlertPanel>
-        ) : !error ? (
+        ) : (
           <>
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <StatCard
-                label="Streak Belajar"
-                value={overview === undefined ? "…" : overview ? `${overview.streak} hari` : "-"}
-                detail="Kerjakan latihan/asesmen tiap hari"
-                tone="warning"
-                icon={Flame}
-              />
-              <StatCard
-                label="Peringkat Kelas"
-                value={overview === undefined ? "…" : overview ? `#${overview.rank}` : "-"}
-                detail={overview ? `dari ${overview.classSize} siswa` : "Berdasarkan rata-rata nilai"}
-                tone="primary"
-                icon={Trophy}
-              />
-              <StatCard
-                label="Total XP"
-                value={overview === undefined ? "…" : overview ? overview.xp.toLocaleString("id-ID") : "-"}
-                detail="Poin pengalaman belajar"
-                tone="success"
-                icon={Star}
-              />
-            </div>
-
-            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-              <StatCard
-                label="Bisa Dikerjakan"
-                value={String(openCount)}
-                detail="Asesmen tersedia sekarang"
-                tone="success"
-                icon={FileQuestion}
-              />
-              <StatCard
-                label="Akan Datang"
-                value={String(upcomingCount)}
-                detail="Belum dibuka"
-                tone="primary"
-                icon={Clock}
-              />
-              <StatCard
-                label="Selesai"
-                value={String(completedCount)}
-                detail="Sudah dikerjakan"
-                tone="neutral"
-                icon={CheckCircle2}
-              />
-            </div>
-
-            <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
-              <h2 className="text-[13px] font-bold text-ink mb-4">Asesmen Kelas</h2>
-              {availability.length === 0 ? (
-                <EmptyState
-                  icon={BookOpen}
-                  title="Belum ada asesmen"
-                  description="Asesmen yang dipublikasikan guru untuk kelasmu akan muncul di sini."
-                />
-              ) : (
-                <div className="divide-y divide-border">
-                  {availability.map(({ assessment, info }) => (
-                    <div key={assessment.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-                      <div className="flex-1 min-w-0">
-                        <div className="text-[13px] font-semibold text-ink truncate">{assessment.title}</div>
-                        <div className="text-[11px] text-ink-secondary mt-0.5">
-                          {assessment.subjects?.name ?? "Umum"} · {info.message}
-                          {info.state === "UPCOMING" && assessment.open_at && (
-                            <> · dibuka dalam {formatCountdown(parseDbTime(assessment.open_at) - now)}</>
-                          )}
-                          {info.state === "OPEN" && assessment.close_at && (
-                            <> · ditutup dalam {formatCountdown(parseDbTime(assessment.close_at) - now)}</>
-                          )}
-                        </div>
-                      </div>
-                      <Badge tone={availabilityTone[info.state]}>{availabilityLabel[info.state]}</Badge>
-                    </div>
-                  ))}
+            {/* 1. The one thing to do now */}
+            {openNow.length > 0 ? (
+              <div className={cn("rounded-card border border-l-[8px] bg-surface p-6 shadow-sm", subjectStyle(openNow[0].subject).accent)}>
+                <p className="text-[14px] font-bold text-primary">
+                  {openNow.length === 1 ? "Ada 1 ujian yang bisa kamu kerjakan sekarang" : `Ada ${openNow.length} ujian yang bisa kamu kerjakan sekarang`}
+                </p>
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <SubjectBadge subject={openNow[0].subject} size="lg" />
                 </div>
-              )}
+                <h2 className="mt-2 text-[22px] font-bold text-ink">{openNow[0].title}</h2>
+                <p className="mt-1 text-[14px] text-ink-secondary">
+                  {openNow[0].questionCount} soal · {openNow[0].durationMinutes ? `${openNow[0].durationMinutes} menit` : "tanpa batas waktu"}
+                  {openNow[0].closeMs !== null && ` · ditutup ${formatCountdown(openNow[0].closeMs - now)} lagi`}
+                </p>
+                <Link href="/student/simulator"
+                  className="mt-5 inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-[16px] font-bold text-white shadow-sm hover:bg-primary-dark">
+                  {openNow[0].inProgress ? "Lanjutkan Ujian" : "Kerjakan Sekarang"} <ArrowRight className="h-5 w-5" />
+                </Link>
+              </div>
+            ) : (
+              <div className="rounded-card border border-border bg-surface p-6 shadow-sm">
+                <p className="text-[14px] font-bold text-success">Tidak ada ujian yang harus dikerjakan sekarang 🎉</p>
+                {upcoming[0] && (
+                  <p className="mt-2 text-[15px] text-ink">
+                    Ujian berikutnya: <strong>{upcoming[0].title}</strong> ({upcoming[0].subject}), dibuka {formatCountdown(upcoming[0].openMs! - now)} lagi.
+                  </p>
+                )}
+                <h2 className="mt-3 text-[22px] font-bold text-ink">Yuk latihan soal sebentar!</h2>
+                <Link href="/student/adaptive"
+                  className="mt-5 inline-flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-[16px] font-bold text-white shadow-sm hover:bg-primary-dark">
+                  <Zap className="h-5 w-5" /> Mulai Latihan
+                </Link>
+              </div>
+            )}
+
+            {/* 2. Three small numbers */}
+            <div className="grid grid-cols-3 gap-3">
+              {[
+                { emoji: "🔥", label: "Hari beruntun", value: stats === undefined ? "…" : stats ? `${stats.streak}` : "-" },
+                { emoji: "⭐", label: "Poin XP", value: stats === undefined ? "…" : stats ? stats.xp.toLocaleString("id-ID") : "-" },
+                { emoji: "🏆", label: stats ? `Peringkat dari ${stats.classSize}` : "Peringkat", value: stats === undefined ? "…" : stats ? `#${stats.rank}` : "-" },
+              ].map(s => (
+                <Link key={s.label} href="/student/progress" className="rounded-card border border-border bg-surface px-4 py-3 text-center hover:shadow-soft">
+                  <div className="text-[24px] font-bold text-ink">{s.emoji} {s.value}</div>
+                  <div className="text-[12px] text-ink-secondary">{s.label}</div>
+                </Link>
+              ))}
             </div>
+
+            {/* 3. One card per subject = shortcut to that subject's exams */}
+            {subjects.length > 0 && (
+              <div>
+                <h3 className="mb-3 text-[18px] font-bold text-ink">Mata pelajaranmu</h3>
+                <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
+                  {subjects.map(sub => {
+                    const st = subjectStyle(sub);
+                    const waiting = live.filter(a => a.subject === sub && a.state === "OPEN").length;
+                    const soon = live.filter(a => a.subject === sub && a.state === "UPCOMING").length;
+                    return (
+                      <Link key={sub} href={`/student/simulator?mapel=${encodeURIComponent(sub)}`}
+                        className={cn("rounded-card border border-l-[6px] bg-surface p-4 transition hover:shadow-soft", st.accent)}>
+                        <div className="text-[28px] leading-none" aria-hidden="true">{st.emoji}</div>
+                        <div className="mt-2 text-[16px] font-bold text-ink">{sub}</div>
+                        <div className={cn("mt-1 text-[13px] font-semibold", waiting > 0 ? "text-primary" : "text-ink-tertiary")}>
+                          {waiting > 0 ? `${waiting} ujian menunggu` : soon > 0 ? `${soon} ujian akan datang` : "Tidak ada ujian"}
+                        </div>
+                      </Link>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </>
-        ) : null}
+        )}
       </div>
     </AppShell>
   );

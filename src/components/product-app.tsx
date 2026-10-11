@@ -35,6 +35,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { FormField, SelectField, fieldClass, useRequiredFields, type SelectOption } from "@/components/ui/form-field";
+import { SubjectBadge, SubjectFilter } from "@/components/subject-ui";
+import { subjectStyle } from "@/lib/subject-style";
 import {
   aiStyleOptions,
   assessmentStyles,
@@ -5257,12 +5259,14 @@ function StudentApp({ page }: { page: string }) {
     materials: <StudentMaterials />,
     simulator: <StudentSimulator page={simulatorPage} onPageChange={setSimulatorPage} />,
     adaptive: <StudentAdaptive />,
-    review: <StudentReview />,
-    "weak-topics": <StudentWeakTopics />,
-    incorrect: <StudentIncorrect />,
+    // Everything about results lives under one "Hasilku" menu with tabs;
+    // the old addresses still work and open the matching tab.
+    review: <StudentResults tab="review" />,
+    "weak-topics": <StudentResults tab="weak-topics" />,
+    incorrect: <StudentResults tab="incorrect" />,
     tutor: <StudentTutor />,
-    progress: <StudentProgress />,
-    achievements: <StudentAchievements />,
+    progress: <StudentResults tab="progress" />,
+    achievements: <StudentResults tab="achievements" />,
   };
 
   if (page === "simulator") {
@@ -5273,6 +5277,49 @@ function StudentApp({ page }: { page: string }) {
     <AppShell role="student" nav={studentNav} >
       {screens[page] ?? <StudentDashboard />}
     </AppShell>
+  );
+}
+
+// Small heading for a section inside a Hasilku tab (the page title "Hasilku"
+// is already shown above the tabs, so sub-pages don't repeat a big header).
+function TabIntro({ text }: { text: string }) {
+  return <p className="text-[14px] text-ink-secondary">{text}</p>;
+}
+
+// ── Hasilku (student results hub) ─────────────────────────────────────────────
+
+const RESULT_TABS = [
+  { key: "progress", label: "Ringkasan", emoji: "📊", href: "/student/progress" },
+  { key: "review", label: "Pembahasan", emoji: "📝", href: "/student/review" },
+  { key: "weak-topics", label: "Perlu Dilatih", emoji: "🎯", href: "/student/weak-topics" },
+  { key: "incorrect", label: "Soal Salah", emoji: "❌", href: "/student/incorrect" },
+  { key: "achievements", label: "Prestasi", emoji: "🏆", href: "/student/achievements" },
+] as const;
+
+function StudentResults({ tab }: { tab: (typeof RESULT_TABS)[number]["key"] }) {
+  const router = useRouter();
+  return (
+    <div className="space-y-5">
+      <div>
+        <h1 className="text-[26px] font-bold text-ink leading-tight">Hasilku</h1>
+        <p className="text-[14px] text-ink-secondary mt-1">Nilai, pembahasan soal, dan prestasimu.</p>
+      </div>
+      <div role="tablist" aria-label="Bagian hasil" className="flex gap-2 overflow-x-auto pb-1">
+        {RESULT_TABS.map(t => (
+          <button key={t.key} role="tab" aria-selected={tab === t.key}
+            onClick={() => router.push(t.href)}
+            className={cn("flex shrink-0 items-center gap-1.5 rounded-full border px-4 py-2 text-[14px] font-bold transition-colors",
+              tab === t.key ? "border-primary bg-primary text-white" : "border-border bg-surface text-ink-secondary hover:text-ink")}>
+            <span aria-hidden="true">{t.emoji}</span>{t.label}
+          </button>
+        ))}
+      </div>
+      {tab === "progress" && <StudentProgress />}
+      {tab === "review" && <StudentReview />}
+      {tab === "weak-topics" && <StudentWeakTopics />}
+      {tab === "incorrect" && <StudentIncorrect />}
+      {tab === "achievements" && <StudentAchievements />}
+    </div>
   );
 }
 
@@ -5316,25 +5363,14 @@ function StudentMaterials() {
   return (
     <div className="space-y-6">
       <PageHeader
-        eyebrow="Ruang Belajar"
-        title="Materi dari Guru"
+        eyebrow="Materi"
+        title="Bahan Belajar dari Guru"
         description="Materi yang sudah diunggah gurumu untuk kelasmu."
       />
 
-      {matRows !== null && subjectOptions.length > 1 && (
-        <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-tertiary mr-1">Mata Pelajaran:</span>
-          {["Semua", ...subjectOptions].map(subj => {
-            const count = subj === "Semua" ? mats.length : mats.filter(m => m.subject === subj).length;
-            return (
-              <button key={subj} onClick={() => setSubjectFilter(subj)}
-                className={cn("rounded-full border px-3 py-1 text-[12px] font-semibold transition-colors",
-                  subjectFilter === subj ? "border-primary bg-primary text-white" : "border-border bg-background text-ink-secondary hover:border-primary/40 hover:text-ink")}>
-                {subj} <span className={cn("ml-0.5 text-[10px]", subjectFilter === subj ? "text-white/80" : "text-ink-tertiary")}>{count}</span>
-              </button>
-            );
-          })}
-        </div>
+      {matRows !== null && (
+        <SubjectFilter subjects={subjectOptions} value={subjectFilter} onChange={setSubjectFilter}
+          counts={Object.fromEntries([["Semua", mats.length], ...subjectOptions.map(sub => [sub, mats.filter(m => m.subject === sub).length])])} />
       )}
 
       <div className="flex items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-2 max-w-sm">
@@ -5367,16 +5403,14 @@ function StudentMaterials() {
             </div>
           ) : (
             filtered.map(mat => (
-              <div key={mat.id} className="flex items-start gap-4 rounded-card border border-border bg-background p-4 hover:border-success/30 hover:shadow-soft transition-all">
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-success/10 border border-success/20">
-                  <FileText className="h-5 w-5 text-success" />
-                </div>
+              <div key={mat.id} className={cn("flex items-start gap-4 rounded-card border border-border border-l-[6px] bg-surface p-4 hover:shadow-soft transition-all", subjectStyle(mat.subject).accent)}>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-start justify-between gap-2 flex-wrap">
                     <div className="min-w-0">
-                      <p className="text-[13px] font-semibold text-ink truncate">{mat.title}</p>
-                      <p className="text-[11px] text-ink-secondary mt-0.5">
-                        {[mat.subject, mat.chapter, mat.type, mat.academicYear && `TA ${mat.academicYear}`, mat.uploadedAt].filter(Boolean).join(" · ")}
+                      <SubjectBadge subject={mat.subject || "Umum"} size="sm" />
+                      <p className="mt-1.5 text-[15px] font-bold text-ink truncate">{mat.title}</p>
+                      <p className="text-[12px] text-ink-secondary mt-0.5">
+                        {[mat.chapter, mat.type, mat.uploadedAt].filter(Boolean).join(" · ")}
                       </p>
                     </div>
                     <button
@@ -5597,6 +5631,15 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
   const [items, setItems] = useState<StudentAssessmentItem[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [noClass, setNoClass] = useState(false);
+  const [subjectFilter, setSubjectFilter] = useState("Semua");
+
+  // Beranda's subject cards link here with ?mapel=<subject>.
+  useEffect(() => {
+    try {
+      const m = new URLSearchParams(window.location.search).get("mapel");
+      if (m) setSubjectFilter(m);
+    } catch { /* ignore */ }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -5630,9 +5673,16 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
     return { ...a, state, openMs, closeMs };
   });
 
-  const openNow = live.filter(x => x.state === "OPEN");
-  const upcoming = live.filter(x => x.state === "UPCOMING").sort((x, y) => (x.openMs ?? 0) - (y.openMs ?? 0));
-  const past = live.filter(x => x.state === "COMPLETED" || x.state === "MISSED" || x.state === "CLOSED");
+  const subjects = [...new Set(live.map(a => a.subject))].sort((x, y) => x.localeCompare(y, "id"));
+  const activeFilter = subjects.includes(subjectFilter) ? subjectFilter : "Semua";
+  const actionable = live.filter(a => a.state === "OPEN" || a.state === "UPCOMING");
+  const counts: Record<string, number> = { Semua: actionable.length };
+  for (const sub of subjects) counts[sub] = actionable.filter(a => a.subject === sub).length;
+  const shown = activeFilter === "Semua" ? live : live.filter(a => a.subject === activeFilter);
+
+  const openNow = shown.filter(x => x.state === "OPEN");
+  const upcoming = shown.filter(x => x.state === "UPCOMING").sort((x, y) => (x.openMs ?? 0) - (y.openMs ?? 0));
+  const past = shown.filter(x => x.state === "COMPLETED" || x.state === "MISSED" || x.state === "CLOSED");
 
   if (live.length === 0) return (
     <div className="flex items-center justify-center rounded-card border border-dashed border-border py-10">
@@ -5642,10 +5692,11 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
 
   const fmt = (ms: number) => new Date(ms).toLocaleString("id-ID", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
   const meta = (a: StudentAssessmentItem) =>
-    [a.subject, a.type, `${a.questionCount} soal`, a.durationMinutes ? `${a.durationMinutes} mnt` : "tanpa batas waktu"].filter(Boolean).join(" · ");
+    [a.type, `${a.questionCount} soal`, a.durationMinutes ? `${a.durationMinutes} menit` : "tanpa batas waktu"].filter(Boolean).join(" · ");
 
   return (
     <div className="space-y-6">
+      <SubjectFilter subjects={subjects} value={activeFilter} onChange={setSubjectFilter} counts={counts} />
       {openNow.length > 0 && (
         <div className="space-y-3">
           <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-success">Bisa dikerjakan sekarang</h3>
@@ -5656,21 +5707,24 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
                 <div key={a.id} role="button" tabIndex={ready ? 0 : -1} aria-disabled={!ready}
                   onClick={() => ready && onStart(a.id)}
                   onKeyDown={e => { if (ready && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onStart(a.id); } }}
-                  className={cn("rounded-card border bg-surface p-5 transition-all",
-                    ready ? "cursor-pointer border-border hover:border-primary/30 hover:shadow-soft" : "cursor-not-allowed border-border opacity-60")}>
+                  className={cn("rounded-card border border-l-[6px] bg-surface p-5 transition-all", subjectStyle(a.subject).accent,
+                    ready ? "cursor-pointer border-border hover:shadow-soft" : "cursor-not-allowed border-border opacity-60")}>
                   <div className="flex items-start gap-3">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-primary-soft">
-                      <ShieldCheck className="h-5 w-5 text-primary" />
-                    </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-[13px] font-bold text-ink">{a.title}</div>
+                      <SubjectBadge subject={a.subject} />
+                      <div className="mt-2 text-[16px] font-bold text-ink">{a.title}</div>
                       <div className="text-[11px] text-ink-secondary mt-0.5">{meta(a)}</div>
                       <div className="flex items-center gap-2 mt-2 flex-wrap">
                         {a.inProgress && <Badge tone="primary">Lanjutkan pengerjaan</Badge>}
                         {a.closeMs !== null && <Badge tone="warning">Ditutup {fmt(a.closeMs)} · {formatCountdown(a.closeMs - now)} lagi</Badge>}
-                        {ready ? <Badge tone="danger">Mode Kiosk</Badge> : <Badge tone="warning">Guru belum menambahkan soal</Badge>}
+                        {!ready && <Badge tone="warning">Guru belum menambahkan soal</Badge>}
                       </div>
                     </div>
+                    {ready && (
+                      <span className="shrink-0 self-center rounded-full bg-primary px-4 py-2 text-[13px] font-bold text-white">
+                        {a.inProgress ? "Lanjutkan" : "Mulai"}
+                      </span>
+                    )}
                   </div>
                 </div>
               );
@@ -5684,13 +5738,11 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
           <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-primary">Akan datang</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {upcoming.map(a => (
-              <div key={a.id} aria-disabled className="rounded-card border border-dashed border-primary/30 bg-primary-soft/40 p-5">
+              <div key={a.id} aria-disabled className={cn("rounded-card border border-dashed border-l-[6px] bg-surface p-5", subjectStyle(a.subject).accent)}>
                 <div className="flex items-start gap-3">
-                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-background border border-border">
-                    <Clock className="h-5 w-5 text-primary" />
-                  </div>
                   <div className="flex-1 min-w-0">
-                    <div className="text-[13px] font-bold text-ink">{a.title}</div>
+                    <SubjectBadge subject={a.subject} />
+                    <div className="mt-2 text-[16px] font-bold text-ink">{a.title}</div>
                     <div className="text-[11px] text-ink-secondary mt-0.5">{meta(a)}</div>
                     <p className="mt-2 text-[12px] text-ink">
                       Dibuka <strong>{fmt(a.openMs!)}</strong>{a.closeMs !== null && <> · ditutup <strong>{fmt(a.closeMs)}</strong></>}
@@ -5706,7 +5758,9 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
 
       {openNow.length === 0 && upcoming.length === 0 && (
         <div className="flex items-center justify-center rounded-card border border-dashed border-border py-8">
-          <p className="text-[13px] text-ink-tertiary">Tidak ada asesmen yang sedang dibuka atau terjadwal.</p>
+          <p className="text-[14px] text-ink-tertiary">
+            {activeFilter === "Semua" ? "Tidak ada ujian yang sedang dibuka atau terjadwal. 🎉" : `Tidak ada ujian ${activeFilter} yang sedang dibuka atau terjadwal.`}
+          </p>
         </div>
       )}
 
@@ -5715,9 +5769,10 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
           <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-ink-tertiary">Sudah selesai / ditutup</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {past.map(a => (
-              <div key={a.id} className="flex items-center gap-3 rounded-card border border-border bg-background p-4">
+              <div key={a.id} className={cn("flex items-center gap-3 rounded-card border border-border border-l-[6px] bg-background p-4", subjectStyle(a.subject).accent)}>
                 <div className="flex-1 min-w-0">
-                  <div className="text-[13px] font-semibold text-ink truncate">{a.title}</div>
+                  <SubjectBadge subject={a.subject} size="sm" />
+                  <div className="mt-1 text-[14px] font-semibold text-ink truncate">{a.title}</div>
                   <div className="text-[11px] text-ink-secondary mt-0.5">{meta(a)}</div>
                 </div>
                 {a.state === "COMPLETED"
@@ -5953,9 +6008,9 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     return (
       <AppShell role="student" nav={studentNav}>
         <div className="space-y-6">
-          <PageHeader eyebrow="Simulasi Ujian" title="Pilih Asesmen Resmi"
-            description="Pilih ujian yang akan diikuti. Ujian resmi berjalan dalam mode kiosk — berpindah tab atau keluar layar penuh otomatis mengakhiri ujian." />
-          <AlertPanel tone="danger" title="Perhatian: Mode Ujian Ketat">
+          <PageHeader eyebrow="Ujian" title="Ujian dari Guru"
+            description="Pilih ujian yang sudah dibuka, lalu kerjakan sampai selesai." />
+          <AlertPanel tone="danger" title="Selama ujian, jangan pindah ke tab atau aplikasi lain">
             Berpindah tab, meminimalkan jendela, atau keluar layar penuh akan otomatis menyelesaikan dan mengumpulkan jawaban kamu.
           </AlertPanel>
           <SimulatorPickList onStart={(id) => { startExam(id); }} />
@@ -6406,8 +6461,8 @@ function StudentAdaptive() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Latihan Adaptif" title="Latihan Disesuaikan AI"
-        description="Pilih topik dan tingkat kesulitan. AI akan menyiapkan soal dari bank soal atau men-generate soal baru jika perlu." />
+      <PageHeader eyebrow="Latihan" title="Latihan Soal"
+        description="Pilih mata pelajaran, lalu mulai latihan. Boleh diulang sepuasnya!" />
 
       {subjects === null && <SectionLoading message="Memuat mata pelajaran..." />}
       {subjects !== null && subjects.length === 0 && (
@@ -6420,10 +6475,10 @@ function StudentAdaptive() {
           <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Mata Pelajaran <span className="text-danger">*</span></label>
           <div className="flex gap-2 flex-wrap">
             {subjects.map(s => (
-              <button key={s.id} onClick={() => setSelectedSubjectId(s.id)}
-                className={cn("rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors border",
-                  selectedSubjectId === s.id ? "bg-primary text-white border-primary" : "bg-background text-ink-secondary border-border hover:border-primary/30")}>
-                {s.name}
+              <button key={s.id} onClick={() => setSelectedSubjectId(s.id)} aria-pressed={selectedSubjectId === s.id}
+                className={cn("inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-[14px] font-bold transition-colors border",
+                  selectedSubjectId === s.id ? subjectStyle(s.name).active : subjectStyle(s.name).soft)}>
+                <span aria-hidden="true">{subjectStyle(s.name).emoji}</span>{s.name}
               </button>
             ))}
           </div>
@@ -6530,10 +6585,7 @@ function StudentReview() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Review" title="Riwayat Asesmen" />
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        {ownStudentStatCards(ownStats).map(s => <StatCard key={s.label} {...s} />)}
-      </div>
+      <TabIntro text="Klik ujian untuk melihat jawaban benar dan pembahasannya." />
       <div className="rounded-card border border-border bg-surface shadow-sm">
         <div className="border-b border-border px-5 py-3.5">
           <h3 className="text-[14px] font-bold text-ink">Semua Asesmen</h3>
@@ -6668,8 +6720,7 @@ function StudentWeakTopics() {
   const critical = topics.filter(t => t.accuracy < 50);
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Topik Lemah" title="Area yang Perlu Diperkuat"
-        description="Topik dengan akurasi di bawah 70%, dihitung dari jawaban asesmen dan latihanmu." />
+      <TabIntro text="Topik yang jawabanmu masih banyak salah (benar di bawah 70%). Latih lagi, ya!" />
       {overview === undefined ? (
         <SectionLoading message="Menganalisis topik..." />
       ) : overview === null ? (
@@ -6720,8 +6771,7 @@ function StudentIncorrect() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Soal Salah" title="Soal yang Perlu Dipelajari Ulang"
-        description="Pelajari kembali soal yang salah dan pahami pembahasan." />
+      <TabIntro text="Soal yang kamu jawab salah saat latihan, lengkap dengan jawaban benarnya." />
       {questions.length === 0 ? (
         <div className="flex flex-col items-center gap-3 py-16 text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
@@ -6894,8 +6944,8 @@ function StudentTutor() {
 
   return (
     <div className="flex h-[calc(100dvh-8.5rem)] flex-col gap-4">
-      <PageHeader eyebrow="AI Companion" title="Tanya AI Companion"
-        description="Bertanya tentang materi pelajaran. AI hanya menjawab berdasarkan materi yang diunggah guru." />
+      <PageHeader eyebrow="Tanya AI" title="Tanya AI"
+        description="Bingung soal pelajaran? Ketik pertanyaanmu di bawah." />
       <GroundingNotice />
       <div role="log" aria-label="Riwayat percakapan" aria-live="polite"
         className="flex-1 overflow-y-auto space-y-4 rounded-card border border-border bg-surface p-5 shadow-sm">
@@ -6975,7 +7025,6 @@ function StudentProgress() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Progres Belajar" title="Perjalanan Belajarmu" />
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         {ownStudentStatCards(ownStats).map(s => <StatCard key={s.label} {...s} />)}
       </div>
@@ -7040,8 +7089,6 @@ function StudentAchievements() {
 
   return (
     <div className="space-y-6">
-      <PageHeader eyebrow="Pencapaian" title="Koleksi Pencapaian" />
-
       <div className="rounded-card border border-border bg-gradient-hero text-white p-6">
         <div className="flex items-center gap-6 flex-wrap">
           {[

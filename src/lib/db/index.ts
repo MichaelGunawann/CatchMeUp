@@ -5,18 +5,24 @@
  */
 
 import {
-  AlertCircle, BarChart3, BookMarked, BookOpen, ClipboardList,
-  Database, FilePlus2, FileSearch, GraduationCap, Home, Library,
-  Lightbulb, LineChart, LucideIcon, MessageSquare, Monitor,
+  BarChart3, BookMarked, BookOpen, ClipboardList,
+  Database, FilePlus2, GraduationCap, Home, Library,
+  Lightbulb, LineChart, LucideIcon, MessageSquare,
   School, Settings, Settings2, ShieldCheck, Trophy, TrendingUp,
-  Users, XCircle, Zap,
+  Users, Zap,
 } from "lucide-react";
 
 // ═══════════════════════════════════════════════════════════════════════
 // DOMAIN TYPES
 // ═══════════════════════════════════════════════════════════════════════
 
-export type NavItem = { title: string; href: string; icon: LucideIcon; group?: string };
+export type NavItem = {
+  title: string; href: string; icon: LucideIcon; group?: string;
+  /** one short line under the title explaining what's inside (student nav) */
+  hint?: string;
+  /** other paths that should highlight this item as active */
+  matches?: string[];
+};
 
 export type MasteryLevel = "Mahir" | "Berkembang" | "Perlu Bantuan" | "Belum Diukur";
 export type StudentStatus = "On Track" | "Need Review" | "At Risk";
@@ -414,22 +420,22 @@ export const teacherNav: NavItem[] = [
   { title: "Konfigurasi AI", href: "/teacher/ai-config", icon: Settings2, group: "SISTEM" },
 ];
 
+// Kept deliberately short for SD students: six plain-language destinations,
+// each with a one-line hint, no section headers. Review / topik lemah / soal
+// salah / pencapaian all live as tabs inside "Hasilku".
 export const studentNav: NavItem[] = [
-  { title: "Dasbor", href: "/student/dashboard", icon: Home, group: "OVERVIEW" },
-  { title: "Materi Guru", href: "/student/materials", icon: BookOpen, group: "BELAJAR" },
-  { title: "Simulasi Ujian", href: "/student/simulator", icon: Monitor, group: "LATIHAN" },
-  { title: "Latihan Adaptif", href: "/student/adaptive", icon: Zap, group: "LATIHAN" },
-  { title: "Review Asesmen", href: "/student/review", icon: FileSearch, group: "REVIEW" },
-  { title: "Topik Lemah", href: "/student/weak-topics", icon: AlertCircle, group: "REVIEW" },
-  { title: "Soal yang Salah", href: "/student/incorrect", icon: XCircle, group: "REVIEW" },
-  { title: "AI Companion", href: "/student/tutor", icon: MessageSquare, group: "BELAJAR" },
-  { title: "Progres Belajar", href: "/student/progress", icon: LineChart, group: "BELAJAR" },
-  { title: "Pencapaian", href: "/student/achievements", icon: Trophy, group: "BELAJAR" },
+  { title: "Beranda", href: "/student/dashboard", icon: Home, hint: "Yang harus dikerjakan hari ini" },
+  { title: "Ujian", href: "/student/simulator", icon: ClipboardList, hint: "Ujian & kuis dari guru" },
+  { title: "Latihan", href: "/student/adaptive", icon: Zap, hint: "Latihan soal sepuasnya" },
+  { title: "Materi", href: "/student/materials", icon: BookOpen, hint: "Bahan belajar dari guru" },
+  { title: "Tanya AI", href: "/student/tutor", icon: MessageSquare, hint: "Bingung? Tanya di sini" },
+  { title: "Hasilku", href: "/student/progress", icon: Trophy, hint: "Nilai, pembahasan & prestasi",
+    matches: ["/student/review", "/student/weak-topics", "/student/incorrect", "/student/achievements"] },
 ];
 
 export const parentNav: NavItem[] = [
   { title: "Dasbor", href: "/parent/dashboard", icon: Home, group: "OVERVIEW" },
-  { title: "Progres Andi", href: "/parent/progress", icon: TrendingUp, group: "PEMANTAUAN" },
+  { title: "Progres Anak", href: "/parent/progress", icon: TrendingUp, group: "PEMANTAUAN" },
   { title: "Riwayat Asesmen", href: "/parent/assessments", icon: ClipboardList, group: "PEMANTAUAN" },
   { title: "Rekomendasi Pengajaran", href: "/parent/recommendations", icon: Lightbulb, group: "PEMANTAUAN" },
 ];
