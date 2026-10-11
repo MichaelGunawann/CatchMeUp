@@ -245,7 +245,7 @@ export default function StudentDashboardPage() {
                 <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
                   {weakTopics.slice(0, 3).map(t => (
                     <div key={`${t.subject}-${t.topic}`} className={cn("flex flex-col rounded-card border border-l-[6px] bg-surface p-4", subjectStyle(t.subject).accent)}>
-                      <SubjectBadge subject={t.subject} size="sm" />
+                      <SubjectBadge subject={t.subject} size="sm" className="self-start" />
                       <div className="mt-2 text-[16px] font-bold text-ink">{t.topic}</div>
                       <div className="mt-1 text-[13px] text-ink-secondary">Benar {t.accuracy}% dari {t.attempted} soal</div>
                       <button type="button" onClick={() => openSubject(t.subject, `/student/adaptive?mapel=${encodeURIComponent(t.subject)}&topik=${encodeURIComponent(t.topic)}`)}

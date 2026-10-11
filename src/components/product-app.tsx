@@ -5743,7 +5743,8 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
           <h3 className="text-[12px] font-bold uppercase tracking-[0.08em] text-primary">Akan datang</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {upcoming.map(a => (
-              <div key={a.id} aria-disabled className={cn("rounded-card border border-dashed border-l-[6px] bg-surface p-5", subjectStyle(a.subject).accent)}>
+              <div key={a.id} aria-disabled style={{ borderLeftStyle: "solid" }}
+                className={cn("rounded-card border border-dashed border-l-[6px] bg-surface p-5", subjectStyle(a.subject).accent)}>
                 <div className="flex items-start gap-3">
                   <div className="flex-1 min-w-0">
                     <SubjectBadge subject={a.subject} />
