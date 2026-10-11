@@ -83,6 +83,7 @@ import { getCurrentTeacher, getCurrentStudent, getCurrentParent } from "@/lib/au
 import { parseDbTime } from "@/lib/auth/assessment-availability";
 import { useScheduleClock, formatCountdown } from "@/lib/hooks/use-schedule-clock";
 import { useExamLockdown, requestExamFullscreen, exitExamFullscreen } from "@/lib/hooks/use-exam-lockdown";
+import { useSubjectFilter } from "@/lib/hooks/use-subject-filter";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -5338,8 +5339,10 @@ function StudentMaterials() {
   const [matRows, setMats] = useState<MaterialWithFile[] | null>(null);
   const mats = matRows ?? [];
   const [search, setSearch] = useState("");
-  const [subjectFilter, setSubjectFilter] = useState<string>("Semua");
+  // Shared with Ujian/Latihan and remembered across pages.
+  const [rememberedSubject, setSubjectFilter] = useSubjectFilter();
   const subjectOptions = [...new Set(mats.map(m => m.subject).filter(Boolean))].sort((a, b) => a.localeCompare(b, "id"));
+  const subjectFilter = subjectOptions.includes(rememberedSubject) ? rememberedSubject : "Semua";
 
   useEffect(() => {
     let cancelled = false;
@@ -5640,15 +5643,8 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
   const [items, setItems] = useState<StudentAssessmentItem[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [noClass, setNoClass] = useState(false);
-  const [subjectFilter, setSubjectFilter] = useState("Semua");
-
-  // Beranda's subject cards link here with ?mapel=<subject>.
-  useEffect(() => {
-    try {
-      const m = new URLSearchParams(window.location.search).get("mapel");
-      if (m) setSubjectFilter(m);
-    } catch { /* ignore */ }
-  }, []);
+  // Shared with Materi/Latihan and remembered across pages.
+  const [subjectFilter, setSubjectFilter] = useSubjectFilter();
 
   useEffect(() => {
     let cancelled = false;
@@ -6398,6 +6394,16 @@ function StudentAdaptive() {
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>("");
   const [topics, setTopics] = useState<string[] | null>(["Semua"]);
   const [practiceError, setPracticeError] = useState<string | null>(null);
+  const [rememberedSubject, setRememberedSubject] = useSubjectFilter();
+  // Remembered subject (from Beranda or another page) preselects practice.
+  useEffect(() => {
+    const match = (subjects ?? []).find(x => x.name === rememberedSubject);
+    if (match) setSelectedSubjectId(match.id);
+  }, [subjects, rememberedSubject]);
+  // ?topik= deep link (Beranda "Yang perlu kamu latih") preselects a topic.
+  const [wantedTopic] = useState(() => {
+    try { return new URLSearchParams(window.location.search).get("topik"); } catch { return null; }
+  });
   const studentWeakTopics = useStudentOverview()?.weakTopics ?? [];
   const [sessionTopic, setSessionTopic] = useState("Semua");
 
@@ -6430,7 +6436,13 @@ function StudentAdaptive() {
     let cancelled = false;
     (async () => {
       const data = await authedFetch("/api/student/practice/topics", { subjectId: selectedSubjectId }) as { topics?: string[] } | null;
-      if (!cancelled) setTopics(["Semua", ...(data?.topics ?? [])]);
+      if (cancelled) return;
+      const list = ["Semua", ...(data?.topics ?? [])];
+      setTopics(list);
+      if (wantedTopic) {
+        const hit = list.find(t => t.toLowerCase() === wantedTopic.toLowerCase());
+        if (hit) setSelectedTopic(hit);
+      }
     })();
     return () => { cancelled = true; };
   }, [selectedSubjectId]);
@@ -6478,7 +6490,7 @@ function StudentAdaptive() {
           <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Mata Pelajaran <span className="text-danger">*</span></label>
           <div className="flex gap-2 flex-wrap">
             {subjects.map(s => (
-              <button key={s.id} onClick={() => setSelectedSubjectId(s.id)} aria-pressed={selectedSubjectId === s.id}
+              <button key={s.id} onClick={() => { setSelectedSubjectId(s.id); setRememberedSubject(s.name); }} aria-pressed={selectedSubjectId === s.id}
                 className={cn("inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-[14px] font-bold transition-colors border",
                   selectedSubjectId === s.id ? subjectStyle(s.name).active : subjectStyle(s.name).soft)}>
                 <span aria-hidden="true">{subjectStyle(s.name).emoji}</span>{s.name}
@@ -6835,6 +6847,24 @@ function StudentTutor() {
   const messagesEndRef = React.useRef<HTMLDivElement>(null);
 
   useEffect(() => { fetchStudentMaterialsReal().then(rows => { setLocalMats(rows); setMatsLoaded(true); }); }, []);
+
+  // A question typed into Beranda's "Tanya AI" box arrives as ?q= and is
+  // sent automatically once the class materials (the AI's grounding) load.
+  const autoAskDone = React.useRef(false);
+  useEffect(() => {
+    if (!matsLoaded || autoAskDone.current) return;
+    autoAskDone.current = true;
+    try {
+      const url = new URL(window.location.href);
+      const q = url.searchParams.get("q");
+      if (q?.trim()) {
+        url.searchParams.delete("q");
+        window.history.replaceState(null, "", url.pathname + url.search);
+        send(q.trim());
+      }
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [matsLoaded]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });

@@ -158,7 +158,7 @@ function NavLinks({ nav, pathname, onNavigate, spread }: { nav: NavItem[]; pathn
         return (
           <React.Fragment key={item.href}>
             {showGroupHeader && (
-              <div className={cn("px-2 pb-1", index === 0 ? "pt-3" : "pt-4")}>
+              <div className={cn("px-2 pb-0.5", index === 0 ? "pt-2" : "pt-3")}>
                 <span className="text-[9.5px] font-bold uppercase tracking-[0.1em] text-ink-tertiary">
                   {item.group}
                 </span>
@@ -266,9 +266,13 @@ export function AppShell({
       <aside className="sticky top-0 hidden h-screen w-[clamp(200px,18vw,280px)] shrink-0 flex-col border-r border-border bg-surface lg:flex">
         {/* Brand - fixed height (it used to scale with screen WIDTH, which
             pushed the menu off-screen on shorter laptops) */}
-        <div className="flex h-[104px] shrink-0 flex-col items-center justify-center gap-1 border-b border-border px-4">
-          <Link href={`/${role}/dashboard`} className="flex flex-col items-center gap-1">
-            <CatchUpLogo className="h-16 w-auto max-w-[180px] object-contain drop-shadow-sm" />
+        {/* The logo is a detailed square illustration - it needs real size
+            to be legible. Sized by viewport HEIGHT (not width) so it grows
+            on tall screens without pushing the menu into a scroll on short
+            laptops. */}
+        <div className="flex shrink-0 flex-col items-center justify-center gap-1 border-b border-border px-4 py-3">
+          <Link href={`/${role}/dashboard`} className="flex flex-col items-center gap-1" aria-label="Catch Up - Beranda">
+            <CatchUpLogo className="h-[clamp(68px,14vh,136px)] w-auto object-contain drop-shadow-sm" />
             <span className="text-[11px] font-semibold tracking-wide text-ink-tertiary">{meta.label}</span>
           </Link>
         </div>
@@ -340,7 +344,7 @@ export function AppShell({
               <Menu className="h-4 w-4" />
             </button>
             <Link href={`/${role}/dashboard`} className="lg:hidden">
-              <CatchUpLogo className="h-8 w-auto object-contain" />
+              <CatchUpLogo className="h-11 w-auto object-contain" />
             </Link>
             {/* Search */}
             <div className="hidden w-60 max-w-xs items-center gap-2 rounded-[8px] border border-border bg-background px-3 py-1.5 md:flex">
