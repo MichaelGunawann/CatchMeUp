@@ -197,32 +197,38 @@ export function ProductApp({ path }: { path: string[] }) {
 function ClassSelectorBanner() {
   const [activeClass] = useActiveClass();
   const { teacher, loading } = useRealTeacherStatus();
-  const classes = teacher?.classes ?? [];
-  const activeClassYear = classes.find(c => c.id === activeClass)?.year;
+  const assignments = [...(teacher?.assignments ?? [])].sort((x, y) =>
+    x.className.localeCompare(y.className, "id") || x.subjectName.localeCompare(y.subjectName, "id"));
+  const active = findActiveAssignment(teacher, activeClass);
+  const activeClassYear = teacher?.classes.find(c => c.id === activeClass)?.year;
 
   return (
     <div className="flex items-center gap-2 flex-wrap mb-6 rounded-[10px] border border-border bg-surface px-4 py-2.5 shadow-sm min-h-[46px]">
-      <span className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-tertiary shrink-0 mr-1">Kelas:</span>
+      <span className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-tertiary shrink-0 mr-1">Kelas · Mapel:</span>
       {loading ? (
         <>
-          {[0, 1, 2].map(i => <span key={i} className="h-6 w-20 rounded-full bg-border/60 animate-pulse" />)}
+          {[0, 1, 2].map(i => <span key={i} className="h-7 w-32 rounded-full bg-border/60 animate-pulse" />)}
         </>
-      ) : classes.length === 0 ? (
+      ) : assignments.length === 0 ? (
         <span className="text-[12px] text-ink-secondary">Kamu belum ditugaskan ke kelas mana pun. Hubungi admin sekolah.</span>
-      ) : classes.map(cls => (
-        <button
-          key={cls.id}
-          onClick={() => changeActiveClass(cls.id)}
-          className={cn(
-            "px-3 py-1 rounded-full text-[12px] font-semibold border transition-all",
-            activeClass === cls.id
-              ? "bg-primary text-white border-primary shadow-sm"
-              : "bg-background text-ink-secondary border-border hover:border-primary/40 hover:text-ink"
-          )}
-        >
-          {cls.name}
-        </button>
-      ))}
+      ) : assignments.map(a => {
+        const selected = active?.classId === a.classId && active?.subjectId === a.subjectId;
+        const st = subjectStyle(a.subjectName);
+        return (
+          <button
+            key={`${a.classId}:${a.subjectId}`}
+            onClick={() => changeActiveAssignment(a.classId, a.subjectId)}
+            aria-pressed={selected}
+            className={cn(
+              "inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-[12px] font-semibold border transition-all",
+              selected ? cn(st.active, "shadow-sm") : "bg-background text-ink-secondary border-border hover:border-border-strong hover:text-ink"
+            )}
+          >
+            <span aria-hidden="true" className={cn("h-2 w-2 rounded-full", selected ? "bg-white" : st.solid)} />
+            {a.className} · {a.subjectName}
+          </button>
+        );
+      })}
       {activeClassYear && <span className="ml-auto text-[11px] text-ink-tertiary hidden sm:block">Tahun Ajaran {activeClassYear}</span>}
     </div>
   );
@@ -283,7 +289,7 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
     // to the subject actually taught in the active class, not just "the
     // first subject overall".
     const activeClassId = getActiveClassId();
-    const activeAssignment = teacher.assignments.find(a => a.classId === activeClassId);
+    const activeAssignment = findActiveAssignment(teacher, activeClassId);
     const activeSubjectId = activeAssignment?.subjectId;
     const activeSubjectName = activeAssignment?.subjectName ?? "Umum";
 
@@ -580,7 +586,7 @@ function TeacherDashboard() {
   const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
   const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name;
-  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeAssignment = findActiveAssignment(teacher, activeClass);
   const activeSubjectName = activeAssignment?.subjectName;
   const [activeTab, setActiveTab] = useState<"semua" | "at-risk" | "need-review">("semua");
   const [selectedStudentId, setSelectedStudentId] = useState<string | null>(null);
@@ -895,6 +901,7 @@ function resetTeacherCaches() {
   _realTeacherPromise = null;
   _realTeacherLoaded = false;
   _activeClassId = "";
+  _activeSubjectId = "";
   _bankKey = null;
   _bankLoading = null;
   _bankStore.questions = [];
@@ -1024,13 +1031,40 @@ function changeActiveClass(id: string) {
   _classListeners.forEach(fn => fn(id));
 }
 
+// ── Active subject (a teacher can teach several subjects in one class) ──────
+// Previously the subject was always "the first assignment in the active
+// class", so a teacher with Matematika AND IPA in XII IPA 1 could never open
+// the IPA bank, materials or results. The selected (class, subject) pair is
+// now explicit and remembered.
+let _activeSubjectId = "";
+const _subjectListeners = new Set<() => void>();
+
+function findActiveAssignment(teacher: RealTeacherContext | null | undefined, classId: string): RealTeacherAssignment | undefined {
+  if (!teacher) return undefined;
+  const inClass = teacher.assignments.filter(a => a.classId === classId);
+  if (!_activeSubjectId) {
+    try { _activeSubjectId = window.localStorage.getItem("catchup_active_subject") ?? ""; } catch { /* ignore */ }
+  }
+  return inClass.find(a => a.subjectId === _activeSubjectId) ?? inClass[0];
+}
+
+function changeActiveAssignment(classId: string, subjectId: string) {
+  _activeSubjectId = subjectId;
+  try { window.localStorage.setItem("catchup_active_subject", subjectId); } catch { /* ignore */ }
+  if (classId !== _activeClassId) changeActiveClass(classId);
+  _subjectListeners.forEach(fn => fn());
+}
+
 function useActiveClass(): [string, typeof changeActiveClass] {
   const teacher = useRealTeacher();
   const [cls, setCls] = useState<string>(() => getActiveClassId());
+  const [, bumpSubject] = useState(0);
   useEffect(() => {
     _classListeners.add(setCls);
+    const onSubject = () => bumpSubject(x => x + 1);
+    _subjectListeners.add(onSubject);
     if (teacher) setCls(getActiveClassId());
-    return () => { _classListeners.delete(setCls); };
+    return () => { _classListeners.delete(setCls); _subjectListeners.delete(onSubject); };
   }, [teacher]);
   return [cls, changeActiveClass];
 }
@@ -1919,7 +1953,7 @@ function TeacherMaterials() {
   // The active class may have more than one subject assigned to this
   // teacher (unlike the old single-subject mock assumption) - resolved to
   // the subject actually taught in the active class specifically.
-  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeAssignment = findActiveAssignment(teacher, activeClass);
   const activeSubjectName = activeAssignment?.subjectName ?? "Umum";
   const activeSubjectId = activeAssignment?.subjectId;
   const [showAllClasses, setShowAllClasses] = useState(false);
@@ -2968,7 +3002,7 @@ const EMPTY_MANUAL_Q = { text: "", optA: "", optB: "", optC: "", optD: "", corre
 function TeacherQuestionBank() {
   const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
-  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeAssignment = findActiveAssignment(teacher, activeClass);
   const activeSubjectId = activeAssignment?.subjectId;
   const [search, setSearch] = useState("");
   const [showManualAdd, setShowManualAdd] = useState(false);
@@ -3185,7 +3219,7 @@ function TeacherQuestionReview() {
   const router = useRouter();
   const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
-  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeAssignment = findActiveAssignment(teacher, activeClass);
   const activeSubjectId = activeAssignment?.subjectId;
   const { pending: pendingQs, loading: bankLoading } = useQuestionBank(activeClass, activeSubjectId);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -3457,7 +3491,9 @@ function TeacherAssessmentBuilder() {
   // (both remain freely changeable dropdowns).
   useEffect(() => {
     if (!teacher || formClassId) return;
-    const classId = teacher.classes.some(c => c.id === activeClass) ? activeClass : teacher.classes[0]?.id;
+    const active = findActiveAssignment(teacher, activeClass);
+    if (active) { setFormClassId(active.classId); setFormSubjectId(active.subjectId); return; }
+    const classId = teacher.classes[0]?.id;
     if (classId) chooseClass(classId);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teacher, activeClass]);
@@ -3478,6 +3514,9 @@ function TeacherAssessmentBuilder() {
     return () => { cancelled = true; };
   }, [teacher, teacherLoading, formClassId, formSubjectId]);
   const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(new Set());
+  const [bankSearch, setBankSearch] = useState("");
+  const [bankTopic, setBankTopic] = useState("");
+  const [bankDifficulty, setBankDifficulty] = useState<"" | "Mudah" | "Sedang" | "Sulit">("");
   const [assessmentType, setAssessmentType] = useState<"uniform" | "adaptive">("uniform");
   const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
   const [showAddQuestion, setShowAddQuestion] = useState(false);
@@ -4063,55 +4102,109 @@ function TeacherAssessmentBuilder() {
             )}
           </>}
 
-          {questionSource === "bank" && (
+          {questionSource === "bank" && (() => {
+            const topics = [...new Set(bankQs.map(q => q.topic).filter(Boolean))].sort((x, y) => x.localeCompare(y, "id"));
+            const q = bankSearch.trim().toLowerCase();
+            const visible = bankQs.filter(item =>
+              (bankTopic === "" || item.topic === bankTopic) &&
+              (bankDifficulty === "" || item.difficulty === bankDifficulty) &&
+              (!q || item.question.toLowerCase().includes(q) || item.topic.toLowerCase().includes(q)));
+            const allVisibleSelected = visible.length > 0 && visible.every(item => selectedQuestions.has(item.id));
+            const subjectName = subjectOptions.find(o => o.value === formSubjectId)?.label ?? "";
+            const target = formQuestionCount;
+            return (
             <div className="rounded-card border border-border bg-surface shadow-sm">
-              <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
+              <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-3.5">
                 <div>
-                  <h3 className="text-[14px] font-bold text-ink">Bank Soal</h3>
-                  <p className="text-[11px] text-ink-secondary mt-0.5">{selectedQuestions.size} soal dipilih dari {bankQs.length} tersedia</p>
+                  <h3 className="flex items-center gap-2 text-[14px] font-bold text-ink">
+                    Bank Soal {subjectName && <SubjectBadge subject={subjectName} size="sm" />}
+                  </h3>
+                  <p className="text-[12px] text-ink-secondary mt-0.5">
+                    Soal yang sudah disetujui untuk kelas & mapel ini. Ganti mapel di langkah 1.
+                  </p>
                 </div>
                 <Button variant="outline" className="h-8 text-[12px]" onClick={() => setShowAddQuestion(true)}>
                   <Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Soal Baru
                 </Button>
               </div>
-              <div className="p-4 space-y-2">
+
+              {bankQs.length > 0 && (
+                <div className="flex flex-wrap items-center gap-2 border-b border-border bg-background/60 px-5 py-3">
+                  <div className="flex min-w-[220px] flex-1 items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-1.5">
+                    <Search className="h-3.5 w-3.5 shrink-0 text-ink-tertiary" />
+                    <input value={bankSearch} onChange={e => setBankSearch(e.target.value)} placeholder="Cari isi soal atau topik..."
+                      className="flex-1 bg-transparent text-[13px] placeholder:text-ink-tertiary focus:outline-none" />
+                    {bankSearch && <button type="button" aria-label="Hapus pencarian" onClick={() => setBankSearch("")}><X className="h-3.5 w-3.5 text-ink-tertiary" /></button>}
+                  </div>
+                  <div className="w-52">
+                    <SelectField value={bankTopic} onChange={setBankTopic} placeholder="Semua topik"
+                      options={[{ value: "", label: "Semua topik" }, ...topics.map(t => ({ value: t, label: t, description: `${bankQs.filter(x => x.topic === t).length} soal` }))]} />
+                  </div>
+                  <div className="flex gap-1">
+                    {(["", "Mudah", "Sedang", "Sulit"] as const).map(d => (
+                      <button key={d || "all"} type="button" onClick={() => setBankDifficulty(d)} aria-pressed={bankDifficulty === d}
+                        className={cn("rounded-full border px-3 py-1 text-[12px] font-semibold transition-colors",
+                          bankDifficulty === d ? "border-ink bg-ink text-white" : "border-border bg-surface text-ink-secondary hover:text-ink")}>
+                        {d || "Semua"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="max-h-[520px] overflow-y-auto p-4 space-y-2">
                 {bankLoading && <SectionLoading message="Memuat bank soal..." />}
                 {!bankLoading && bankQs.length === 0 && (
-                  <EmptyState icon={Database} title="Bank soal kosong" description="Upload materi dulu dan proses dengan AI — soal akan otomatis masuk ke bank." />
+                  <EmptyState icon={Database} title="Bank soal kosong" description="Unggah materi lalu proses dengan AI, atau klik Tambah Soal Baru." />
                 )}
-                {!bankLoading && bankQs.map(q => (
-                  <div key={q.id} onClick={() => toggleQuestion(q.id)}
+                {!bankLoading && bankQs.length > 0 && visible.length === 0 && (
+                  <p className="py-8 text-center text-[13px] text-ink-secondary">Tidak ada soal yang cocok dengan filter ini.</p>
+                )}
+                {!bankLoading && visible.map(item => (
+                  <div key={item.id} onClick={() => toggleQuestion(item.id)}
                     className={cn(
                       "flex items-start gap-3 rounded-[8px] border p-3 cursor-pointer transition-all",
-                      selectedQuestions.has(q.id) ? "border-primary/40 bg-primary-soft" : "border-border bg-background hover:border-primary/20"
+                      selectedQuestions.has(item.id) ? "border-primary/40 bg-primary-soft" : "border-border bg-background hover:border-primary/20"
                     )}>
                     <div className={cn(
                       "flex h-4 w-4 mt-0.5 shrink-0 items-center justify-center rounded border-2 transition-colors",
-                      selectedQuestions.has(q.id) ? "border-primary bg-primary" : "border-border"
+                      selectedQuestions.has(item.id) ? "border-primary bg-primary" : "border-border"
                     )}>
-                      {selectedQuestions.has(q.id) && <CheckCircle2 className="h-2.5 w-2.5 text-white" />}
+                      {selectedQuestions.has(item.id) && <CheckCircle2 className="h-2.5 w-2.5 text-white" />}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <div className="text-[12px] font-medium text-ink line-clamp-2">{q.question}</div>
+                      <div className="text-[13px] font-medium text-ink line-clamp-2">{item.question}</div>
                       <div className="flex items-center gap-2 mt-1">
-                        <Badge tone="neutral">{q.topic}</Badge>
-                        <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+                        <Badge tone="neutral">{item.topic}</Badge>
+                        <Badge tone={item.difficulty === "Mudah" ? "success" : item.difficulty === "Sedang" ? "warning" : "danger"}>{item.difficulty}</Badge>
                       </div>
                     </div>
                   </div>
                 ))}
               </div>
-              <div className="border-t border-border px-5 py-3 flex items-center justify-between">
-                <button onClick={() => {
-                  const allIds = new Set(bankQs.map(q => q.id));
-                  setSelectedQuestions(prev => prev.size === bankQs.length ? new Set() : allIds);
-                }} className="text-[11px] text-primary font-semibold hover:underline">
-                  {selectedQuestions.size === bankQs.length ? "Batal semua" : "Pilih semua"}
+              <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-5 py-3">
+                <button type="button" disabled={visible.length === 0} onClick={() => {
+                  setStep2Error("");
+                  setSelectedQuestions(prev => {
+                    const next = new Set(prev);
+                    for (const item of visible) { if (allVisibleSelected) next.delete(item.id); else next.add(item.id); }
+                    return next;
+                  });
+                }} className="text-[12px] font-semibold text-primary hover:underline disabled:opacity-40">
+                  {allVisibleSelected ? `Batalkan ${visible.length} yang tampil` : `Pilih semua yang tampil (${visible.length})`}
                 </button>
-                <span className="text-[11px] text-ink-secondary">{selectedQuestions.size} / {bankQs.length} dipilih</span>
+                <span className={cn("text-[12px] font-semibold",
+                  assessmentType === "uniform" ? (selectedCount === target ? "text-success" : selectedCount > target ? "text-danger" : "text-ink-secondary")
+                    : selectedCount >= target ? "text-success" : "text-ink-secondary")}>
+                  {selectedCount} dipilih · {assessmentType === "uniform" ? `butuh tepat ${target}` : `minimal ${target}`}
+                  {selectedQuestions.size > 0 && (
+                    <button type="button" onClick={() => setSelectedQuestions(new Set())} className="ml-2 font-normal text-ink-tertiary underline hover:text-danger">kosongkan</button>
+                  )}
+                </span>
               </div>
             </div>
-          )}
+            );
+          })()}
 
           {/* Add question dialog */}
           {showAddQuestion && (
@@ -4370,7 +4463,7 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
 function TeacherResults() {
   const { teacher, loading: teacherLoading } = useRealTeacherStatus();
   const [activeClass] = useActiveClass();
-  const activeSubjectId = teacher?.assignments.find(a => a.classId === activeClass)?.subjectId;
+  const activeSubjectId = findActiveAssignment(teacher, activeClass)?.subjectId;
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<"soal" | "siswa">("soal");
   // null = still loading - never show "Belum ada asesmen" before the fetch returns
@@ -4795,7 +4888,7 @@ async function fetchClassAnalytics(classId: string, subjectId: string): Promise<
 function TeacherAnalytics() {
   const { teacher, loading: teacherLoading } = useRealTeacherStatus();
   const [activeClass] = useActiveClass();
-  const activeAssignment = teacher?.assignments.find(a => a.classId === activeClass);
+  const activeAssignment = findActiveAssignment(teacher, activeClass);
   const [topicPopup, setTopicPopup] = useState<string | null>(null);
   const [showAllStudents, setShowAllStudents] = useState(false);
 
@@ -4994,7 +5087,7 @@ function TeacherRecommendations() {
   const teacher = useRealTeacher();
   const [activeClass] = useActiveClass();
   const activeClassName = teacher?.classes.find(c => c.id === activeClass)?.name ?? teacher?.classes[0]?.name ?? "-";
-  const activeSubjectId = teacher?.assignments.find(a => a.classId === activeClass)?.subjectId;
+  const activeSubjectId = findActiveAssignment(teacher, activeClass)?.subjectId;
   const { bank: bankQs, loading: bankLoading } = useQuestionBank(activeClass, activeSubjectId);
   const [recs, setRecs] = useState<typeof teachingRecommendations>([]);
   const [summary, setSummary] = useState("");

@@ -408,7 +408,7 @@ export const adminNotifications: AppNotification[] = [];
 
 // ── Navigation ─────────────────────────────────────────────────────────
 export const teacherNav: NavItem[] = [
-  { title: "Dasbor", href: "/teacher/dashboard", icon: Home, group: "OVERVIEW" },
+  { title: "Dasbor", href: "/teacher/dashboard", icon: Home, group: "UTAMA" },
   { title: "Pustaka Materi", href: "/teacher/materials", icon: Library, group: "KONTEN" },
   { title: "Gaya Asesmen", href: "/teacher/assessment-styles", icon: BookMarked, group: "KONTEN" },
   { title: "Bank Soal", href: "/teacher/question-bank", icon: Database, group: "SOAL" },
@@ -417,7 +417,7 @@ export const teacherNav: NavItem[] = [
   { title: "List Asesmen", href: "/teacher/results", icon: BarChart3, group: "ASESMEN" },
   { title: "Analitik Kelas", href: "/teacher/analytics", icon: TrendingUp, group: "ANALITIK" },
   { title: "Rekomendasi", href: "/teacher/recommendations", icon: Lightbulb, group: "ANALITIK" },
-  { title: "Konfigurasi AI", href: "/teacher/ai-config", icon: Settings2, group: "SISTEM" },
+  { title: "Konfigurasi AI", href: "/teacher/ai-config", icon: Settings2, group: "PENGATURAN" },
 ];
 
 // Kept deliberately short for SD students: six plain-language destinations,
@@ -434,21 +434,21 @@ export const studentNav: NavItem[] = [
 ];
 
 export const parentNav: NavItem[] = [
-  { title: "Dasbor", href: "/parent/dashboard", icon: Home, group: "OVERVIEW" },
+  { title: "Dasbor", href: "/parent/dashboard", icon: Home, group: "UTAMA" },
   { title: "Progres Anak", href: "/parent/progress", icon: TrendingUp, group: "PEMANTAUAN" },
   { title: "Riwayat Asesmen", href: "/parent/assessments", icon: ClipboardList, group: "PEMANTAUAN" },
   { title: "Rekomendasi Pengajaran", href: "/parent/recommendations", icon: Lightbulb, group: "PEMANTAUAN" },
 ];
 
 export const adminNav: NavItem[] = [
-  { title: "Dasbor", href: "/admin/dashboard", icon: Home, group: "OVERVIEW" },
+  { title: "Dasbor", href: "/admin/dashboard", icon: Home, group: "UTAMA" },
   { title: "Sekolah", href: "/admin/schools", icon: School, group: "KELOLA" },
   { title: "Guru", href: "/admin/teachers", icon: GraduationCap, group: "KELOLA" },
   { title: "Siswa", href: "/admin/students", icon: Users, group: "KELOLA" },
   { title: "Kelas", href: "/admin/classes", icon: BookOpen, group: "KELOLA" },
   { title: "Asesmen", href: "/admin/assessments", icon: ClipboardList, group: "KELOLA" },
   { title: "Analitik Platform", href: "/admin/analytics", icon: LineChart, group: "ANALITIK" },
-  { title: "Pengaturan", href: "/admin/settings", icon: Settings, group: "SISTEM" },
+  { title: "Pengaturan", href: "/admin/settings", icon: Settings, group: "PENGATURAN" },
 ];
 
 export { type AppNotification as Notification };

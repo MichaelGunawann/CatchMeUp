@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { BookOpen, ClipboardList, FileQuestion, Users } from "lucide-react";
+import Link from "next/link";
+import { BarChart3, BookOpen, ClipboardList, FilePlus2, FileQuestion, ShieldCheck, Upload, Users } from "lucide-react";
 import { AppShell } from "@/components/product-shell";
 import { PageHeader, StatCard, EmptyState, AlertPanel, LoadingPanel } from "@/components/product-primitives";
 import { Badge } from "@/components/ui/badge";
@@ -46,6 +47,7 @@ export default function TeacherDashboardPage() {
   const [assignments, setAssignments] = useState<AssignmentRow[]>([]);
   const [studentCount, setStudentCount] = useState(0);
   const [assessments, setAssessments] = useState<AssessmentRow[]>([]);
+  const [pendingReview, setPendingReview] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -117,6 +119,11 @@ export default function TeacherDashboardPage() {
         if (cancelled) return;
 
         setStudentCount((studentRows ?? []).length);
+        if (classIds.length > 0) {
+          const { count } = await supabase.from("questions").select("id", { count: "exact", head: true })
+            .in("class_id", classIds).eq("status", "pending");
+          if (!cancelled) setPendingReview(count ?? 0);
+        }
         setAssessments((assessmentData ?? []) as unknown as AssessmentRow[]);
       } catch (err) {
         if (!cancelled) {
@@ -133,6 +140,13 @@ export default function TeacherDashboardPage() {
     };
   }, [router]);
 
+  // "Bu Ratna Dewi" -> "Bu Ratna" (the honorific alone made it "Halo, Bu").
+  const greetingName = (() => {
+    const parts = teacherName.trim().split(/\s+/);
+    const honorific = /^(bu|ibu|pak|bapak|bpk|mr|mrs|ms)\.?$/i;
+    return parts.length > 1 && honorific.test(parts[0]) ? `${parts[0]} ${parts[1]}` : parts[0] ?? "";
+  })();
+
   const uniqueClasses = Array.from(new Set(assignments.map((a) => a.classes?.name).filter(Boolean)));
   const uniqueSubjects = Array.from(new Set(assignments.map((a) => a.subjects?.name).filter(Boolean)));
   const publishedCount = assessments.filter((a) => a.status === "published").length;
@@ -141,7 +155,7 @@ export default function TeacherDashboardPage() {
     <AppShell role="teacher" nav={teacherNav}>
       <div className="space-y-6">
         <PageHeader
-          title={teacherName ? `Halo, ${teacherName.split(" ")[0]}` : "Dasbor Guru"}
+          title={teacherName ? `Halo, ${greetingName}! 👋` : "Dasbor Guru"}
           description={
             uniqueClasses.length > 0
               ? `Mengajar ${uniqueClasses.join(", ")}`
@@ -169,6 +183,28 @@ export default function TeacherDashboardPage() {
           </AlertPanel>
         ) : !error ? (
           <>
+            {/* Quick actions - the main tasks one click away */}
+            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+              {[
+                { href: "/teacher/assessment-builder", label: "Buat Asesmen", desc: "Susun ujian atau kuis", icon: FilePlus2, primary: true },
+                { href: "/teacher/materials", label: "Unggah Materi", desc: "AI membuat soal dari materi", icon: Upload },
+                { href: "/teacher/question-review", label: "Tinjau Soal AI", desc: pendingReview > 0 ? `${pendingReview} soal menunggu` : "Tidak ada antrean", icon: ShieldCheck, badge: pendingReview },
+                { href: "/teacher/results", label: "Hasil Asesmen", desc: "Nilai & analisis soal", icon: BarChart3 },
+              ].map(a => (
+                <Link key={a.href} href={a.href}
+                  className={`relative flex items-center gap-3 rounded-card border p-4 shadow-sm transition hover:shadow-soft ${a.primary ? "border-primary bg-primary text-white" : "border-border bg-surface"}`}>
+                  <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-[10px] ${a.primary ? "bg-white/20" : "bg-primary/10 text-primary"}`}>
+                    <a.icon className="h-5 w-5" />
+                  </span>
+                  <span className="min-w-0">
+                    <span className={`block text-[14px] font-bold ${a.primary ? "text-white" : "text-ink"}`}>{a.label}</span>
+                    <span className={`block truncate text-[12px] ${a.primary ? "text-white/80" : a.badge ? "font-semibold text-warning" : "text-ink-secondary"}`}>{a.desc}</span>
+                  </span>
+                  {!!a.badge && <span className="absolute right-3 top-3 flex h-5 min-w-5 items-center justify-center rounded-full bg-warning px-1.5 text-[11px] font-bold text-white">{a.badge}</span>}
+                </Link>
+              ))}
+            </div>
+
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
               <StatCard
                 label="Kelas Diampu"
