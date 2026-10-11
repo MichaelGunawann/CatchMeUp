@@ -70,13 +70,14 @@ export async function POST(req: Request) {
       .single();
     if (!student) return Response.json({ error: "Data siswa tidak ditemukan" }, { status: 404 });
 
-    // ── Class ranking ──
+    // The three sections are independent - run them in parallel (they used
+    // to run one after another, ~7s per page load).
+    const rankingP = (async () => {
     let rank = 1;
     let classSize = 1;
     let className = "-";
     let avgScore = 0;
     let totalAssessments = 0;
-
     if (student.class_id) {
       const [{ data: classRow }, { data: classmates }, { data: classAssessments }] = await Promise.all([
         supabaseAdmin.from("classes").select("name").eq("id", student.class_id).single(),
@@ -123,7 +124,10 @@ export async function POST(req: Request) {
       totalAssessments = own?.count ?? 0;
     }
 
-    // ── Achievements (real catalog + this student's awards) ──
+    return { rank, classSize, className, avgScore, totalAssessments };
+    })();
+
+    const achievementsP = (async () => {
     const [{ data: catalog }, { data: earned }] = await Promise.all([
       supabaseAdmin.from("achievements").select("id, code, title, description, category, xp_reward, icon").order("xp_reward"),
       supabaseAdmin.from("student_achievements").select("achievement_id, earned_at").eq("student_id", student.id),
@@ -141,7 +145,10 @@ export async function POST(req: Request) {
       earnedAt: earnedAt.get(a.id as string) ?? null,
     }));
 
-    // ── Weak topics: per-topic accuracy from assessments + practice ──
+    return achievements;
+    })();
+
+    const weakTopicsP = (async () => {
     const topicStats = new Map<string, { topic: string; subject: string; correct: number; total: number }>();
     const bump = (topic: string | null | undefined, subject: string | null | undefined, correct: boolean) => {
       const t = (topic ?? "").trim();
@@ -152,11 +159,10 @@ export async function POST(req: Request) {
       if (correct) cur.correct += 1;
       topicStats.set(key, cur);
     };
-    const { data: myAttempts } = await supabaseAdmin
-      .from("assessment_attempts")
-      .select("id")
-      .eq("student_id", student.id)
-      .in("status", ["submitted", "graded"]);
+    const [{ data: myAttempts }, { data: practice }] = await Promise.all([
+      supabaseAdmin.from("assessment_attempts").select("id").eq("student_id", student.id).in("status", ["submitted", "graded"]),
+      supabaseAdmin.from("practice_attempts").select("is_correct, questions(topic, subjects(name))").eq("student_id", student.id),
+    ]);
     const myAttemptIds = (myAttempts ?? []).map(a => a.id as string);
     if (myAttemptIds.length > 0) {
       const { data: qa } = await supabaseAdmin
@@ -168,10 +174,6 @@ export async function POST(req: Request) {
         bump(q?.topic, q?.subjects?.name, !!r.is_correct);
       }
     }
-    const { data: practice } = await supabaseAdmin
-      .from("practice_attempts")
-      .select("is_correct, questions(topic, subjects(name))")
-      .eq("student_id", student.id);
     for (const r of (practice ?? []) as unknown as Array<{ is_correct: boolean; questions: { topic: string; subjects: { name: string } | null } | null }>) {
       bump(r.questions?.topic, r.questions?.subjects?.name, r.is_correct);
     }
@@ -179,6 +181,12 @@ export async function POST(req: Request) {
       .map(t => ({ topic: t.topic, subject: t.subject, attempted: t.total, accuracy: Math.round((t.correct / t.total) * 100) }))
       .filter(t => t.accuracy < 70)
       .sort((a, b) => a.accuracy - b.accuracy || b.attempted - a.attempted);
+
+    return weakTopics;
+    })();
+
+    const [{ rank, classSize, className, avgScore, totalAssessments }, achievements, weakTopics] =
+      await Promise.all([rankingP, achievementsP, weakTopicsP]);
 
     return Response.json({
       stats: {

@@ -6,7 +6,9 @@ const config: Config = {
   content: [
     "./src/pages/**/*.{ts,tsx}",
     "./src/components/**/*.{ts,tsx}",
-    "./src/app/**/*.{ts,tsx}"
+    "./src/app/**/*.{ts,tsx}",
+    // subject colour palette (src/lib/subject-style.ts) lives here
+    "./src/lib/**/*.{ts,tsx}"
   ],
   theme: {
     extend: {

@@ -272,7 +272,7 @@ export function AppShell({
             laptops. */}
         <div className="flex shrink-0 flex-col items-center justify-center gap-1 border-b border-border px-4 py-3">
           <Link href={`/${role}/dashboard`} className="flex flex-col items-center gap-1" aria-label="Catch Up - Beranda">
-            <CatchUpLogo className="h-[clamp(68px,14vh,136px)] w-auto object-contain drop-shadow-sm" />
+            <CatchUpLogo className="h-[clamp(84px,17vh,150px)] w-auto object-contain drop-shadow-sm" />
             <span className="text-[11px] font-semibold tracking-wide text-ink-tertiary">{meta.label}</span>
           </Link>
         </div>
