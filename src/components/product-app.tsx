@@ -82,9 +82,11 @@ import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentTeacher, getCurrentStudent, getCurrentParent } from "@/lib/auth/authorization";
 import { parseDbTime } from "@/lib/auth/assessment-availability";
 import { useScheduleClock, formatCountdown } from "@/lib/hooks/use-schedule-clock";
+import { useExamLockdown, requestExamFullscreen, exitExamFullscreen } from "@/lib/hooks/use-exam-lockdown";
 import Link from "next/link";
 import {
   AlertCircle,
+  BarChart3,
   BookOpen,
   CheckCircle2,
   ChevronDown,
@@ -108,12 +110,14 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Target,
   ThumbsUp,
   Trophy,
   Upload,
   Users,
   WifiOff,
   X,
+  XCircle,
   Zap,
 } from "lucide-react";
 
@@ -560,7 +564,8 @@ function useOwnStudentStats(): OwnStudentStats | null {
 
 function ownStudentStatCards(stats: OwnStudentStats | null) {
   return [
-    { label: "Rata-rata nilai", value: stats ? String(stats.avgScore) : "…", detail: "Dari asesmen yang sudah dinilai", tone: "success" as const },
+    { label: "Rata-rata nilai", value: stats ? (stats.totalAssessments > 0 ? String(stats.avgScore) : "—") : "…",
+      detail: stats && stats.totalAssessments === 0 ? "Belum ada ujian yang dinilai" : `Dari ${stats?.totalAssessments ?? "…"} ujian yang dinilai`, tone: "success" as const },
     { label: "XP terkumpul", value: stats ? stats.xp.toLocaleString("id-ID") : "…", detail: "Poin pengalaman belajar", tone: "primary" as const },
     { label: "Streak belajar", value: stats ? `${stats.streak} hari` : "…", detail: "Konsistensi belajar harian", tone: "neutral" as const },
     { label: "Peringkat kelas", value: stats ? `#${stats.rank}` : "…", detail: stats ? `dari ${stats.classSize} siswa · ${stats.className}` : "…", tone: "warning" as const },
@@ -5289,11 +5294,11 @@ function TabIntro({ text }: { text: string }) {
 // ── Hasilku (student results hub) ─────────────────────────────────────────────
 
 const RESULT_TABS = [
-  { key: "progress", label: "Ringkasan", emoji: "📊", href: "/student/progress" },
-  { key: "review", label: "Pembahasan", emoji: "📝", href: "/student/review" },
-  { key: "weak-topics", label: "Perlu Dilatih", emoji: "🎯", href: "/student/weak-topics" },
-  { key: "incorrect", label: "Soal Salah", emoji: "❌", href: "/student/incorrect" },
-  { key: "achievements", label: "Prestasi", emoji: "🏆", href: "/student/achievements" },
+  { key: "progress", label: "Ringkasan", icon: BarChart3, href: "/student/progress" },
+  { key: "review", label: "Pembahasan", icon: FileText, href: "/student/review" },
+  { key: "weak-topics", label: "Perlu Dilatih", icon: Target, href: "/student/weak-topics" },
+  { key: "incorrect", label: "Soal Salah", icon: XCircle, href: "/student/incorrect" },
+  { key: "achievements", label: "Prestasi", icon: Trophy, href: "/student/achievements" },
 ] as const;
 
 function StudentResults({ tab }: { tab: (typeof RESULT_TABS)[number]["key"] }) {
@@ -5304,15 +5309,19 @@ function StudentResults({ tab }: { tab: (typeof RESULT_TABS)[number]["key"] }) {
         <h1 className="text-[26px] font-bold text-ink leading-tight">Hasilku</h1>
         <p className="text-[14px] text-ink-secondary mt-1">Nilai, pembahasan soal, dan prestasimu.</p>
       </div>
-      <div role="tablist" aria-label="Bagian hasil" className="flex gap-2 overflow-x-auto pb-1">
-        {RESULT_TABS.map(t => (
-          <button key={t.key} role="tab" aria-selected={tab === t.key}
-            onClick={() => router.push(t.href)}
-            className={cn("flex shrink-0 items-center gap-1.5 rounded-full border px-4 py-2 text-[14px] font-bold transition-colors",
-              tab === t.key ? "border-primary bg-primary text-white" : "border-border bg-surface text-ink-secondary hover:text-ink")}>
-            <span aria-hidden="true">{t.emoji}</span>{t.label}
-          </button>
-        ))}
+      <div role="tablist" aria-label="Bagian hasil" className="flex gap-1 overflow-x-auto border-b border-border">
+        {RESULT_TABS.map(t => {
+          const Icon = t.icon;
+          const selected = tab === t.key;
+          return (
+            <button key={t.key} role="tab" aria-selected={selected}
+              onClick={() => router.push(t.href)}
+              className={cn("-mb-px flex shrink-0 items-center gap-2 border-b-2 px-4 py-3 text-[14px] transition-colors",
+                selected ? "border-primary font-semibold text-primary" : "border-transparent font-medium text-ink-secondary hover:border-border hover:text-ink")}>
+              <Icon className="h-4 w-4" aria-hidden="true" />{t.label}
+            </button>
+          );
+        })}
       </div>
       {tab === "progress" && <StudentProgress />}
       {tab === "review" && <StudentReview />}
@@ -5821,12 +5830,9 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     setKioskWarning(true);
   }
 
-  function enterFullscreen() {
-    document.documentElement.requestFullscreen?.().catch(() => {});
-  }
-  function exitFullscreen() {
-    if (document.fullscreenElement) document.exitFullscreen?.().catch(() => {});
-  }
+  const [kioskReason, setKioskReason] = useState("");
+  const enterFullscreen = requestExamFullscreen;
+  const exitFullscreen = exitExamFullscreen;
 
   // Grading is entirely server-side (correct_answer is never sent to the
   // client before this point, per supabase/migrations/009_secure_grading.sql)
@@ -5891,6 +5897,9 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   }
 
   async function startExam(assessmentId: string) {
+    // Must run synchronously inside the click that started the exam -
+    // browsers only allow fullscreen from a user gesture.
+    enterFullscreen();
     const data = await authedFetch(`/api/student/assessment/${assessmentId}/start`, {}) as {
       attemptId?: string; title?: string; deadlineAt?: number | null; allowReview?: boolean; questions?: ExamQuestion[]; error?: string;
     } | null;
@@ -5955,43 +5964,14 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     return () => clearInterval(timer);
   }, [finished, page, examSession?.deadlineAt]);
 
-  // KIOSK: Block ESC and F11 keys (capture phase)
-  React.useEffect(() => {
-    if (page !== "exam") return;
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape" || e.key === "F11") {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-      }
-    }
-    document.addEventListener("keydown", onKeyDown, true);
-    return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [page]);
-
-  // KIOSK: Tab switch or focus loss → warn before submit
-  React.useEffect(() => {
-    if (page !== "exam") return;
-    function onVisibilityChange() {
-      if (document.hidden) triggerKioskWarning();
-    }
-    function onBlur() { triggerKioskWarning(); }
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    window.addEventListener("blur", onBlur);
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-      window.removeEventListener("blur", onBlur);
-    };
-  }, [page]);
-
-  // KIOSK: Fullscreen exit → warn before submit
-  React.useEffect(() => {
-    if (page !== "exam") return;
-    function onFsChange() {
-      if (!document.fullscreenElement) triggerKioskWarning();
-    }
-    document.addEventListener("fullscreenchange", onFsChange);
-    return () => document.removeEventListener("fullscreenchange", onFsChange);
-  }, [page]);
+  // KIOSK: shared lockdown (same rules as practice) - leaving the page,
+  // switching apps or exiting fullscreen ends the exam; copy/paste,
+  // right-click, printing and shortcuts are blocked.
+  useExamLockdown(page === "exam" && !finished && !!examSession, reason => {
+    setKioskReason(reason);
+    triggerKioskWarning();
+    autoSubmit(); // submit right away - not when the dialog is dismissed
+  });
 
   // Online / offline detection
   React.useEffect(() => {
@@ -6230,9 +6210,10 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
       {/* Kiosk warning dialog */}
       <ConfirmDialog
         open={kioskWarning}
-        title="Asesmen Berakhir"
-        message="Kamu telah meninggalkan mode ujian. Asesmen secara otomatis berakhir dan jawaban kamu telah disubmit."
-        confirmLabel="Selesai"
+        title="Ujian Berakhir"
+        message={`${kioskReason || "Kamu meninggalkan mode ujian."} Ujian otomatis berakhir dan jawabanmu sudah dikumpulkan.`}
+        confirmLabel="Lihat Hasil"
+        cancelLabel="Tutup"
         confirmVariant="default"
         onConfirm={() => { setKioskWarning(false); autoSubmit(); }}
         onCancel={() => { setKioskWarning(false); autoSubmit(); }}
@@ -6262,6 +6243,19 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
   const [done, setDone] = useState(false);
   const [grading, setGrading] = useState(false);
   const [graded, setGraded] = useState<{ correct: number; results: Array<{ isCorrect: boolean; correctAnswer: string; explanation: string }> } | null>(null);
+  const [lockReason, setLockReason] = useState("");
+
+  // Same exam lockdown as teacher exams: leaving the page ends the practice
+  // and grades what was answered so far.
+  useExamLockdown(questions.length > 0 && !done && !grading, reason => {
+    setLockReason(reason);
+    finishSession();
+  });
+
+  function exitPractice() {
+    exitExamFullscreen();
+    onFinish();
+  }
 
   if (questions.length === 0) {
     return (
@@ -6308,6 +6302,7 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
     setGraded({ correct, results: typed.map(r => r ?? { isCorrect: false, correctAnswer: "A", explanation: "" }) });
     setGrading(false);
     setDone(true);
+    exitExamFullscreen();
   }
 
   if (done) {
@@ -6316,6 +6311,9 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
 
     return (
       <div className="flex flex-col items-center gap-6 py-16 text-center">
+        {lockReason && (
+          <AlertPanel tone="warning" title="Latihan dihentikan">{lockReason} Jawaban yang sudah diisi tetap dinilai.</AlertPanel>
+        )}
         <div className="flex h-20 w-20 items-center justify-center rounded-full bg-success-light">
           <CheckCircle2 className="h-10 w-10 text-success" />
         </div>
@@ -6324,7 +6322,7 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
           <p className="text-[14px] text-ink-secondary mt-1">{correct} dari {questions.length} soal benar</p>
         </div>
         <ScoreCircle score={score} size={96} />
-        <Button variant="default" onClick={onFinish}>Selesai</Button>
+        <Button variant="default" onClick={exitPractice}>Selesai</Button>
       </div>
     );
   }
@@ -6332,13 +6330,15 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
   const opts = [currentQ.options.A, currentQ.options.B, currentQ.options.C, currentQ.options.D, currentQ.options.E ?? ""];
 
   return (
+    // Full-screen layer: the sidebar/menu can't be reached during practice.
+    <div className="fixed inset-0 z-[70] overflow-y-auto bg-background p-4 sm:p-8">
     <div className="space-y-5 max-w-2xl mx-auto">
       <div className="flex items-center justify-between">
         <div>
           <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">Latihan Adaptif · {topic ?? "Semua"} · {difficulty}</p>
           <h2 className="text-[18px] font-bold text-ink">Soal {current + 1} dari {questions.length}</h2>
         </div>
-        <Button variant="ghost" className="h-8 text-[12px]" onClick={onFinish}>
+        <Button variant="ghost" className="h-8 text-[12px]" onClick={exitPractice}>
           <X className="mr-1.5 h-3.5 w-3.5" />Keluar
         </Button>
       </div>
@@ -6384,6 +6384,7 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
           </Button>
         )}
       </div>
+    </div>
     </div>
   );
 }
@@ -6438,6 +6439,7 @@ function StudentAdaptive() {
     const subjectId = overrideSubjectId ?? selectedSubjectId;
     if (!subjectId) { setPracticeError("Tolong pilih mata pelajaran terlebih dahulu."); return; }
     setPracticeError(null);
+    requestExamFullscreen(); // must run inside the click that starts practice
     const topic = overrideTopic ?? selectedTopic;
     setSessionTopic(topic);
     setLoading(true);
@@ -6448,7 +6450,8 @@ function StudentAdaptive() {
         difficulty: difficulty === "Campur" ? undefined : difficulty,
         count: 10,
       }) as { questions?: PracticeQuestion[]; error?: string } | null;
-      if (data?.error) { setPracticeError(data.error); return; }
+      if (data?.error) { exitExamFullscreen(); setPracticeError(data.error); return; }
+      if (!data?.questions?.length) exitExamFullscreen();
       setSessionQs(data?.questions ?? []);
     } finally {
       setLoading(false);
@@ -6456,7 +6459,7 @@ function StudentAdaptive() {
   }
 
   if (sessionQs !== null) {
-    return <AdaptiveSession questions={sessionQs} difficulty={difficulty} topic={sessionTopic} onFinish={() => setSessionQs(null)} />;
+    return <AdaptiveSession questions={sessionQs} difficulty={difficulty} topic={sessionTopic} onFinish={() => { exitExamFullscreen(); setSessionQs(null); }} />;
   }
 
   return (

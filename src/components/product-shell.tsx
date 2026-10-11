@@ -122,7 +122,7 @@ function TextSizeControl({ value, onChange }: { value: TextSize; onChange: (s: T
   );
 }
 
-function NavLinks({ nav, pathname, onNavigate }: { nav: NavItem[]; pathname: string | null; onNavigate?: () => void }) {
+function NavLinks({ nav, pathname, onNavigate, spread }: { nav: NavItem[]; pathname: string | null; onNavigate?: () => void; spread?: boolean }) {
   return (
     <>
       {nav.map((item, index) => {
@@ -137,12 +137,15 @@ function NavLinks({ nav, pathname, onNavigate }: { nav: NavItem[]; pathname: str
             <Link key={item.href} href={item.href} scroll={false} onClick={onNavigate}
               aria-current={active ? "page" : undefined}
               className={cn(
-                "group mt-1 flex items-center gap-3 rounded-[10px] px-2.5 py-2 transition-colors",
+                "group my-0.5 flex items-center gap-3 rounded-[12px] px-3 py-2 transition-colors",
+                // Desktop sidebar: the six items share the full height
+                // (bounded, so they never stretch absurdly or overflow).
+                spread && "min-h-[58px] max-h-[92px] flex-1",
                 active ? "bg-primary/10" : "hover:bg-ink/[0.05]",
               )}>
-              <span className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] transition-colors",
+              <span className={cn("flex h-10 w-10 shrink-0 items-center justify-center rounded-[12px] transition-colors",
                 active ? "bg-primary text-white" : "bg-background text-ink-secondary group-hover:text-ink")}>
-                <Icon className="h-[18px] w-[18px]" aria-hidden="true" />
+                <Icon className="h-5 w-5" aria-hidden="true" />
               </span>
               <span className="min-w-0">
                 <span className={cn("block text-[15px] font-bold leading-tight", active ? "text-primary" : "text-ink")}>{item.title}</span>
@@ -263,16 +266,18 @@ export function AppShell({
       <aside className="sticky top-0 hidden h-screen w-[clamp(200px,18vw,280px)] shrink-0 flex-col border-r border-border bg-surface lg:flex">
         {/* Brand - fixed height (it used to scale with screen WIDTH, which
             pushed the menu off-screen on shorter laptops) */}
-        <div className="flex h-16 shrink-0 items-center gap-2.5 border-b border-border px-4">
-          <Link href={`/${role}/dashboard`} className="flex min-w-0 items-center gap-2.5">
-            <CatchUpLogo className="h-9 w-auto max-w-[120px] object-contain" />
-            <span className="truncate text-[11px] font-semibold text-ink-tertiary">{meta.label}</span>
+        <div className="flex h-[104px] shrink-0 flex-col items-center justify-center gap-1 border-b border-border px-4">
+          <Link href={`/${role}/dashboard`} className="flex flex-col items-center gap-1">
+            <CatchUpLogo className="h-16 w-auto max-w-[180px] object-contain drop-shadow-sm" />
+            <span className="text-[11px] font-semibold tracking-wide text-ink-tertiary">{meta.label}</span>
           </Link>
         </div>
 
         {/* Nav */}
-        <nav ref={navRef} onMouseDown={saveNavScroll} className="min-h-0 flex-1 overflow-y-auto px-3 py-2" aria-label="Navigasi utama">
-          <NavLinks nav={nav} pathname={pathname} />
+        <nav ref={navRef} onMouseDown={saveNavScroll}
+          className={cn("min-h-0 flex-1 overflow-y-auto px-3 py-2", nav.some(i => i.hint) && "flex flex-col")}
+          aria-label="Navigasi utama">
+          <NavLinks nav={nav} pathname={pathname} spread />
         </nav>
 
         {/* User footer */}

@@ -42,16 +42,19 @@ export function SubjectFilter({
       aria-pressed={selected}
       onClick={() => onChange(label)}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border px-3.5 py-1.5 text-[13px] font-bold transition-colors",
+        "inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[13px] font-medium transition-colors",
+        // Unselected chips stay neutral (only a small colour dot) so a row
+        // of subjects doesn't become a wall of colour; the selected one
+        // takes the subject's colour.
         selected
-          ? (style ? style.active : "bg-ink text-white border-ink")
-          : (style ? cn(style.soft, "hover:brightness-95") : "bg-surface text-ink-secondary border-border hover:text-ink"),
+          ? cn(style ? style.active : "bg-ink text-white border-ink", "font-semibold")
+          : "bg-surface text-ink-secondary border-border hover:border-border-strong hover:text-ink",
       )}
     >
-      {style && <span aria-hidden="true">{style.emoji}</span>}
+      {style && <span aria-hidden="true" className={cn("h-2 w-2 rounded-full", selected ? "bg-white" : style.solid)} />}
       {label}
       {counts?.[label] !== undefined && (
-        <span className={cn("rounded-full px-1.5 text-[11px]", selected ? "bg-white/25" : "bg-black/5")}>{counts[label]}</span>
+        <span className={cn("text-[11px] tabular-nums", selected ? "text-white/80" : "text-ink-tertiary")}>{counts[label]}</span>
       )}
     </button>
   );
