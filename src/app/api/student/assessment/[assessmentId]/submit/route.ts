@@ -70,7 +70,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
       return Response.json({ error: "Percobaan tidak ditemukan" }, { status: 404 });
     }
     if (attempt.status !== "in_progress") {
-      return Response.json({ error: "Percobaan ini sudah selesai" }, { status: 400 });
+      return Response.json({ error: "Jawaban ujian ini sudah dikumpulkan.", alreadySubmitted: true }, { status: 409 });
     }
 
     const { data: assessment } = await supabaseAdmin.from("assessments").select("*").eq("id", assessmentId).single();
@@ -82,8 +82,23 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
     // the start route.
     const SUBMIT_GRACE_MS = 2 * 60_000;
     if (a.close_at && Date.now() > parseDbTime(a.close_at) + SUBMIT_GRACE_MS) {
-      await supabaseAdmin.from("assessment_attempts").update({ status: "missed" }).eq("id", attemptId);
+      await supabaseAdmin.from("assessment_attempts").update({ status: "missed" }).eq("id", attemptId).eq("status", "in_progress");
       return Response.json({ error: "Waktu pengerjaan asesmen ini sudah berakhir" }, { status: 400 });
+    }
+
+    // Double-submit lock: claim the attempt atomically (in_progress ->
+    // submitted only if it is STILL in_progress). Two requests arriving
+    // together (double click, retry on a slow connection) both passed the
+    // check above and graded twice - duplicate answers, double XP. Only the
+    // request that wins this conditional update continues.
+    const { data: claimed } = await supabaseAdmin
+      .from("assessment_attempts")
+      .update({ status: "submitted", submitted_at: new Date().toISOString() })
+      .eq("id", attemptId)
+      .eq("status", "in_progress")
+      .select("id");
+    if (!claimed || claimed.length === 0) {
+      return Response.json({ error: "Jawaban ujian ini sudah dikumpulkan.", alreadySubmitted: true }, { status: 409 });
     }
 
     const { data: aqRows } = await supabaseAdmin

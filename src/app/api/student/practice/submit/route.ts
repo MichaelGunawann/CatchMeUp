@@ -61,6 +61,20 @@ export async function POST(req: Request) {
 
     const isCorrect = answer === question.correct_answer;
 
+    // Same question answered again within a few seconds = a repeated click
+    // or network retry, not a new attempt: return the result without
+    // recording it again or awarding XP twice.
+    const { data: recent } = await supabaseAdmin
+      .from("practice_attempts")
+      .select("id")
+      .eq("student_id", student.id)
+      .eq("question_id", questionId)
+      .gte("submitted_at", new Date(Date.now() - 15_000).toISOString())
+      .limit(1);
+    if (recent && recent.length > 0) {
+      return Response.json({ isCorrect, correctAnswer: question.correct_answer, explanation: question.explanation, duplicate: true });
+    }
+
     await supabaseAdmin.from("practice_attempts").insert({
       student_id: student.id,
       question_id: questionId,

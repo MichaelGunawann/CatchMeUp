@@ -131,18 +131,31 @@ function ConfirmDialog({
 }: {
   open: boolean; title: string; message: string;
   confirmLabel: string; confirmVariant?: "default" | "success" | "danger" | "amber";
-  cancelLabel?: string; onConfirm: () => void; onCancel: () => void;
+  cancelLabel?: string; onConfirm: () => void | Promise<void>; onCancel: () => void;
 }) {
+  // Locks both buttons while the confirm action runs, so a double click
+  // can never trigger it twice (e.g. publishing an assessment twice).
+  const [busy, setBusy] = useState(false);
+  const busyRef = React.useRef(false);
+  useEffect(() => { if (!open) { busyRef.current = false; setBusy(false); } }, [open]);
   if (!open) return null;
+  async function confirm() {
+    if (busyRef.current) return;
+    busyRef.current = true;
+    setBusy(true);
+    try { await onConfirm(); } finally { busyRef.current = false; setBusy(false); }
+  }
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
-      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={onCancel} />
+      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => !busy && onCancel()} />
       <div className="relative w-full max-w-sm rounded-card border border-border bg-surface p-6 shadow-xl">
         <h2 className="text-[16px] font-bold text-ink mb-2">{title}</h2>
         <p className="text-[13px] text-ink-secondary leading-relaxed mb-6">{message}</p>
         <div className="flex justify-end gap-2">
-          <Button variant="outline" size="sm" onClick={onCancel}>{cancelLabel}</Button>
-          <Button variant={confirmVariant} size="sm" onClick={onConfirm}>{confirmLabel}</Button>
+          <Button variant="outline" size="sm" disabled={busy} onClick={onCancel}>{cancelLabel}</Button>
+          <Button variant={confirmVariant} size="sm" disabled={busy} onClick={confirm}>
+            {busy ? "Memproses..." : confirmLabel}
+          </Button>
         </div>
       </div>
     </div>
@@ -1973,6 +1986,7 @@ function TeacherMaterials() {
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
   const [editMeta, setEditMeta] = useState(false);
   const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [confirmDeleteMaterial, setConfirmDeleteMaterial] = useState<MaterialWithFile | null>(null);
   const [materialQuestions, setMaterialQuestions] = useState<Record<string, typeof questionBank>>({});
   const [generatingMore, setGeneratingMore] = useState<string | null>(null);
   const [metaForm, setMetaForm] = useState({ type: "Modul Ajar", chapter: "", academicYear: "", publisher: "", sourceType: "" });
@@ -2592,6 +2606,11 @@ function TeacherMaterials() {
 
             {/* Footer */}
             <div className="shrink-0 flex items-center justify-between border-t border-border px-6 py-4">
+              <div className="flex items-center gap-4">
+              <button onClick={() => setConfirmDeleteMaterial(m)}
+                className="flex items-center gap-1.5 text-[12px] font-semibold text-danger hover:underline">
+                <X className="h-3.5 w-3.5" />Hapus
+              </button>
               <button onClick={() => {
                 if (!editMeta) {
                   setMetaForm({ type: m.type, chapter: m.chapter ?? "", academicYear: m.academicYear ?? "", publisher: m.publisher ?? "", sourceType: m.sourceType ?? "" });
@@ -2603,6 +2622,7 @@ function TeacherMaterials() {
                 <Pencil className="h-3.5 w-3.5" />
                 {editMeta ? "Batalkan" : "Edit Metadata"}
               </button>
+              </div>
               <div className="flex gap-2">
                 <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setSelectedMaterial(null); setEditMeta(false); }}>Tutup</Button>
                 {editMeta
@@ -2631,6 +2651,26 @@ function TeacherMaterials() {
         </div>
       )}
 
+      <ConfirmDialog
+        open={!!confirmDeleteMaterial}
+        title="Hapus materi ini?"
+        message={`"${confirmDeleteMaterial?.title ?? ""}" dan file-nya akan dihapus permanen, dan siswa tidak bisa melihatnya lagi. Soal yang sudah dibuat dari materi ini tetap ada di bank soal.`}
+        confirmLabel="Hapus Materi"
+        confirmVariant="danger"
+        onConfirm={async () => {
+          const target = confirmDeleteMaterial;
+          if (!target) return;
+          const res = await apiPost("/api/teacher/materials/delete", { materialId: target.id });
+          setConfirmDeleteMaterial(null);
+          if (res.error) { setToast({ message: `Gagal menghapus: ${res.error}`, tone: "primary" }); return; }
+          setUploadedMaterials(prev => (prev ?? []).filter(x => x.id !== target.id));
+          setSelectedMaterial(null);
+          setEditMeta(false);
+          setToast({ message: `Materi "${target.title}" dihapus`, tone: "success" });
+        }}
+        onCancel={() => setConfirmDeleteMaterial(null)}
+      />
+
       {/* ── AI Process Confirmation ── */}
       <ConfirmDialog
         open={!!confirmProcessId}
@@ -2638,7 +2678,7 @@ function TeacherMaterials() {
         message="AI akan menganalisis materi ini dan mengekstrak soal secara otomatis. Proses membutuhkan beberapa detik dan tidak dapat dibatalkan."
         confirmLabel="Proses Sekarang"
         confirmVariant="default"
-        onConfirm={() => confirmProcessId && startAIProcess(confirmProcessId)}
+        onConfirm={() => { if (confirmProcessId) startAIProcess(confirmProcessId); }}
         onCancel={() => setConfirmProcessId(null)}
       />
 
@@ -3521,7 +3561,9 @@ function TeacherAssessmentBuilder() {
   const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
   const [showAddQuestion, setShowAddQuestion] = useState(false);
   const [confirmAddToBank, setConfirmAddToBank] = useState(false);
-  const [selectedStyle, setSelectedStyle] = useState<string>("");
+  // Default "Kustom": count/duration are editable straight away; choosing a
+  // preset style is optional.
+  const [selectedStyle, setSelectedStyle] = useState<string>(CUSTOM_STYLE_ID);
   const styleIsLocked = !!selectedStyle && !!styleDefaults[selectedStyle];
   const [newQ, setNewQ] = useState({ ...EMPTY_MANUAL_Q });
   const newQValidation = useRequiredFields(newQ, MANUAL_Q_REQUIRED);
@@ -3599,7 +3641,7 @@ function TeacherAssessmentBuilder() {
       ? { message: `Asesmen "${title}" berhasil dipublikasikan`, tone: "success" }
       : { message: `Draf "${title}" tersimpan`, tone: "primary" });
     setStep(1);
-    setFormTitle(""); setFormType(""); setSelectedStyle(""); setFormOpenAt(""); setFormCloseAt("");
+    setFormTitle(""); setFormType(""); setSelectedStyle(CUSTOM_STYLE_ID); setFormOpenAt(""); setFormCloseAt("");
     setStep3Attempted(false); step1.reset();
     setSelectedQuestions(new Set()); setAiGeneratedQuestions([]); setAiGenerated(false); setSelectedMaterials(new Set());
   }
@@ -4472,6 +4514,8 @@ function TeacherResults() {
   const listLoading = assessmentRows === null;
   const [classSize, setClassSize] = useState(0);
   const [resultDetail, setResultDetail] = useState<AssessmentResultDetail | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<{ id: string; title: string; studentCount?: number } | null>(null);
+  const [resultsToast, setResultsToast] = useState<{ message: string; tone: "success" | "danger" } | null>(null);
   const [aiAnalysis, setAiAnalysis] = useState<{ overallAnalysis: string; questionAnalyses: Array<{index:number;misconception:string;suggestion:string}> } | null>(null);
   const [aiLoading, setAiLoading] = useState(false);
 
@@ -4783,6 +4827,9 @@ function TeacherResults() {
               )}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-6 py-4 shrink-0">
+              <Button variant="danger" className="mr-auto h-8 text-[12px]" onClick={() => setConfirmDelete({ id: detail.id, title: detail.title })}>
+                <X className="mr-1 h-3.5 w-3.5" />Hapus Asesmen
+              </Button>
               <Button variant="outline" className="h-8 text-[12px]" onClick={() => setDetailId(null)}>Tutup</Button>
               <Button variant="default" className="h-8 text-[12px]" disabled={!resultDetail} onClick={() => {
                 if (!resultDetail) return;
@@ -4802,6 +4849,29 @@ function TeacherResults() {
           </div>
         </div>
       )}
+      <ConfirmDialog
+        open={!!confirmDelete}
+        title={confirmDelete?.studentCount ? "Siswa sudah mengerjakan asesmen ini" : "Hapus asesmen ini?"}
+        message={confirmDelete?.studentCount
+          ? `${confirmDelete.studentCount} siswa sudah mengerjakan "${confirmDelete.title}". Jika dihapus, NILAI dan jawaban mereka ikut terhapus permanen. Lanjutkan?`
+          : `"${confirmDelete?.title ?? ""}" akan dihapus permanen dan hilang dari daftar siswa. Soal-soalnya tetap ada di bank soal.`}
+        confirmLabel={confirmDelete?.studentCount ? "Ya, Hapus Beserta Nilai" : "Hapus Asesmen"}
+        confirmVariant="danger"
+        onConfirm={async () => {
+          const target = confirmDelete;
+          if (!target) return;
+          const res = await apiPost<{ needsConfirmation?: boolean; studentCount?: number }>(
+            "/api/teacher/assessments/delete", { assessmentId: target.id, force: !!target.studentCount });
+          if (res.needsConfirmation) { setConfirmDelete({ ...target, studentCount: res.studentCount }); return; }
+          setConfirmDelete(null);
+          if (res.error) { setResultsToast({ message: `Gagal menghapus: ${res.error}`, tone: "danger" }); return; }
+          setAssessmentRows(prev => (prev ?? []).filter(x => x.id !== target.id));
+          setDetailId(null);
+          setResultsToast({ message: `Asesmen "${target.title}" dihapus`, tone: "success" });
+        }}
+        onCancel={() => setConfirmDelete(null)}
+      />
+      {resultsToast && <AppToast message={resultsToast.message} tone={resultsToast.tone} onDismiss={() => setResultsToast(null)} />}
     </div>
   );
 }
@@ -5732,7 +5802,7 @@ type StudentAssessmentItem = {
 // Question counts come from /api/student/assessments: students can't read
 // assessment_questions directly (by design), so a client-side count was
 // always 0 and every assessment showed "0 soal · Belum ada soal".
-function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
+function SimulatorPickList({ onStart }: { onStart: (id: string, item: StudentAssessmentItem) => void }) {
   const [items, setItems] = useState<StudentAssessmentItem[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [noClass, setNoClass] = useState(false);
@@ -5803,8 +5873,8 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
               const ready = a.questionCount > 0;
               return (
                 <div key={a.id} role="button" tabIndex={ready ? 0 : -1} aria-disabled={!ready}
-                  onClick={() => ready && onStart(a.id)}
-                  onKeyDown={e => { if (ready && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onStart(a.id); } }}
+                  onClick={() => ready && onStart(a.id, a)}
+                  onKeyDown={e => { if (ready && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); onStart(a.id, a); } }}
                   className={cn("rounded-card border border-l-[6px] bg-surface p-5 transition-all", subjectStyle(a.subject).accent,
                     ready ? "cursor-pointer border-border hover:shadow-soft" : "cursor-not-allowed border-border opacity-60")}>
                   <div className="flex items-start gap-3">
@@ -5886,6 +5956,144 @@ function SimulatorPickList({ onStart }: { onStart: (id: string) => void }) {
   );
 }
 
+// ── "Coba dulu": one example question before every real exam ───────────────
+// Same layout as the real exam (header, timer, options, confidence, palette)
+// so students learn the format with zero risk. Leaving the tab here only
+// shows a warning explaining that in the real exam it would end the exam.
+const TRIAL_QUESTION = {
+  question: "Contoh soal: Berapakah hasil dari 7 + 5?",
+  options: [{ key: "A", text: "10" }, { key: "B", text: "11" }, { key: "C", text: "12" }, { key: "D", text: "13" }],
+  correct: "C",
+};
+
+function ExamTrial({ item, onCancel, onStart }: { item: StudentAssessmentItem; onCancel: () => void; onStart: () => void }) {
+  const [answer, setAnswer] = useState<string | null>(null);
+  const [confidence, setConfidence] = useState<"yakin" | "cukup" | "ragu" | null>(null);
+  const [tabWarnings, setTabWarnings] = useState(0);
+  const [seconds, setSeconds] = useState(5 * 60);
+  const [starting, setStarting] = useState(false);
+
+  useEffect(() => {
+    const t = setInterval(() => setSeconds(x => Math.max(0, x - 1)), 1000);
+    const warn = () => setTabWarnings(n => n + 1);
+    const onVisibility = () => { if (document.hidden) warn(); };
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("blur", warn);
+    return () => {
+      clearInterval(t);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("blur", warn);
+    };
+  }, []);
+
+  const Hint = ({ n, children }: { n: number; children: React.ReactNode }) => (
+    <div className="flex items-start gap-2 rounded-[8px] bg-primary-soft px-3 py-2 text-[12px] text-primary">
+      <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary text-[11px] font-bold text-white">{n}</span>
+      <span className="leading-relaxed">{children}</span>
+    </div>
+  );
+
+  return (
+    <div className="fixed inset-0 z-[70] overflow-y-auto bg-background">
+      <header className="sticky top-0 z-30 border-b border-border bg-surface">
+        <div className="mx-auto flex h-14 max-w-4xl items-center justify-between gap-3 px-4 sm:px-6">
+          <div className="flex min-w-0 items-center gap-2.5">
+            <Badge tone="warning">CONTOH</Badge>
+            <div className="truncate text-[13px] font-bold text-ink">{item.title}</div>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5 rounded-full border border-warning/30 bg-warning-light px-3 py-1 tabular-nums">
+            <Clock className="h-3.5 w-3.5 text-warning" />
+            <span className="text-[12px] font-semibold text-warning">
+              {String(Math.floor(seconds / 60)).padStart(2, "0")}:{String(seconds % 60).padStart(2, "0")}
+            </span>
+          </div>
+        </div>
+      </header>
+
+      <main className="mx-auto w-full max-w-3xl space-y-4 px-4 py-6 sm:px-6">
+        <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
+          <h1 className="text-[20px] font-bold text-ink">Coba dulu sebelum ujian 👋</h1>
+          <p className="mt-1 text-[14px] text-ink-secondary">
+            Ini contoh soal supaya kamu tahu cara mengerjakannya. Jawabanmu di sini <strong>tidak dinilai</strong>.
+            Ujian aslinya: <strong>{item.questionCount} soal</strong>{item.durationMinutes ? <>, waktu <strong>{item.durationMinutes} menit</strong></> : ", tanpa batas waktu"}.
+          </p>
+        </div>
+
+        {tabWarnings > 0 && (
+          <AlertPanel tone="danger" title={`Kamu tadi pindah tab/aplikasi${tabWarnings > 1 ? ` (${tabWarnings}×)` : ""}`}>
+            Di sini cuma peringatan. Tapi saat <strong>ujian asli</strong>, pindah tab, pindah aplikasi, atau keluar layar penuh akan <strong>langsung mengakhiri ujian</strong> dan jawabanmu dikumpulkan.
+          </AlertPanel>
+        )}
+
+        <Hint n={1}>Jam di kanan atas menunjukkan sisa waktu. Kalau waktu habis, jawabanmu dikumpulkan otomatis.</Hint>
+
+        <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
+          <div className="mb-3 flex items-center gap-2">
+            <Badge tone="neutral">Soal 1</Badge>
+            <span className="ml-auto text-[11px] tabular-nums text-ink-tertiary">{answer ? 1 : 0}/1 terjawab</span>
+          </div>
+          <p className="text-[16px] font-medium leading-relaxed text-ink">{TRIAL_QUESTION.question}</p>
+        </div>
+
+        <Hint n={2}>Klik salah satu pilihan untuk menjawab. Kamu boleh mengganti jawaban selama ujian belum selesai.</Hint>
+        <div className="grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+          {TRIAL_QUESTION.options.map(opt => {
+            const sel = answer === opt.key;
+            return (
+              <button key={opt.key} type="button" onClick={() => setAnswer(opt.key)}
+                className={cn("flex items-center gap-3 rounded-[10px] border p-4 text-left transition-all",
+                  sel ? "border-primary/40 bg-primary-soft" : "border-border bg-surface hover:border-primary/20 hover:bg-background")}>
+                <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-bold",
+                  sel ? "bg-primary text-white" : "border border-border bg-background text-ink-secondary")}>{opt.key}</span>
+                <span className="text-[14px] font-medium text-ink">{opt.text}</span>
+              </button>
+            );
+          })}
+        </div>
+        {answer && (
+          <p className={cn("text-[13px] font-semibold", answer === TRIAL_QUESTION.correct ? "text-success" : "text-warning")}>
+            {answer === TRIAL_QUESTION.correct
+              ? "✅ Benar! Di ujian asli, kamu baru tahu benar/salahnya setelah ujian selesai."
+              : "Belum tepat (jawabannya C. 12) - tidak apa-apa, ini cuma contoh. Di ujian asli, benar/salah baru terlihat setelah selesai."}
+          </p>
+        )}
+
+        <Hint n={3}>Pilih seberapa yakin kamu. Ini membantu gurumu tahu bagian mana yang masih membingungkan (tidak memengaruhi nilai).</Hint>
+        <div className="flex gap-2 rounded-card border border-border bg-surface p-4 shadow-sm">
+          {([["yakin", "Yakin"], ["cukup", "Cukup Yakin"], ["ragu", "Tidak Yakin"]] as const).map(([key, label]) => (
+            <button key={key} type="button" onClick={() => setConfidence(key)}
+              className={cn("flex-1 rounded-[8px] border px-3 py-2.5 text-[12px] font-semibold transition-all",
+                confidence === key ? "border-primary/40 bg-primary-soft text-primary" : "border-border bg-background text-ink-secondary")}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <Hint n={4}>Pakai tombol nomor atau Sebelumnya/Berikutnya untuk pindah soal. Nomor hijau = sudah dijawab. Kalau sudah selesai, tekan <strong>Selesaikan Asesmen</strong> di kanan atas.</Hint>
+        <div className="flex justify-center gap-1.5">
+          <span className="flex h-8 w-8 items-center justify-center rounded-full bg-primary text-[11px] font-semibold text-white ring-2 ring-primary/30">1</span>
+          {Array.from({ length: Math.min(4, Math.max(0, item.questionCount - 1)) }, (_, i) => (
+            <span key={i} className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-background text-[11px] font-semibold text-ink-secondary">{i + 2}</span>
+          ))}
+          {item.questionCount > 5 && <span className="self-center text-[12px] text-ink-tertiary">… {item.questionCount}</span>}
+        </div>
+
+        <AlertPanel tone="warning" title="Aturan ujian asli">
+          Ujian akan masuk layar penuh. Jangan pindah tab, jangan buka aplikasi lain, dan jangan keluar dari layar penuh sampai selesai.
+        </AlertPanel>
+
+        <div className="flex flex-wrap justify-between gap-3 pb-8">
+          <Button variant="outline" className="h-10" onClick={onCancel} disabled={starting}>← Kembali</Button>
+          <Button variant="success" className="h-10 px-6 text-[14px]" disabled={starting}
+            onClick={() => { setStarting(true); onStart(); }}>
+            {starting ? "Membuka ujian..." : "Saya Siap, Mulai Ujian →"}
+          </Button>
+        </div>
+      </main>
+    </div>
+  );
+}
+
 type ExamQuestion = {
   assessmentQuestionId: string; topic: string; difficulty: string; question: string; points: number;
   displayOptions: { key: string; text: string }[];
@@ -5905,6 +6113,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   const [timeLeft, setTimeLeft] = useState(0);
   const [confirmSubmit, setConfirmSubmit] = useState(false);
   const [kioskWarning, setKioskWarning] = useState(false);
+  const [trialFor, setTrialFor] = useState<StudentAssessmentItem | null>(null);
   const [isOnline, setIsOnline] = useState(true);
   const finishedRef = React.useRef(finished);
   finishedRef.current = finished;
@@ -6083,7 +6292,16 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
           <AlertPanel tone="danger" title="Selama ujian, jangan pindah ke tab atau aplikasi lain">
             Berpindah tab, meminimalkan jendela, atau keluar layar penuh akan otomatis menyelesaikan dan mengumpulkan jawaban kamu.
           </AlertPanel>
-          <SimulatorPickList onStart={(id) => { startExam(id); }} />
+          <SimulatorPickList onStart={(id, item) => {
+            // Resuming an exam already in progress goes straight back in;
+            // a new one shows the "coba dulu" example first.
+            if (item.inProgress) startExam(id);
+            else setTrialFor(item);
+          }} />
+          {trialFor && (
+            <ExamTrial item={trialFor} onCancel={() => setTrialFor(null)}
+              onStart={() => { const id = trialFor.id; startExam(id).finally(() => setTrialFor(null)); }} />
+          )}
           {noQuestionsAlert && (
             <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
               <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setNoQuestionsAlert(false)} />
@@ -6930,6 +7148,37 @@ function StudentIncorrect() {
 
 function StudentTutor() {
   const [messages, setMessages] = useState<ChatMessage[]>([assistantGreeting]);
+  // Chat history survives moving between pages for the rest of the browser
+  // session. Stored per account in sessionStorage (cleared when the browser
+  // closes) - school computers are shared, so it never outlives the session
+  // and another student logging in on the same computer can't see it.
+  const [historyKey, setHistoryKey] = useState<string | null>(null);
+  useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => {
+      const uid = data.session?.user.id;
+      if (!uid) return;
+      const key = `catchup_chat_${uid}`;
+      try {
+        const saved = sessionStorage.getItem(key);
+        if (saved) {
+          const parsed = JSON.parse(saved) as ChatMessage[];
+          if (Array.isArray(parsed) && parsed.length) setMessages(parsed);
+        }
+      } catch { /* ignore corrupt/blocked storage */ }
+      setHistoryKey(key);
+    });
+  }, []);
+  useEffect(() => {
+    if (!historyKey) return;
+    // Don't persist a half-streamed (empty) assistant bubble.
+    const complete = messages.filter(m => m.role === "user" || m.content);
+    try { sessionStorage.setItem(historyKey, JSON.stringify(complete.slice(-60))); } catch { /* storage full/blocked */ }
+  }, [messages, historyKey]);
+
+  function newConversation() {
+    setMessages([assistantGreeting]);
+    if (historyKey) { try { sessionStorage.removeItem(historyKey); } catch { /* ignore */ } }
+  }
   const [input, setInput] = useState("");
   const [isTyping, setIsTyping] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
@@ -7008,7 +7257,8 @@ function StudentTutor() {
 
     try {
       const history = messages
-        .filter(m => m.id !== "greeting")
+        .filter(m => m.id !== "greeting" && m.content)
+        .slice(-20) // bounded context: saved chats can grow long
         .map(m => ({ role: m.role, content: m.content }));
 
       // The bearer token lets the server apply this class's teacher AI
@@ -7072,7 +7322,12 @@ function StudentTutor() {
   return (
     <div className="flex h-[calc(100dvh-8.5rem)] flex-col gap-4">
       <PageHeader eyebrow="Tanya AI" title="Tanya AI"
-        description="Bingung soal pelajaran? Ketik pertanyaanmu di bawah." />
+        description="Bingung soal pelajaran? Ketik pertanyaanmu di bawah."
+        actions={messages.length > 1 ? (
+          <Button variant="outline" className="h-8 text-[12px]" onClick={newConversation} disabled={isTyping}>
+            <Plus className="mr-1.5 h-3.5 w-3.5" />Percakapan baru
+          </Button>
+        ) : undefined} />
       <GroundingNotice />
       <div role="log" aria-label="Riwayat percakapan" aria-live="polite"
         className="flex-1 overflow-y-auto space-y-4 rounded-card border border-border bg-surface p-5 shadow-sm">

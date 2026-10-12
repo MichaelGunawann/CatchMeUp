@@ -102,7 +102,7 @@ export default function TeacherDashboardPage() {
 
         const classIds = Array.from(new Set(assignmentList.map((a) => a.class_id)));
 
-        const [{ data: studentRows, error: studentError }, { data: assessmentData, error: assessmentError2 }] =
+        const [{ data: studentRows, error: studentError }, { data: assessmentData, error: assessmentError2 }, { count: pendingCount }] =
           await Promise.all([
             classIds.length > 0
               ? supabase.from("students").select("id").in("class_id", classIds)
@@ -112,6 +112,10 @@ export default function TeacherDashboardPage() {
               .select("*, classes(name), subjects(name)")
               .eq("creator_id", profile.id)
               .order("created_at", { ascending: false }),
+            // AI questions waiting for review - fetched alongside, not after.
+            classIds.length > 0
+              ? supabase.from("questions").select("id", { count: "exact", head: true }).in("class_id", classIds).eq("status", "pending")
+              : Promise.resolve({ count: 0 }),
           ]);
 
         if (studentError) throw studentError;
@@ -119,11 +123,7 @@ export default function TeacherDashboardPage() {
         if (cancelled) return;
 
         setStudentCount((studentRows ?? []).length);
-        if (classIds.length > 0) {
-          const { count } = await supabase.from("questions").select("id", { count: "exact", head: true })
-            .in("class_id", classIds).eq("status", "pending");
-          if (!cancelled) setPendingReview(count ?? 0);
-        }
+        setPendingReview(pendingCount ?? 0);
         setAssessments((assessmentData ?? []) as unknown as AssessmentRow[]);
       } catch (err) {
         if (!cancelled) {
