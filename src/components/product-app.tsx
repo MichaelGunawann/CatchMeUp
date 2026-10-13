@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { AppShell } from "@/components/product-shell";
 import {
@@ -5993,8 +5994,10 @@ function ExamTrial({ item, onCancel, onStart }: { item: StudentAssessmentItem; o
     </div>
   );
 
-  return (
-    <div className="fixed inset-0 z-[70] overflow-y-auto bg-background">
+  // Portalled to <body>: a full-screen layer must not be positioned
+  // relative to some ancestor of the exam list.
+  return createPortal(
+    <div className="fixed inset-0 z-[80] overflow-y-auto bg-background">
       <header className="sticky top-0 z-30 border-b border-border bg-surface">
         <div className="mx-auto flex h-14 max-w-4xl items-center justify-between gap-3 px-4 sm:px-6">
           <div className="flex min-w-0 items-center gap-2.5">
@@ -6090,7 +6093,8 @@ function ExamTrial({ item, onCancel, onStart }: { item: StudentAssessmentItem; o
           </Button>
         </div>
       </main>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
@@ -6637,9 +6641,10 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
 
   const opts = [currentQ.options.A, currentQ.options.B, currentQ.options.C, currentQ.options.D, currentQ.options.E ?? ""];
 
-  return (
-    // Full-screen layer: the sidebar/menu can't be reached during practice.
-    <div className="fixed inset-0 z-[70] overflow-y-auto bg-background p-4 sm:p-8">
+  // Full-screen layer (portalled to <body>): the sidebar/menu can't be
+  // reached during practice.
+  return createPortal(
+    <div className="fixed inset-0 z-[80] overflow-y-auto bg-background p-4 sm:p-8">
     <div className="space-y-5 max-w-2xl mx-auto">
       <div className="flex items-center justify-between">
         <div>
@@ -6693,7 +6698,8 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
         )}
       </div>
     </div>
-    </div>
+    </div>,
+    document.body,
   );
 }
 
