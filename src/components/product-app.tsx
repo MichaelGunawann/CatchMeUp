@@ -37,6 +37,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { FormField, SelectField, fieldClass, useRequiredFields, type SelectOption } from "@/components/ui/form-field";
 import { SubjectBadge, SubjectFilter } from "@/components/subject-ui";
+import { ChatMarkdown } from "@/components/chat-markdown";
 import { subjectStyle } from "@/lib/subject-style";
 import {
   aiStyleOptions,
@@ -1760,6 +1761,9 @@ async function uploadNewMaterial(file: File, params: {
     ...params, schoolId: ticket.schoolId, id: ticket.materialId, fileUrl: ticket.path, fileSize: file.size,
   });
   if ("error" in inserted) return inserted;
+  // Read & cache the material's full text in the background for Tanya AI
+  // (a big textbook takes ~40s - better now than while a student waits).
+  void apiPost("/api/materials/extract-text", { materialId: inserted.id });
   return { id: inserted.id, path: ticket.path };
 }
 
@@ -7224,30 +7228,24 @@ function StudentTutor() {
     if (err) setApiError(err);
   }
 
-  function renderContent(content: string) {
-    const parts = content.split(/(\[Sumber:[^\]]*\])/g);
-    if (parts.length <= 1) return <>{content}</>;
+  // "[Sumber: Judul, hal. N]" -> clickable chip that downloads the material.
+  function renderSource(part: string, key: string) {
+    const match = part.match(/^\[Sumber:\s*([^,\]]+)/);
+    const title = match?.[1].trim() ?? "";
+    const mat = localMats.find(m => m.title.toLowerCase().includes(title.toLowerCase()) || title.toLowerCase().includes(m.title.toLowerCase()));
     return (
-      <>
-        {parts.map((part, i) => {
-          const match = part.match(/^\[Sumber:\s*([^,\]]+)/);
-          if (match) {
-            const title = match[1].trim();
-            const mat = localMats.find(m => m.title.toLowerCase().includes(title.toLowerCase()) || title.toLowerCase().includes(m.title.toLowerCase()));
-            return (
-              <button key={i}
-                onClick={() => mat ? downloadMat(mat) : setApiError(`Materi "${title}" tidak ditemukan di pustaka kelasmu.`)}
-                title={mat ? `Unduh: ${mat.title}` : title}
-                className="inline-flex items-center gap-1 rounded-[4px] border border-primary/30 bg-primary-soft px-1.5 py-0.5 text-[11px] font-semibold text-primary hover:bg-primary/10 transition-colors cursor-pointer mx-0.5 align-middle">
-                <BookOpen className="h-3 w-3 shrink-0" />
-                {part}
-              </button>
-            );
-          }
-          return <React.Fragment key={i}>{part}</React.Fragment>;
-        })}
-      </>
+      <button key={key}
+        onClick={() => mat ? downloadMat(mat) : setApiError(`Materi "${title}" tidak ditemukan di pustaka kelasmu.`)}
+        title={mat ? `Unduh: ${mat.title}` : title}
+        className="mx-0.5 inline-flex items-center gap-1 rounded-[4px] border border-primary/30 bg-primary-soft px-1.5 py-0.5 align-middle text-[11px] font-semibold text-primary hover:bg-primary/10 transition-colors">
+        <BookOpen className="h-3 w-3 shrink-0" />
+        {part.replace(/^\[|\]$/g, "")}
+      </button>
     );
+  }
+
+  function renderContent(content: string) {
+    return <ChatMarkdown content={content} renderSource={renderSource} />;
   }
 
   async function send(text: string) {
@@ -7345,7 +7343,7 @@ function StudentTutor() {
                 <Sparkles className="h-3.5 w-3.5" />
               </div>
               <div className="max-w-[82%]">
-                <div className="rounded-[12px] rounded-tl-sm bg-surface border border-border px-4 py-3 text-[13px] leading-relaxed text-ink shadow-sm whitespace-pre-wrap">
+                <div className="rounded-[12px] rounded-tl-sm bg-surface border border-border px-4 py-3 text-[14px] leading-relaxed text-ink shadow-sm">
                   {renderContent(m.content)}
                 </div>
                 {m.timestamp && <p className="text-[10px] text-ink-tertiary mt-1">{m.timestamp}</p>}

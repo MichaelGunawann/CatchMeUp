@@ -3,20 +3,15 @@ export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
-import { extractPptxText, sampleTextForPrompt, documentSegment } from "@/lib/office-text";
+import { sampleTextForPrompt, documentSegment } from "@/lib/office-text";
 import { MAX_QUESTIONS_PER_CALL, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
+import { cacheMaterialText, extractTextFromBuffer } from "@/lib/material-text";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
   if (_groq) return _groq;
   _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   return _groq;
-}
-
-async function extractPdfText(buffer: Buffer): Promise<string> {
-  const { extractText } = await import("unpdf");
-  const { text } = await extractText(new Uint8Array(buffer), { mergePages: true });
-  return text.trim();
 }
 
 /**
@@ -37,6 +32,8 @@ export async function POST(req: Request) {
   let segment = 0;
   let segments = 1;
   let avoid: string[] = [];
+  let storagePath = "";
+  let cachedText = "";
 
   if (contentType.includes("application/json")) {
     const body = await req.json() as {
@@ -48,6 +45,7 @@ export async function POST(req: Request) {
     segment = body.segment ?? 0;
     segments = body.segments ?? 1;
     avoid = Array.isArray(body.avoid) ? body.avoid : [];
+    storagePath = body.storagePath ?? "";
     if (!body.storagePath) return Response.json({ error: "storagePath tidak ditemukan.", questions: [] }, { status: 400 });
     // The format comes from the stored object's real extension - callers
     // pass the material TITLE as fileName (no extension), which used to make
@@ -59,11 +57,28 @@ export async function POST(req: Request) {
     materialTitle = body.materialTitle ?? "";
     subject = body.subject ?? "";
 
-    const { data, error } = await supabaseAdmin.storage.from("materials").download(body.storagePath);
-    if (error || !data) {
-      return Response.json({ error: `Gagal mengambil file dari penyimpanan: ${error?.message ?? "unknown"}`, questions: [] }, { status: 500 });
+    // Material id is the storage file's base name ({school}/{id}.{ext}).
+    // If its text was already extracted (cached for the AI tutor), reuse it
+    // instead of downloading and parsing the file again for every batch.
+    const materialId = body.storagePath.split("/").pop()?.replace(/\.[^.]+$/, "") ?? "";
+    if (materialId) {
+      const { data: cached } = await supabaseAdmin.from("materials").select("content_text").eq("id", materialId).maybeSingle()
+        .then(r => r, () => ({ data: null }));
+      const text = (cached as { content_text?: string | null } | null)?.content_text;
+      if (text) cachedText = text;
     }
-    file = new File([await data.arrayBuffer()], fileName);
+
+    const { data, error } = cachedText
+      ? { data: null, error: null }
+      : await supabaseAdmin.storage.from("materials").download(body.storagePath);
+    if (!cachedText) {
+      if (error || !data) {
+        return Response.json({ error: `Gagal mengambil file dari penyimpanan: ${error?.message ?? "unknown"}`, questions: [] }, { status: 500 });
+      }
+      file = new File([await data.arrayBuffer()], fileName);
+    } else {
+      file = new File([], fileName);
+    }
   } else {
     const formData = await req.formData();
     file = formData.get("file") as File | null;
@@ -80,16 +95,13 @@ export async function POST(req: Request) {
   let extractedText = "";
 
   try {
-    if (name.endsWith(".pdf")) {
-      extractedText = await extractPdfText(buffer);
-    } else if (name.endsWith(".docx")) {
-      const mammoth = await import("mammoth");
-      const result = await mammoth.extractRawText({ buffer });
-      extractedText = result.value.trim();
-    } else if (name.endsWith(".pptx")) {
-      extractedText = extractPptxText(buffer);
-    } else if (name.endsWith(".txt")) {
-      extractedText = await file.text();
+    if (cachedText) {
+      extractedText = cachedText;
+    } else if (name.endsWith(".pdf") || name.endsWith(".docx") || name.endsWith(".pptx") || name.endsWith(".txt")) {
+      // Page-marked text ("[hal. N]") - also cached for the student AI tutor.
+      extractedText = await extractTextFromBuffer(buffer, name);
+      const materialId = storagePath.split("/").pop()?.replace(/\.[^.]+$/, "");
+      if (materialId && extractedText) await cacheMaterialText(materialId, extractedText);
     } else if (name.endsWith(".ppt") || name.endsWith(".doc")) {
       return Response.json({
         error: `Format lama .${name.split(".").pop()} tidak bisa dibaca AI. Simpan ulang file sebagai ${name.endsWith(".ppt") ? "PPTX" : "DOCX"} atau PDF, lalu unggah ulang.`,

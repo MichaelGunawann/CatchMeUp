@@ -3,6 +3,8 @@ export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
+import { getMaterialText } from "@/lib/material-text";
+import { chunkMaterial, retrieve, type Chunk } from "@/lib/retrieval";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -11,101 +13,141 @@ function getGroq(): Groq {
   return _groq;
 }
 
-const NO_MATERIAL_MSG =
-  "Maaf, kami belum bisa menjawab karena tidak ada materi ini di pustaka. Minta gurumu untuk mengunggah materi terlebih dahulu agar AI Companion dapat membantu.";
-
 type TeachingStyle = "socratic" | "explicit" | "analogy";
-type StudentAiSettings = { style: TeachingStyle; groundingRequired: boolean };
-
-const DEFAULT_SETTINGS: StudentAiSettings = { style: "socratic", groundingRequired: true };
 
 const STYLE_INSTRUCTIONS: Record<TeachingStyle, string> = {
   socratic:
-    "GAYA MENGAJAR: Socratic. Jangan langsung memberi jawaban akhir. Pandu siswa dengan 1-3 pertanyaan penuntun bertahap, beri petunjuk kecil, dan minta siswa mencoba langkah berikutnya sendiri.",
+    "Gaya mengajar: Socratic. Untuk soal/latihan, jangan langsung memberi jawaban akhir - pandu dengan 1-2 pertanyaan penuntun dan petunjuk kecil, lalu ajak siswa mencoba. Untuk permintaan penjelasan materi, tetap jelaskan dengan jelas lalu ajukan satu pertanyaan cek pemahaman.",
   explicit:
-    "GAYA MENGAJAR: Eksplisit. Jelaskan langsung langkah demi langkah secara terstruktur dan bernomor (Langkah 1, Langkah 2, ...), lalu tutup dengan ringkasan jawaban.",
+    "Gaya mengajar: Eksplisit. Jelaskan langsung langkah demi langkah (Langkah 1, Langkah 2, ...), lalu tutup dengan ringkasan singkat.",
   analogy:
-    "GAYA MENGAJAR: Analogi. Jelaskan konsep dengan perumpamaan dari kehidupan sehari-hari terlebih dahulu, baru hubungkan kembali ke konsep formalnya.",
+    "Gaya mengajar: Analogi. Mulai dengan perumpamaan dari kehidupan sehari-hari anak, lalu hubungkan ke konsep di materi.",
 };
 
-// The teacher's "Konfigurasi AI" (teacher_ai_settings) for the signed-in
-// student's class. A class can have several teachers (one per subject);
-// the most recently updated setting wins. Falls back to the defaults for
-// anonymous/non-student callers or when no teacher has saved settings yet.
-async function loadStudentAiSettings(req: Request): Promise<StudentAiSettings> {
-  try {
-    const authHeader = req.headers.get("authorization");
-    if (!authHeader?.startsWith("Bearer ")) return DEFAULT_SETTINGS;
-    const { data: authData } = await supabaseAdmin.auth.getUser(authHeader.slice(7));
-    if (!authData.user) return DEFAULT_SETTINGS;
-    const { data: profile } = await supabaseAdmin
-      .from("user_profiles").select("id, role").eq("auth_user_id", authData.user.id).single();
-    if (!profile || profile.role !== "STUDENT") return DEFAULT_SETTINGS;
-    const { data: student } = await supabaseAdmin
-      .from("students").select("class_id").eq("user_profile_id", profile.id).single();
-    if (!student?.class_id) return DEFAULT_SETTINGS;
-    const { data: assignments } = await supabaseAdmin
-      .from("teacher_assignments").select("teacher_id").eq("class_id", student.class_id);
-    const teacherIds = [...new Set((assignments ?? []).map(a => a.teacher_id as string))];
-    if (teacherIds.length === 0) return DEFAULT_SETTINGS;
+type Ctx = {
+  style: TeachingStyle;
+  groundingRequired: boolean;
+  materials: Array<{ id: string; title: string; subject: string; chapter: string | null; file_url: string | null; content_text?: string | null }>;
+};
+
+/**
+ * Resolves the signed-in student, their class's teacher AI settings and the
+ * class materials (server-side - the client used to send only material
+ * titles, so the model never saw any actual content).
+ */
+async function loadContext(req: Request): Promise<Ctx | null> {
+  const authHeader = req.headers.get("authorization");
+  if (!authHeader?.startsWith("Bearer ")) return null;
+  const { data: authData } = await supabaseAdmin.auth.getUser(authHeader.slice(7));
+  if (!authData.user) return null;
+  const { data: profile } = await supabaseAdmin
+    .from("user_profiles").select("id, role").eq("auth_user_id", authData.user.id).single();
+  if (!profile || profile.role !== "STUDENT") return null;
+  const { data: student } = await supabaseAdmin
+    .from("students").select("school_id, class_id, status").eq("user_profile_id", profile.id).single();
+  if (!student || student.status !== "ACTIVE") return null;
+
+  const [{ data: assignments }, { data: mats }] = await Promise.all([
+    student.class_id
+      ? supabaseAdmin.from("teacher_assignments").select("teacher_id").eq("class_id", student.class_id)
+      : Promise.resolve({ data: [] as Array<{ teacher_id: string }> }),
+    supabaseAdmin.from("materials").select("*, subjects(name)")
+      .eq("school_id", student.school_id).eq("status", "active")
+      .or(student.class_id ? `class_id.eq.${student.class_id},class_id.is.null` : "class_id.is.null"),
+  ]);
+
+  let style: TeachingStyle = "socratic";
+  let groundingRequired = true;
+  const teacherIds = [...new Set((assignments ?? []).map(a => a.teacher_id as string))];
+  if (teacherIds.length > 0) {
     const { data: settings } = await supabaseAdmin
-      .from("teacher_ai_settings")
-      .select("active_style, grounding_required")
-      .in("teacher_id", teacherIds)
-      .order("updated_at", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    if (!settings) return DEFAULT_SETTINGS;
-    return {
-      style: (["socratic", "explicit", "analogy"].includes(settings.active_style) ? settings.active_style : "socratic") as TeachingStyle,
-      groundingRequired: settings.grounding_required !== false,
-    };
-  } catch {
-    return DEFAULT_SETTINGS;
+      .from("teacher_ai_settings").select("active_style, grounding_required")
+      .in("teacher_id", teacherIds).order("updated_at", { ascending: false }).limit(1).maybeSingle();
+    if (settings) {
+      if (["socratic", "explicit", "analogy"].includes(settings.active_style)) style = settings.active_style as TeachingStyle;
+      groundingRequired = settings.grounding_required !== false;
+    }
   }
+
+  return {
+    style,
+    groundingRequired,
+    materials: ((mats ?? []) as Array<Record<string, unknown> & { subjects: { name: string } | null }>).map(m => ({
+      id: m.id as string,
+      title: m.title as string,
+      subject: m.subjects?.name ?? "Umum",
+      chapter: (m.chapter as string | null) ?? null,
+      file_url: (m.file_url as string | null) ?? null,
+      content_text: (m.content_text as string | null | undefined) ?? null,
+    })),
+  };
+}
+
+function excerptBlock(chunks: Chunk[]): string {
+  return chunks.map(c => `<<${c.materialTitle}${c.page ? `, hal. ${c.page}` : ""}>>\n${c.text}`).join("\n\n");
+}
+
+function sse(text: string) {
+  const encoder = new TextEncoder();
+  return new Response(new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    },
+  }), { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
 }
 
 export async function POST(req: Request) {
-  const { messages, materials } = await req.json() as {
-    messages: { role: "user" | "assistant"; content: string }[];
-    materials?: { title: string; topic: string }[];
-  };
-  const settings = await loadStudentAiSettings(req);
+  const { messages } = await req.json() as { messages: { role: "user" | "assistant"; content: string }[] };
+  const ctx = await loadContext(req);
+  if (!ctx) return sse("Sesi kamu sudah habis. Silakan muat ulang halaman atau masuk lagi, ya.");
 
-  if (!materials?.length && settings.groundingRequired) {
-    const encoder = new TextEncoder();
-    const stream = new ReadableStream({
-      start(controller) {
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text: NO_MATERIAL_MSG })}\n\n`));
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-      },
-    });
-    return new Response(stream, {
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
-    });
-  }
+  const lastUser = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
+  // Follow-ups ("lanjutkan", "contohnya?") need the previous question's topic too.
+  const prevUser = messages.filter(m => m.role === "user").slice(-2, -1)[0]?.content ?? "";
+  const query = `${lastUser} ${lastUser.length < 40 ? prevUser : ""}`;
 
-  const materialList = (materials ?? []).map(m => `- ${m.title} (Topik: ${m.topic})`).join("\n");
-  const rules = settings.groundingRequired
-    ? `ATURAN KETAT:
-1. Kamu HANYA boleh menjawab berdasarkan materi yang ada di daftar berikut. JANGAN menjawab topik yang tidak ada dalam daftar materi.
-2. Jika pertanyaan tidak berkaitan dengan materi yang tersedia, jawab PERSIS dengan: "Maaf, kami belum bisa menjawab karena tidak ada materi ini di pustaka."
-3. Setiap penjelasan HARUS mencantumkan sumber dokumen dengan format: [Sumber: Nama Dokumen, hal. X]
-4. Jawab dalam Bahasa Indonesia yang jelas dan mudah dipahami siswa.`
-    : `ATURAN:
-1. Utamakan materi dari daftar berikut. Jika jawabanmu berasal dari materi tersebut, cantumkan sumber dengan format: [Sumber: Nama Dokumen, hal. X]
-2. Untuk pertanyaan pelajaran di luar daftar materi, kamu boleh menjawab dari pengetahuan umum, tetapi sebutkan bahwa jawaban tersebut tidak berasal dari materi guru.
-3. Tolak dengan sopan pertanyaan yang tidak berkaitan dengan pelajaran sekolah.
-4. Jawab dalam Bahasa Indonesia yang jelas dan mudah dipahami siswa.`;
-  const systemPrompt = `Kamu adalah AI Companion untuk siswa di platform Catch Up Indonesia.
+  // Read the class materials and pick the passages relevant to the question.
+  // A material not read yet (uploaded before text caching existed) is read
+  // now, but never holds the reply hostage: after 20s it is skipped for this
+  // answer (extraction keeps going and is cached for the next one).
+  const withTimeout = (p: Promise<string>) =>
+    Promise.race([p, new Promise<string>(resolve => setTimeout(() => resolve(""), 20_000))]);
+  const texts = await Promise.all(ctx.materials.map(async m => ({ m, text: await withTimeout(getMaterialText(m)) })));
+  const chunks = texts.flatMap(({ m, text }) => chunkMaterial(m.title, text));
+  const excerpts = retrieve(chunks, query);
+  const unreadable = texts.filter(t => !t.text).map(t => t.m.title);
 
-${rules}
+  const materialList = ctx.materials.length
+    ? ctx.materials.map(m => `- "${m.title}" (mapel: ${m.subject}${m.chapter ? `, bab/topik: ${m.chapter}` : ""})`).join("\n")
+    : "(guru belum mengunggah materi)";
 
-${STYLE_INSTRUCTIONS[settings.style]}
+  const groundingRules = ctx.groundingRequired
+    ? `- Untuk isi pelajaran, jawab HANYA berdasarkan KUTIPAN MATERI di bawah. Jangan mengarang fakta yang tidak ada di kutipan.
+- Jika jawabannya tidak ada di kutipan, katakan dengan ramah bahwa bagian itu belum ada di materi dari guru, sebutkan materi apa saja yang tersedia, dan sarankan bertanya ke guru. Jangan menjawab dari pengetahuan umum.`
+    : `- Utamakan KUTIPAN MATERI di bawah. Jika tidak ada di kutipan, boleh menjelaskan dari pengetahuan umum, tetapi katakan bahwa penjelasan itu bukan dari materi guru.`;
 
-MATERI YANG TERSEDIA:
-${materialList || "(belum ada materi yang diunggah guru)"}`;
+  const systemPrompt = `Kamu adalah "Kak AI", teman belajar yang ramah untuk siswa sekolah di Indonesia (termasuk anak SD). Kamu berbicara dalam Bahasa Indonesia yang hangat, sederhana, dan jelas.
+
+CARA MENGOBROL:
+- Boleh membalas sapaan, basa-basi singkat, dan pertanyaan lanjutan dengan wajar. Ingat isi percakapan sebelumnya.
+- Jika siswa meminta "jelaskan bab X", ringkas isi bab itu dari kutipan: poin-poin utamanya, satu contoh sederhana, lalu tanyakan bagian mana yang ingin dibahas lebih dalam.
+- Kalimat pendek. Pakai poin-poin atau langkah bernomor bila membantu. Boleh **menebalkan** istilah penting. Maksimal sekitar 200 kata kecuali siswa minta lebih panjang.
+- Jangan membahas daftar dokumen atau cara kerja sistem kecuali ditanya.
+- Tolak dengan sopan topik yang tidak pantas atau tidak berhubungan dengan belajar.
+
+ATURAN MATERI:
+${groundingRules}
+- Setiap kali memakai isi kutipan, sebutkan sumbernya dengan format persis: [Sumber: Judul Materi, hal. N] (pakai nomor halaman dari tanda <<Judul, hal. N>>).
+
+${STYLE_INSTRUCTIONS[ctx.style]}
+
+MATERI DARI GURU UNTUK KELAS INI:
+${materialList}${unreadable.length ? `\n(Teks materi berikut belum bisa dibaca, misalnya PDF hasil scan: ${unreadable.join(", ")})` : ""}
+
+KUTIPAN MATERI YANG RELEVAN DENGAN PERTANYAAN:
+${excerpts.length ? excerptBlock(excerpts) : "(tidak ada kutipan yang cocok dengan pertanyaan ini)"}`;
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -115,17 +157,15 @@ ${materialList || "(belum ada materi yang diunggah guru)"}`;
           model: "openai/gpt-oss-120b",
           messages: [
             { role: "system", content: systemPrompt },
-            ...messages.map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
+            ...messages.slice(-20).map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
           ],
           stream: true,
-          max_tokens: 1024,
+          temperature: 0.4,
+          max_tokens: 2048,
         });
-
         for await (const chunk of response) {
           const text = chunk.choices[0]?.delta?.content ?? "";
-          if (text) {
-            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
-          }
+          if (text) controller.enqueue(encoder.encode(`data: ${JSON.stringify({ text })}\n\n`));
         }
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
@@ -138,10 +178,6 @@ ${materialList || "(belum ada materi yang diunggah guru)"}`;
   });
 
   return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-    },
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
   });
 }
