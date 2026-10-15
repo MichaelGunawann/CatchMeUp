@@ -1,5 +1,7 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import Groq from "groq-sdk";
+import { getMaterialText } from "@/lib/material-text";
+import { chunkMaterial, retrieve } from "@/lib/retrieval";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -77,6 +79,12 @@ export async function POST(req: Request) {
       return Response.json({ error: "Mata pelajaran ini tidak diajarkan di kelasmu" }, { status: 403 });
     }
 
+    // ── Adaptive selection ──
+    // Candidates = active bank questions for this class+subject (+ filters).
+    // Ranked so practice targets what THIS student needs: weakest topics
+    // first (accuracy from their practice + graded exams), never-attempted
+    // questions before repeats, recently-correct questions last, with a
+    // little randomness so sessions vary.
     let query = supabaseAdmin
       .from("questions")
       .select("id, question, options, topic, difficulty, correct_answer, explanation")
@@ -84,26 +92,81 @@ export async function POST(req: Request) {
       .eq("class_id", student.class_id)
       .eq("subject_id", subjectId)
       .eq("status", "active")
-      .limit(wantCount);
+      .limit(300);
     if (difficulty) query = query.eq("difficulty", difficulty);
     if (topic) query = query.ilike("topic", `%${topic}%`);
+    const { data: candidates } = await query;
 
-    const { data: existing } = await query;
-    const found = existing ?? [];
+    const { data: history } = await supabaseAdmin
+      .from("practice_attempts")
+      .select("question_id, is_correct, submitted_at, questions(topic)")
+      .eq("student_id", student.id)
+      .order("submitted_at", { ascending: false })
+      .limit(1000);
+    const topicStats = new Map<string, { correct: number; total: number }>();
+    const lastResult = new Map<string, boolean>(); // most recent result per question
+    for (const h of (history ?? []) as unknown as Array<{ question_id: string; is_correct: boolean; questions: { topic: string } | null }>) {
+      if (!lastResult.has(h.question_id)) lastResult.set(h.question_id, h.is_correct);
+      const t = (h.questions?.topic ?? "").toLowerCase();
+      if (!t) continue;
+      const cur = topicStats.get(t) ?? { correct: 0, total: 0 };
+      cur.total += 1; if (h.is_correct) cur.correct += 1;
+      topicStats.set(t, cur);
+    }
+    const accuracy = (t: string) => {
+      const st = topicStats.get(t.toLowerCase());
+      return st && st.total > 0 ? st.correct / st.total : 0.5;
+    };
+    const ranked = (candidates ?? [])
+      .map(q => {
+        const last = lastResult.get(q.id);
+        let score = (1 - accuracy(q.topic)) * 2;          // weak topic -> higher
+        if (last === undefined) score += 0.6;            // never tried
+        else if (last === true) score -= 0.8;            // already mastered
+        else score += 0.3;                               // got it wrong before
+        return { q, score: score + Math.random() * 0.5 };
+      })
+      .sort((x, y) => y.score - x.score);
+    // Spread over topics: at most 3 from one topic before moving on.
+    const perTopic = new Map<string, number>();
+    const found: NonNullable<typeof candidates> = [];
+    for (const { q } of ranked) {
+      if (found.length >= wantCount) break;
+      const n = perTopic.get(q.topic) ?? 0;
+      if (n >= 3 && ranked.length > wantCount * 2) continue;
+      perTopic.set(q.topic, n + 1);
+      found.push(q);
+    }
 
     let generated: typeof found = [];
     if (found.length < wantCount) {
       const shortfall = wantCount - found.length;
       try {
         const { data: subjectRow } = await supabaseAdmin.from("subjects").select("name").eq("id", subjectId).single();
-        const prompt = `Buat ${shortfall} soal pilihan ganda (A-D) bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
+
+        // Ground new questions in the teacher's materials for this subject:
+        // pick the passages most relevant to the topic (or spread across the
+        // material when practising "Semua").
+        const { data: mats } = await supabaseAdmin.from("materials").select("*")
+          .eq("school_id", student.school_id).eq("subject_id", subjectId).eq("status", "active")
+          .or(`class_id.eq.${student.class_id},class_id.is.null`);
+        const texts = await Promise.all(((mats ?? []) as Array<{ id: string; title: string; file_url: string | null; content_text?: string | null }>)
+          .map(async m => ({ title: m.title, text: await Promise.race([getMaterialText(m), new Promise<string>(r => setTimeout(() => r(""), 15_000))]) })));
+        const chunks = texts.flatMap(t => chunkMaterial(t.title, t.text));
+        const excerpts = retrieve(chunks, topic ?? subjectRow?.name ?? "", 7000);
+        const grounding = excerpts.length
+          ? `\n\nBuat soal BERDASARKAN kutipan materi dari guru berikut (jangan keluar dari isinya). Isi "sourceTitle" dan "sourcePage" sesuai tanda <<Judul, hal. N>>:\n${excerpts.map(c => `<<${c.materialTitle}${c.page ? `, hal. ${c.page}` : ""}>>\n${c.text}`).join("\n\n")}`
+          : "";
+
+        const prompt = `Buat ${shortfall} soal latihan pilihan ganda (A-D) bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
           topic ? ` topik "${topic}"` : ""
-        } tingkat kesulitan "${difficulty ?? "Sedang"}". Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":"","C":"","D":""},"correctAnswer":"A","explanation":"","topic":""}]}
+        } tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana dan jelas, sesuai tingkat materi.${grounding}
+Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":"","C":"","D":""},"correctAnswer":"A","explanation":"","topic":"","sourceTitle":"","sourcePage":1}]}
 SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langkah demi langkah dan pastikan hasilnya benar-benar cocok dengan salah satu dari 4 pilihan. correctAnswer HARUS konsisten dengan explanation.`;
         const completion = await getGroq().chat.completions.create({
           model: "openai/gpt-oss-120b",
           messages: [{ role: "user", content: prompt }],
-          max_tokens: 2000,
+          max_tokens: 4000,
           temperature: 0.3,
         });
         const text = completion.choices[0].message.content ?? "{}";
@@ -115,6 +178,8 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
           correctAnswer: string;
           explanation: string;
           topic: string;
+          sourceTitle?: string;
+          sourcePage?: number;
         }>;
 
         if (raw.length > 0) {
@@ -136,6 +201,8 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
               | "E",
             explanation: q.explanation,
             status: "active" as const,
+            source_title: q.sourceTitle || "Latihan AI",
+            source_page: Number.isInteger(q.sourcePage) ? q.sourcePage : null,
           }));
           const { data: inserted } = await supabaseAdmin.from("questions").insert(rows).select(
             "id, question, options, topic, difficulty, correct_answer, explanation"
