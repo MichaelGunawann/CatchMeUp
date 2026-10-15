@@ -546,7 +546,7 @@ export type ChatMessage = {
 export const assistantGreeting: ChatMessage = {
   id: "greeting",
   role: "assistant",
-  content: "Halo Andi! Saya AI Companion kamu. Kamu bisa tanya apa saja tentang materi yang sudah gurumu upload. Saya hanya menjawab berdasarkan materi tersebut — dengan referensi halaman yang jelas.",
+  content: "Halo! Saya AI Companion kamu. Kamu bisa tanya apa saja tentang materi yang sudah gurumu upload. Saya hanya menjawab berdasarkan materi tersebut — dengan referensi halaman yang jelas.",
   grounded: true
 };
 

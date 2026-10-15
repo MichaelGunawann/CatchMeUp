@@ -1196,9 +1196,11 @@ function useQuestionBank(classId: string | undefined, subjectId: string | undefi
 type TeacherAiSettings = {
   activeStyle: "socratic" | "explicit" | "analogy";
   grounding: boolean; autoReview: boolean; parentReports: boolean; bloomBalance: boolean; notifyWeak: boolean;
+  personaName: string; languageStyle: "santai" | "baku"; helpLevel: "petunjuk" | "bertahap" | "lengkap";
 };
 const DEFAULT_AI_SETTINGS: TeacherAiSettings = {
   activeStyle: "socratic", grounding: true, autoReview: false, parentReports: true, bloomBalance: true, notifyWeak: true,
+  personaName: "Kak AI", languageStyle: "santai", helpLevel: "bertahap",
 };
 let _aiSettingsCache: { teacherId: string; settings: TeacherAiSettings } | null = null;
 
@@ -1206,7 +1208,7 @@ async function fetchTeacherAiSettings(teacherId: string): Promise<TeacherAiSetti
   if (_aiSettingsCache?.teacherId === teacherId) return _aiSettingsCache.settings;
   const { data } = await supabase
     .from("teacher_ai_settings")
-    .select("active_style, grounding_required, auto_review, parent_reports, bloom_balance, notify_weak")
+    .select("*") // persona columns (migration 023) may not exist yet
     .eq("teacher_id", teacherId)
     .maybeSingle();
   const settings: TeacherAiSettings = data ? {
@@ -1216,6 +1218,9 @@ async function fetchTeacherAiSettings(teacherId: string): Promise<TeacherAiSetti
     parentReports: data.parent_reports,
     bloomBalance: data.bloom_balance,
     notifyWeak: data.notify_weak,
+    personaName: data.persona_name ?? DEFAULT_AI_SETTINGS.personaName,
+    languageStyle: data.language_style === "baku" ? "baku" : "santai",
+    helpLevel: (["petunjuk", "bertahap", "lengkap"].includes(data.help_level) ? data.help_level : "bertahap") as TeacherAiSettings["helpLevel"],
   } : DEFAULT_AI_SETTINGS;
   _aiSettingsCache = { teacherId, settings };
   return settings;
@@ -1230,8 +1235,12 @@ async function saveTeacherAiSettings(teacherId: string, settings: TeacherAiSetti
     parent_reports: settings.parentReports,
     bloom_balance: settings.bloomBalance,
     notify_weak: settings.notifyWeak,
+    persona_name: settings.personaName.trim() || DEFAULT_AI_SETTINGS.personaName,
+    language_style: settings.languageStyle,
+    help_level: settings.helpLevel,
     updated_at: new Date().toISOString(),
   }, { onConflict: "teacher_id" });
+  if (isMissingColumnError(error)) return "Kolom persona belum ada di database. Jalankan migrasi 023 terlebih dahulu.";
   if (error) return error.message;
   _aiSettingsCache = { teacherId, settings };
   return null;
@@ -1299,6 +1308,7 @@ async function saveManualQToBank(
   if (!q.text.trim() || !q.optA.trim() || !q.optB.trim() || !q.optC.trim() || !q.optD.trim() || !q.topic.trim()) {
     return "Lengkapi semua kolom bertanda *.";
   }
+  if (!["A", "B", "C", "D"].includes(q.correct)) return "Kunci jawaban wajib diisi.";
   const { error } = await supabase.from("questions").insert({
     school_id: schoolId,
     class_id: classId,
@@ -1311,7 +1321,7 @@ async function saveManualQToBank(
     bloom_level: "Menerapkan",
     question: q.text.trim(),
     options: { A: q.optA.trim(), B: q.optB.trim(), C: q.optC.trim(), D: q.optD.trim() },
-    correct_answer: (["A", "B", "C", "D"].includes(q.correct) ? q.correct : "A") as "A" | "B" | "C" | "D",
+    correct_answer: q.correct as "A" | "B" | "C" | "D",
     explanation: q.explanation.trim(),
     status: "active",
     source_title: "Manual Guru",
@@ -1348,8 +1358,9 @@ function ManualQuestionFields({ value, onChange, errorFor }: {
         );
       })}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <FormField label="Kunci Jawaban" required>
-          <SelectField value={value.correct} options={ANSWER_OPTIONS} onChange={v => set("correct", v)} />
+        <FormField label="Kunci Jawaban" required error={errorFor("correct") ? "Kunci jawaban wajib diisi" : null}>
+          <SelectField value={value.correct} options={ANSWER_OPTIONS} placeholder="Pilih kunci..."
+            invalid={!!errorFor("correct")} onChange={v => set("correct", v)} />
         </FormField>
         <FormField label="Kesulitan" required>
           <SelectField value={value.difficulty} options={DIFFICULTY_OPTIONS} onChange={v => set("difficulty", v)} />
@@ -1369,7 +1380,7 @@ function ManualQuestionFields({ value, onChange, errorFor }: {
   );
 }
 
-const MANUAL_Q_REQUIRED: (keyof typeof EMPTY_MANUAL_Q)[] = ["text", "optA", "optB", "optC", "optD", "topic"];
+const MANUAL_Q_REQUIRED: (keyof typeof EMPTY_MANUAL_Q)[] = ["text", "optA", "optB", "optC", "optD", "correct", "topic"];
 
 function pendingToApprovePayload(m: PendingQuestion) {
   return {
@@ -1767,8 +1778,9 @@ async function uploadNewMaterial(file: File, params: {
   return { id: inserted.id, path: ticket.path };
 }
 
-async function updateMaterialMetadata(id: string, meta: { type: string; chapter: string; academicYear: string; publisher: string; sourceType: string }): Promise<string | null> {
+async function updateMaterialMetadata(id: string, meta: { title: string; type: string; chapter: string; academicYear: string; publisher: string; sourceType: string }): Promise<string | null> {
   const { data, error } = await supabase.from("materials").update({
+    title: meta.title,
     type: meta.type,
     chapter: meta.chapter || null,
     academic_year: meta.academicYear || null,
@@ -1994,9 +2006,9 @@ function TeacherMaterials() {
   const [confirmDeleteMaterial, setConfirmDeleteMaterial] = useState<MaterialWithFile | null>(null);
   const [materialQuestions, setMaterialQuestions] = useState<Record<string, typeof questionBank>>({});
   const [generatingMore, setGeneratingMore] = useState<string | null>(null);
-  const [metaForm, setMetaForm] = useState({ type: "Modul Ajar", chapter: "", academicYear: "", publisher: "", sourceType: "" });
+  const [metaForm, setMetaForm] = useState({ title: "", type: "Modul Ajar", chapter: "", academicYear: "", publisher: "", sourceType: "" });
   const [savingMeta, setSavingMeta] = useState(false);
-  const metaValidation = useRequiredFields(metaForm, ["chapter", "academicYear"]);
+  const metaValidation = useRequiredFields(metaForm, ["title", "chapter", "academicYear"]);
 
   // Upload form
   const emptyUploadForm = { classId: "", subjectId: "", chapter: "", academicYear: "", type: "Modul Ajar", publisher: "", sourceType: "" };
@@ -2540,6 +2552,11 @@ function TeacherMaterials() {
                 </div>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <FormField label="Judul Materi" required error={metaValidation.errorFor("title")} className="md:col-span-2">
+                    <input type="text" placeholder="Contoh: Buku Matematika Kelas 6" value={metaForm.title} maxLength={200}
+                      onChange={e => setMetaForm(p => ({ ...p, title: e.target.value }))}
+                      className={fieldClass(!!metaValidation.errorFor("title"))} />
+                  </FormField>
                   <FormField label="Bab / Topik" required error={metaValidation.errorFor("chapter")}>
                     <input type="text" placeholder="Contoh: Bab 3 - Perkalian" value={metaForm.chapter}
                       onChange={e => setMetaForm(p => ({ ...p, chapter: e.target.value }))}
@@ -2647,14 +2664,14 @@ function TeacherMaterials() {
               </button>
               <button onClick={() => {
                 if (!editMeta) {
-                  setMetaForm({ type: m.type, chapter: m.chapter ?? "", academicYear: m.academicYear ?? "", publisher: m.publisher ?? "", sourceType: m.sourceType ?? "" });
+                  setMetaForm({ title: m.title, type: m.type, chapter: m.chapter ?? "", academicYear: m.academicYear ?? "", publisher: m.publisher ?? "", sourceType: m.sourceType ?? "" });
                   metaValidation.reset();
                 }
                 setEditMeta(!editMeta);
               }}
                 className="flex items-center gap-1.5 text-[12px] font-semibold text-primary hover:underline">
                 <Pencil className="h-3.5 w-3.5" />
-                {editMeta ? "Batalkan" : "Edit Metadata"}
+                {editMeta ? "Batalkan" : "Edit Materi"}
               </button>
               </div>
               <div className="flex gap-2">
@@ -2663,14 +2680,14 @@ function TeacherMaterials() {
                   ? <Button variant="default" className="h-8 text-[12px]" disabled={savingMeta} onClick={async () => {
                       if (!metaValidation.validate()) return;
                       setSavingMeta(true);
-                      const err = await updateMaterialMetadata(m.id, { ...metaForm, chapter: metaForm.chapter.trim(), publisher: metaForm.publisher.trim() });
+                      const err = await updateMaterialMetadata(m.id, { ...metaForm, title: metaForm.title.trim(), chapter: metaForm.chapter.trim(), publisher: metaForm.publisher.trim() });
                       setSavingMeta(false);
                       if (err) { setToast({ message: `Gagal menyimpan: ${err}`, tone: "primary" }); return; }
-                      const patch = { type: metaForm.type as MaterialType, chapter: metaForm.chapter.trim(), academicYear: metaForm.academicYear, publisher: metaForm.publisher.trim() || undefined, sourceType: metaForm.sourceType || undefined };
+                      const patch = { title: metaForm.title.trim(), type: metaForm.type as MaterialType, chapter: metaForm.chapter.trim(), academicYear: metaForm.academicYear, publisher: metaForm.publisher.trim() || undefined, sourceType: metaForm.sourceType || undefined };
                       setUploadedMaterials(prev => (prev ?? []).map(x => x.id === m.id ? { ...x, ...patch } : x));
                       setSelectedMaterial({ ...m, ...patch });
                       setEditMeta(false);
-                      setToast({ message: "Metadata materi tersimpan", tone: "success" });
+                      setToast({ message: "Perubahan materi tersimpan", tone: "success" });
                     }}>{savingMeta ? "Menyimpan..." : "Simpan Perubahan"}</Button>
                   : <Button variant="outline" className="h-8 text-[12px]" disabled={downloadingId === m.id} onClick={async () => {
                       setDownloadingId(m.id);
@@ -3071,7 +3088,7 @@ function TeacherAssessmentStyles() {
 const DIFFICULTY_OPTIONS: SelectOption[] = ["Mudah", "Sedang", "Sulit"].map(d => ({ value: d, label: d }));
 const ANSWER_OPTIONS: SelectOption[] = ["A", "B", "C", "D"].map(o => ({ value: o, label: o }));
 
-const EMPTY_MANUAL_Q = { text: "", optA: "", optB: "", optC: "", optD: "", correct: "A", difficulty: "Sedang", topic: "", explanation: "" };
+const EMPTY_MANUAL_Q = { text: "", optA: "", optB: "", optC: "", optD: "", correct: "", difficulty: "Sedang", topic: "", explanation: "" };
 
 function TeacherQuestionBank() {
   const teacher = useRealTeacher();
@@ -5339,6 +5356,15 @@ function TeacherRecommendations() {
 // ── Teacher AI Config ─────────────────────────────────────────────────────────
 
 const AI_STYLE_IDS: Record<string, TeacherAiSettings["activeStyle"]> = { s1: "socratic", s2: "explicit", s3: "analogy" };
+const LANGUAGE_STYLE_OPTIONS: SelectOption[] = [
+  { value: "santai", label: "Santai", description: "Akrab seperti kakak kelas, boleh emoji" },
+  { value: "baku", label: "Baku", description: "Bahasa Indonesia formal seperti guru di kelas" },
+];
+const HELP_LEVEL_OPTIONS: SelectOption[] = [
+  { value: "petunjuk", label: "Petunjuk saja", description: "AI tidak pernah memberi jawaban akhir soal" },
+  { value: "bertahap", label: "Bertahap", description: "Petunjuk dulu, jawaban setelah siswa mencoba" },
+  { value: "lengkap", label: "Lengkap", description: "Pembahasan lengkap sampai jawaban akhir" },
+];
 
 function TeacherAIConfig() {
   const { teacher, loading: teacherLoading } = useRealTeacherStatus();
@@ -5369,6 +5395,16 @@ function TeacherAIConfig() {
     } else {
       setToast({ message: "Pengaturan tersimpan", tone: "success" });
     }
+  }
+
+  const [nameDraft, setNameDraft] = useState("");
+  const [nameAttempted, setNameAttempted] = useState(false);
+  useEffect(() => { if (settings) setNameDraft(settings.personaName); }, [settings?.personaName]); // eslint-disable-line react-hooks/exhaustive-deps
+  const nameError = nameAttempted && !nameDraft.trim() ? "Nama AI wajib diisi" : null;
+  function saveName() {
+    setNameAttempted(true);
+    if (!nameDraft.trim() || !settings || nameDraft.trim() === settings.personaName) return;
+    update({ personaName: nameDraft.trim() }, "name");
   }
 
   type ToggleKey = "grounding" | "autoReview" | "parentReports" | "bloomBalance" | "notifyWeak";
@@ -5406,6 +5442,33 @@ function TeacherAIConfig() {
     <div className="space-y-6 max-w-3xl">
       <PageHeader eyebrow="Konfigurasi AI" title="Pengaturan AI Companion"
         description="Pengaturan ini langsung berlaku untuk AI Companion yang dipakai siswa di kelas yang kamu ajar." />
+      <div className="rounded-card border border-border bg-surface shadow-sm p-5">
+        <h3 className="text-[14px] font-bold text-ink mb-1">Persona AI</h3>
+        <p className="text-[12px] text-ink-secondary mb-4">Nama dan cara bicara AI saat menjawab siswa.</p>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <FormField label="Nama AI" required error={nameError} className="md:col-span-2">
+            <div className="flex gap-2">
+              <input type="text" value={nameDraft} maxLength={40} placeholder="Contoh: Kak AI, Bu Rina AI"
+                onChange={e => setNameDraft(e.target.value)}
+                onKeyDown={e => { if (e.key === "Enter") saveName(); }}
+                className={fieldClass(!!nameError)} />
+              <Button variant="default" className="h-9 shrink-0 text-[12px]"
+                disabled={!settings || savingKey !== null || nameDraft.trim() === settings.personaName}
+                onClick={saveName}>{savingKey === "name" ? "Menyimpan..." : "Simpan Nama"}</Button>
+            </div>
+          </FormField>
+          <FormField label="Gaya Bahasa">
+            <SelectField value={settings?.languageStyle ?? "santai"} options={LANGUAGE_STYLE_OPTIONS}
+              disabled={!settings || savingKey !== null}
+              onChange={v => update({ languageStyle: v as TeacherAiSettings["languageStyle"] }, "language")} />
+          </FormField>
+          <FormField label="Tingkat Bantuan">
+            <SelectField value={settings?.helpLevel ?? "bertahap"} options={HELP_LEVEL_OPTIONS}
+              disabled={!settings || savingKey !== null}
+              onChange={v => update({ helpLevel: v as TeacherAiSettings["helpLevel"] }, "help")} />
+          </FormField>
+        </div>
+      </div>
       <div className="rounded-card border border-border bg-surface shadow-sm p-5">
         <h3 className="text-[14px] font-bold text-ink mb-1">Gaya Mengajar AI</h3>
         <p className="text-[12px] text-ink-secondary mb-4">Pilih bagaimana AI membantu siswa menjawab pertanyaan.</p>
@@ -7363,6 +7426,21 @@ function StudentTutor() {
 
   useEffect(() => { fetchStudentMaterialsReal().then(rows => { setLocalMats(rows); setMatsLoaded(true); }); }, []);
 
+  // Name the teacher gave the AI (Pengaturan AI Companion -> Persona).
+  const [personaName, setPersonaName] = useState("Kak AI");
+  useEffect(() => {
+    let cancelled = false;
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!data.session) return;
+      try {
+        const res = await fetch("/api/chat", { headers: { Authorization: `Bearer ${data.session.access_token}` } });
+        const body = await res.json() as { name?: string };
+        if (!cancelled && body.name) setPersonaName(body.name);
+      } catch { /* keep the default name */ }
+    });
+    return () => { cancelled = true; };
+  }, []);
+
   // A question typed into Beranda's "Tanya AI" box arrives as ?q= and is
   // sent automatically once the class materials (the AI's grounding) load.
   const autoAskDone = React.useRef(false);
@@ -7505,8 +7583,9 @@ function StudentTutor() {
                 <Sparkles className="h-3.5 w-3.5" />
               </div>
               <div className="max-w-[82%]">
+                <p className="mb-1 text-[11px] font-semibold text-primary">{personaName}</p>
                 <div className="rounded-[12px] rounded-tl-sm bg-surface border border-border px-4 py-3 text-[14px] leading-relaxed text-ink shadow-sm">
-                  {renderContent(m.content)}
+                  {renderContent(m.id === "greeting" ? m.content.replace(/AI Companion/g, personaName) : m.content)}
                 </div>
                 {m.timestamp && <p className="text-[10px] text-ink-tertiary mt-1">{m.timestamp}</p>}
               </div>

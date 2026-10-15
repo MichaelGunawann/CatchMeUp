@@ -180,7 +180,8 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
           return parseQuestionsJson(completion.choices[0].message.content ?? "");
         };
         let rawList = await ask(grounding);
-        if (rawList.length === 0 && grounding) rawList = await ask("");
+        let groundedOk = !!grounding;
+        if (rawList.length === 0 && grounding) { rawList = await ask(""); groundedOk = false; }
         const raw = rawList as Array<{
           question: string;
           options: Record<string, string>;
@@ -210,8 +211,10 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
               | "E",
             explanation: q.explanation,
             status: "active" as const,
-            source_title: q.sourceTitle || "Latihan AI",
-            source_page: Number.isInteger(q.sourcePage) ? q.sourcePage : null,
+            // Only trust a cited source when the model was actually given the
+            // material excerpts - otherwise it invents book titles/pages.
+            source_title: (groundedOk && q.sourceTitle) || "Latihan AI",
+            source_page: groundedOk && Number.isInteger(q.sourcePage) ? q.sourcePage : null,
           }));
           const { data: inserted, error: insertError } = await supabaseAdmin.from("questions").insert(rows).select(
             "id, question, options, topic, difficulty, correct_answer, explanation"

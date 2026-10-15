@@ -24,11 +24,45 @@ const STYLE_INSTRUCTIONS: Record<TeachingStyle, string> = {
     "Gaya mengajar: Analogi. Mulai dengan perumpamaan dari kehidupan sehari-hari anak, lalu hubungkan ke konsep di materi.",
 };
 
-type Ctx = {
-  style: TeachingStyle;
-  groundingRequired: boolean;
+type LanguageStyle = "santai" | "baku";
+type HelpLevel = "petunjuk" | "bertahap" | "lengkap";
+
+const LANGUAGE_INSTRUCTIONS: Record<LanguageStyle, string> = {
+  santai: "Gaya bahasa: santai dan akrab seperti kakak kelas yang ramah (boleh \"kamu\", sesekali emoji), tetap sopan.",
+  baku: "Gaya bahasa: Bahasa Indonesia baku dan sopan seperti guru di kelas. Jangan memakai bahasa gaul, singkatan chat, atau emoji.",
+};
+
+const HELP_INSTRUCTIONS: Record<HelpLevel, string> = {
+  petunjuk: "Tingkat bantuan: HANYA PETUNJUK. Untuk soal atau tugas, jangan pernah menuliskan jawaban akhir atau hasil hitungan akhir - beri petunjuk, langkah pertama, atau pertanyaan penuntun saja, lalu minta siswa mencoba sendiri.",
+  bertahap: "Tingkat bantuan: BERTAHAP. Untuk soal, pandu dulu dengan petunjuk dan minta siswa mencoba. Berikan jawaban lengkap hanya setelah siswa mencoba atau masih bingung setelah dibantu.",
+  lengkap: "Tingkat bantuan: LENGKAP. Boleh memberi pembahasan lengkap sampai jawaban akhir, tetapi selalu jelaskan langkah dan alasannya agar siswa paham.",
+};
+
+type Persona = { name: string; style: TeachingStyle; language: LanguageStyle; help: HelpLevel; groundingRequired: boolean };
+
+type Ctx = Persona & {
   materials: Array<{ id: string; title: string; subject: string; chapter: string | null; file_url: string | null; content_text?: string | null }>;
 };
+
+const DEFAULT_PERSONA: Persona = { name: "Kak AI", style: "socratic", language: "santai", help: "bertahap", groundingRequired: true };
+
+/** The AI persona configured by the class's teachers (most recently updated settings win). */
+async function loadPersona(teacherIds: string[]): Promise<Persona> {
+  if (teacherIds.length === 0) return DEFAULT_PERSONA;
+  // select("*"): persona columns (migration 023) may not exist yet.
+  const { data } = await supabaseAdmin
+    .from("teacher_ai_settings").select("*")
+    .in("teacher_id", teacherIds).order("updated_at", { ascending: false }).limit(1).maybeSingle();
+  if (!data) return DEFAULT_PERSONA;
+  const name = typeof data.persona_name === "string" && data.persona_name.trim() ? data.persona_name.trim().slice(0, 40) : DEFAULT_PERSONA.name;
+  return {
+    name,
+    style: ["socratic", "explicit", "analogy"].includes(data.active_style) ? data.active_style as TeachingStyle : DEFAULT_PERSONA.style,
+    language: data.language_style === "baku" ? "baku" : "santai",
+    help: ["petunjuk", "bertahap", "lengkap"].includes(data.help_level) ? data.help_level as HelpLevel : DEFAULT_PERSONA.help,
+    groundingRequired: data.grounding_required !== false,
+  };
+}
 
 /**
  * Resolves the signed-in student, their class's teacher AI settings and the
@@ -56,22 +90,10 @@ async function loadContext(req: Request): Promise<Ctx | null> {
       .or(student.class_id ? `class_id.eq.${student.class_id},class_id.is.null` : "class_id.is.null"),
   ]);
 
-  let style: TeachingStyle = "socratic";
-  let groundingRequired = true;
   const teacherIds = [...new Set((assignments ?? []).map(a => a.teacher_id as string))];
-  if (teacherIds.length > 0) {
-    const { data: settings } = await supabaseAdmin
-      .from("teacher_ai_settings").select("active_style, grounding_required")
-      .in("teacher_id", teacherIds).order("updated_at", { ascending: false }).limit(1).maybeSingle();
-    if (settings) {
-      if (["socratic", "explicit", "analogy"].includes(settings.active_style)) style = settings.active_style as TeachingStyle;
-      groundingRequired = settings.grounding_required !== false;
-    }
-  }
-
+  const persona = await loadPersona(teacherIds);
   return {
-    style,
-    groundingRequired,
+    ...persona,
     materials: ((mats ?? []) as Array<Record<string, unknown> & { subjects: { name: string } | null }>).map(m => ({
       id: m.id as string,
       title: m.title as string,
@@ -96,6 +118,24 @@ function sse(text: string) {
       controller.close();
     },
   }), { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" } });
+}
+
+/** GET /api/chat - the persona name to show in the student's chat header. */
+export async function GET(req: Request) {
+  const authHeader = req.headers.get("authorization");
+  if (!authHeader?.startsWith("Bearer ")) return Response.json({ error: "Tidak diotorisasi" }, { status: 401 });
+  const { data: authData } = await supabaseAdmin.auth.getUser(authHeader.slice(7));
+  if (!authData.user) return Response.json({ error: "Tidak diotorisasi" }, { status: 401 });
+  const { data: profile } = await supabaseAdmin
+    .from("user_profiles").select("id").eq("auth_user_id", authData.user.id).single();
+  const { data: student } = profile
+    ? await supabaseAdmin.from("students").select("class_id").eq("user_profile_id", profile.id).maybeSingle()
+    : { data: null };
+  const { data: assignments } = student?.class_id
+    ? await supabaseAdmin.from("teacher_assignments").select("teacher_id").eq("class_id", student.class_id)
+    : { data: [] as Array<{ teacher_id: string }> };
+  const persona = await loadPersona([...new Set((assignments ?? []).map(a => a.teacher_id as string))]);
+  return Response.json({ name: persona.name });
 }
 
 export async function POST(req: Request) {
@@ -128,7 +168,7 @@ export async function POST(req: Request) {
 - Jika jawabannya tidak ada di kutipan, katakan dengan ramah bahwa bagian itu belum ada di materi dari guru, sebutkan materi apa saja yang tersedia, dan sarankan bertanya ke guru. Jangan menjawab dari pengetahuan umum.`
     : `- Utamakan KUTIPAN MATERI di bawah. Jika tidak ada di kutipan, boleh menjelaskan dari pengetahuan umum, tetapi katakan bahwa penjelasan itu bukan dari materi guru.`;
 
-  const systemPrompt = `Kamu adalah "Kak AI", teman belajar yang ramah untuk siswa sekolah di Indonesia (termasuk anak SD). Kamu berbicara dalam Bahasa Indonesia yang hangat, sederhana, dan jelas.
+  const systemPrompt = `Namamu "${ctx.name}" (nama ini diberikan oleh guru; pakai nama ini bila memperkenalkan diri). Kamu teman belajar yang ramah untuk siswa sekolah di Indonesia (termasuk anak SD). Kamu berbicara dalam Bahasa Indonesia yang hangat, sederhana, dan jelas.
 
 CARA MENGOBROL:
 - Boleh membalas sapaan, basa-basi singkat, dan pertanyaan lanjutan dengan wajar. Ingat isi percakapan sebelumnya.
@@ -136,12 +176,15 @@ CARA MENGOBROL:
 - Kalimat pendek. Pakai poin-poin atau langkah bernomor bila membantu. Boleh **menebalkan** istilah penting. Maksimal sekitar 200 kata kecuali siswa minta lebih panjang.
 - Jangan membahas daftar dokumen atau cara kerja sistem kecuali ditanya.
 - Tolak dengan sopan topik yang tidak pantas atau tidak berhubungan dengan belajar.
+- Jika siswa bilang sedang ujian/asesmen/ulangan lalu meminta jawaban atau kunci jawaban, JANGAN beri jawaban atau huruf pilihannya - berapa pun tingkat bantuannya. Ingatkan dengan ramah bahwa itu harus dikerjakan sendiri, lalu tawarkan menjelaskan konsepnya setelah ujian selesai.
 
 ATURAN MATERI:
 ${groundingRules}
 - Setiap kali memakai isi kutipan, sebutkan sumbernya dengan format persis: [Sumber: Judul Materi, hal. N] (pakai nomor halaman dari tanda <<Judul, hal. N>>).
 
 ${STYLE_INSTRUCTIONS[ctx.style]}
+${LANGUAGE_INSTRUCTIONS[ctx.language]}
+${HELP_INSTRUCTIONS[ctx.help]}
 
 MATERI DARI GURU UNTUK KELAS INI:
 ${materialList}${unreadable.length ? `\n(Teks materi berikut belum bisa dibaca, misalnya PDF hasil scan: ${unreadable.join(", ")})` : ""}
