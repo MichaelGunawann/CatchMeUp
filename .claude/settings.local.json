@@ -1,17 +1,9 @@
 {
   "permissions": {
-    "defaultMode": "bypassPermissions",
     "allow": [
-      "Bash",
-      "Edit",
-      "Write",
-      "Read",
-      "WebFetch",
-      "WebSearch"
-    ],
-    "deny": [
-      "Bash(rm -rf *)"
-   
+      "Bash(npx tsc *)",
+      "Bash(npx eslint *)",
+      "claude --dangerously-skip-permissions"
     ]
   }
 }
