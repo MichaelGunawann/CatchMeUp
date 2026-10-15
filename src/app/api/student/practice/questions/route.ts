@@ -2,7 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import Groq from "groq-sdk";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve } from "@/lib/retrieval";
-import { QUESTION_QUALITY_RULES, parseQuestionsJson } from "@/lib/ai-questions";
+import { QUESTION_QUALITY_RULES, isSelfContained, parseQuestionsJson } from "@/lib/ai-questions";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -121,7 +121,8 @@ export async function POST(req: Request) {
       return st && st.total > 0 ? st.correct / st.total : 0.5;
     };
     const ranked = (candidates ?? [])
-      .filter(q => !excluded.has(q.id))
+      // Older bank questions may still say "menurut slide 3..." - skip them.
+      .filter(q => !excluded.has(q.id) && isSelfContained(q))
       .map(q => {
         const last = lastResult.get(q.id);
         let score = (1 - accuracy(q.topic)) * 2;          // weak topic -> higher

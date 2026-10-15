@@ -72,10 +72,11 @@ const BANK_TITLE = "Pembahasan soal dari guru";
  * The class's question bank (question + correct answer + explanation) as
  * retrievable passages, so a concept asked in a quiz ("apa itu
  * mitokondria?") can be explained even when no uploaded file covers it.
- * Questions of assessments that are still open are left out - the tutor
- * must never hold the answer key of an exam in progress.
+ * Questions of assessments that are still open and that this student
+ * hasn't submitted yet are left out - the tutor must never hold the answer
+ * key of an exam the student can still take.
  */
-async function loadBankChunks(classId: string): Promise<Chunk[]> {
+async function loadBankChunks(classId: string, studentId: string): Promise<Chunk[]> {
   const nowIso = new Date().toISOString();
   const [{ data: qs }, { data: openAssessments }] = await Promise.all([
     supabaseAdmin.from("questions").select("id, question, options, correct_answer, explanation, topic")
@@ -83,7 +84,10 @@ async function loadBankChunks(classId: string): Promise<Chunk[]> {
     supabaseAdmin.from("assessments").select("id").eq("class_id", classId).eq("status", "published")
       .or(`close_at.is.null,close_at.gt.${nowIso}`),
   ]);
-  const openIds = (openAssessments ?? []).map(a => a.id as string);
+  const { data: submitted } = await supabaseAdmin.from("assessment_attempts").select("assessment_id")
+    .eq("student_id", studentId).in("status", ["submitted", "graded"]);
+  const done = new Set((submitted ?? []).map(a => a.assessment_id as string));
+  const openIds = (openAssessments ?? []).map(a => a.id as string).filter(id => !done.has(id));
   const { data: inOpen } = openIds.length
     ? await supabaseAdmin.from("assessment_questions").select("question_id").in("assessment_id", openIds)
     : { data: [] as Array<{ question_id: string }> };
@@ -111,7 +115,7 @@ async function loadContext(req: Request): Promise<Ctx | null> {
     .from("user_profiles").select("id, role").eq("auth_user_id", authData.user.id).single();
   if (!profile || profile.role !== "STUDENT") return null;
   const { data: student } = await supabaseAdmin
-    .from("students").select("school_id, class_id, status").eq("user_profile_id", profile.id).single();
+    .from("students").select("id, school_id, class_id, status").eq("user_profile_id", profile.id).single();
   if (!student || student.status !== "ACTIVE") return null;
 
   const [{ data: assignments }, { data: mats }] = await Promise.all([
@@ -126,7 +130,7 @@ async function loadContext(req: Request): Promise<Ctx | null> {
   const teacherIds = [...new Set((assignments ?? []).map(a => a.teacher_id as string))];
   const [persona, bankChunks] = await Promise.all([
     loadPersona(teacherIds),
-    student.class_id ? loadBankChunks(student.class_id) : Promise.resolve([] as Chunk[]),
+    student.class_id ? loadBankChunks(student.class_id, student.id) : Promise.resolve([] as Chunk[]),
   ]);
   return {
     ...persona,

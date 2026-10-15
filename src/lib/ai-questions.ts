@@ -91,10 +91,16 @@ export function parseQuestionsJson(text: string): RawQuestion[] {
   return polish(out);
 }
 
+/** False for a question that only makes sense next to its source file ("menurut slide 3..."). */
+export function isSelfContained(q: { question: string; options: Record<string, string> | unknown }): boolean {
+  return !FILE_REFERENCE.test(q.question) &&
+    !Object.values((q.options ?? {}) as Record<string, string>).some(o => FILE_REFERENCE.test(String(o)));
+}
+
 /** Drops questions that reference the source file and cleans explanations. */
 function polish(qs: RawQuestion[]): RawQuestion[] {
   return qs
-    .filter(q => !FILE_REFERENCE.test(q.question) && !Object.values(q.options).some(o => FILE_REFERENCE.test(String(o))))
+    .filter(isSelfContained)
     .map(q => ({ ...q, explanation: cleanExplanation(q.explanation) }));
 }
 
