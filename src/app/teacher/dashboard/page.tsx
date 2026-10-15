@@ -187,7 +187,7 @@ export default function TeacherDashboardPage() {
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               {[
                 { href: "/teacher/assessment-builder", label: "Buat Asesmen", desc: "Susun ujian atau kuis", icon: FilePlus2, primary: true },
-                { href: "/teacher/materials", label: "Unggah Materi", desc: "AI membuat soal dari materi", icon: Upload },
+                { href: "/teacher/materials?unggah=1", label: "Unggah Materi", desc: "AI membuat soal dari materi", icon: Upload },
                 { href: "/teacher/question-review", label: "Tinjau Soal AI", desc: pendingReview > 0 ? `${pendingReview} soal menunggu` : "Tidak ada antrean", icon: ShieldCheck, badge: pendingReview },
                 { href: "/teacher/results", label: "Hasil Asesmen", desc: "Nilai & analisis soal", icon: BarChart3 },
               ].map(a => (

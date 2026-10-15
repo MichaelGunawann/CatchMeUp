@@ -2079,6 +2079,24 @@ function TeacherMaterials() {
     },
   };
 
+  // "Unggah Materi" from the teacher home links here with ?unggah=1 - open
+  // the upload form straight away (once the class list is known, so the
+  // class/subject defaults are filled in).
+  const autoOpenedUpload = React.useRef(false);
+  useEffect(() => {
+    if (!teacher || autoOpenedUpload.current) return;
+    autoOpenedUpload.current = true;
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.get("unggah") === "1") {
+        url.searchParams.delete("unggah");
+        window.history.replaceState(null, "", url.pathname + url.search);
+        openUpload();
+      }
+    } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [teacher]);
+
   const reloadMaterials = React.useCallback(() => {
     if (!teacher) { setUploadedMaterials(teacherLoading ? null : []); return; }
     if (teacher.classes.length === 0) { setUploadedMaterials([]); return; }
@@ -3365,7 +3383,7 @@ function TeacherQuestionReview() {
         <EmptyState icon={CheckCircle2} title="Semua soal sudah ditinjau"
           description="Tidak ada soal menunggu persetujuan. Unggah materi baru untuk soal lebih banyak."
           action={
-            <Button variant="default" className="text-[13px]" onClick={() => router.push("/teacher/materials")}>
+            <Button variant="default" className="text-[13px]" onClick={() => router.push("/teacher/materials?unggah=1")}>
               <Upload className="mr-2 h-4 w-4" />Unggah Materi
             </Button>
           } />
@@ -3942,7 +3960,7 @@ function TeacherAssessmentBuilder() {
                 {materials === null && <SectionLoading message="Memuat materi..." />}
                 {materials !== null && materials.length === 0 && (
                   <div className="rounded-[8px] border border-dashed border-border bg-background p-6 text-center">
-                    <p className="text-[12px] text-ink-secondary">Belum ada materi — unggah materi di <button onClick={() => router.push("/teacher/materials")} className="font-semibold text-primary underline underline-offset-2 hover:opacity-80">Pustaka Materi</button> terlebih dahulu.</p>
+                    <p className="text-[12px] text-ink-secondary">Belum ada materi — unggah materi di <button onClick={() => router.push("/teacher/materials?unggah=1")} className="font-semibold text-primary underline underline-offset-2 hover:opacity-80">Pustaka Materi</button> terlebih dahulu.</p>
                   </div>
                 )}
                 {(materials ?? []).map(mat => {
