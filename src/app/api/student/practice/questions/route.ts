@@ -140,6 +140,7 @@ export async function POST(req: Request) {
     }
 
     let generated: typeof found = [];
+    let generationNote: string | null = null;
     if (found.length < wantCount) {
       const shortfall = wantCount - found.length;
       try {
@@ -204,13 +205,17 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
             source_title: q.sourceTitle || "Latihan AI",
             source_page: Number.isInteger(q.sourcePage) ? q.sourcePage : null,
           }));
-          const { data: inserted } = await supabaseAdmin.from("questions").insert(rows).select(
+          const { data: inserted, error: insertError } = await supabaseAdmin.from("questions").insert(rows).select(
             "id, question, options, topic, difficulty, correct_answer, explanation"
           );
+          if (insertError) generationNote = `insert: ${insertError.message}`;
           generated = inserted ?? [];
+        } else {
+          generationNote = "AI tidak menghasilkan soal yang valid";
         }
       } catch (err) {
         console.error("Practice AI generation failed:", err);
+        generationNote = err instanceof Error ? err.message.slice(0, 200) : "unknown";
       }
     }
 
@@ -223,6 +228,9 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
         topic: q.topic,
         difficulty: q.difficulty,
       })),
+      // Why fewer questions than requested came back (shown to no one by
+      // default; useful for diagnosing generation problems).
+      ...(all.length < wantCount && generationNote ? { note: generationNote } : {}),
     });
   } catch (error) {
     console.error("Error fetching practice questions:", error);
