@@ -6134,6 +6134,25 @@ type ExamQuestion = {
 };
 type ExamSession = { attemptId: string; assessmentId: string; title: string; deadlineAt: number | null; allowReview: boolean; questions: ExamQuestion[] };
 
+// In-progress exam answers live on the device, keyed by ATTEMPT, so a
+// refresh, a dropped connection or a failed submit never loses them; they
+// are removed only after the server has accepted the submission.
+type SavedExamProgress = { answers: Record<number, string>; confidence: Record<number, "yakin" | "cukup" | "ragu">; current: number };
+const examProgressKey = (attemptId: string) => `catchup_exam_progress_${attemptId}`;
+function loadExamProgress(attemptId: string): SavedExamProgress | null {
+  try { const raw = localStorage.getItem(examProgressKey(attemptId)); return raw ? JSON.parse(raw) as SavedExamProgress : null; } catch { return null; }
+}
+function saveExamProgress(attemptId: string, p: SavedExamProgress) {
+  try { localStorage.setItem(examProgressKey(attemptId), JSON.stringify(p)); } catch { /* storage full/blocked */ }
+}
+function clearExamProgress(attemptId: string) {
+  try {
+    localStorage.removeItem(examProgressKey(attemptId));
+    localStorage.removeItem("catchup_exam_active_id");
+    localStorage.removeItem("catchup_exam_session"); // legacy key
+  } catch { /* ignore */ }
+}
+
 function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: (p: string) => void }) {
   const [examSession, setExamSession] = useState<ExamSession | null>(null);
   const [noQuestionsAlert, setNoQuestionsAlert] = useState(false);
@@ -6170,64 +6189,110 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   // Grading is entirely server-side (correct_answer is never sent to the
   // client before this point, per supabase/migrations/009_secure_grading.sql)
   // - the client submits raw answers and the /submit route computes score.
+  // Submission. Answers stay saved on the device until the server confirms
+  // them; if the connection drops, the student sees a "waiting for
+  // internet" screen and the submission is retried automatically.
+  const submittingRef = React.useRef(false);
+  const [waitingNetwork, setWaitingNetwork] = useState(false);
+  const [submitNotice, setSubmitNotice] = useState<string | null>(null);
+
   async function autoSubmit() {
     if (finishedRef.current) return;
-    finishedRef.current = true;
-    try { localStorage.removeItem("catchup_exam_session"); localStorage.removeItem("catchup_exam_active_id"); } catch {}
+    finishedRef.current = true; // stops the timer, lockdown and further edits
     exitFullscreen();
+    await trySubmit();
+  }
+
+  async function trySubmit() {
     const session = examSessionRef.current;
+    if (!session) { setFinished(true); return; }
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     const ans = answersRef.current;
-    if (session) {
-      const answersByQid: Record<string, string> = {};
-      session.questions.forEach((q, i) => { if (ans[i]) answersByQid[q.assessmentQuestionId] = ans[i]; });
-      const data = await authedFetch(`/api/student/assessment/${session.assessmentId}/submit`, {
+    const answersByQid: Record<string, string> = {};
+    session.questions.forEach((q, i) => { if (ans[i]) answersByQid[q.assessmentQuestionId] = ans[i]; });
+
+    type SubmitResult = {
+      score?: number; correctCount?: number; totalQuestions?: number; allowReview?: boolean; error?: string; alreadySubmitted?: boolean;
+      review?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; yourAnswer: string | null; isCorrect: boolean }>;
+    };
+    let data: SubmitResult | null = null;
+    try {
+      data = await authedFetch(`/api/student/assessment/${session.assessmentId}/submit`, {
         attemptId: session.attemptId, answers: answersByQid,
-      }) as {
-        score?: number; correctCount?: number; totalQuestions?: number; allowReview?: boolean;
-        review?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; yourAnswer: string | null; isCorrect: boolean }>;
-      } | null;
-      refreshStudentOverview(); // score, rank, XP, streak changed
-      const score = data?.score ?? 0;
-      const correctCount = data?.correctCount ?? 0;
-      setFinalScore(score);
-      setFinalCorrect(correctCount);
-      const resultId = `result_${Date.now()}`;
-      saveResult({
-        id: resultId,
-        assessmentId: session.assessmentId,
-        assessmentTitle: session.title,
-        type: "Asesmen",
-        date: new Date().toLocaleDateString("id-ID"),
-        score,
-        totalQuestions: data?.totalQuestions ?? session.questions.length,
-        correctCount,
-        answers: Object.fromEntries(Object.entries(ans).map(([k, v]) => [k, v])),
-      });
-      // Only surfaced when the teacher enabled allow_review - matches the
-      // same allow_review-gated reveal enforced server-side (migration 009),
-      // never a client-side correctness comparison.
-      if (data?.allowReview && data.review) {
-        const incorrectQs: StoredIncorrectQ[] = data.review
-          .map((r, i) => ({ r, i }))
-          .filter((item): item is { r: NonNullable<typeof data.review>[number]; i: number } => !item.r.isCorrect && !!item.r.yourAnswer)
-          .map(({ r, i }) => ({
-            id: `${resultId}_${i}`,
-            assessmentId: session.assessmentId,
-            assessmentTitle: session.title,
-            topic: session.questions[i]?.topic ?? "",
-            question: r.question,
-            yourAnswer: r.yourAnswer!,
-            correctAnswer: r.correctAnswer,
-            explanation: r.explanation ?? "",
-            date: new Date().toLocaleDateString("id-ID"),
-            options: r.options,
-          }));
-        if (incorrectQs.length > 0) saveIncorrectQuestions(incorrectQs);
-    refreshStudentOverview(); // XP, streak, weak topics changed
-      }
+      }) as SubmitResult | null;
+    } catch {
+      data = null; // network failure
+    }
+    submittingRef.current = false;
+
+    if (!data) {
+      // No response (offline / server unreachable): keep answers, retry.
+      setWaitingNetwork(true);
+      return;
+    }
+    setWaitingNetwork(false);
+    clearExamProgress(session.attemptId);
+    refreshStudentOverview(); // score, rank, XP, streak changed
+
+    if (data.error) {
+      // A definitive answer from the server (already submitted on another
+      // tap/device, or the exam window closed) - don't retry.
+      setSubmitNotice(data.alreadySubmitted ? "Jawabanmu sudah terkumpul sebelumnya." : data.error);
+      setFinished(true);
+      return;
+    }
+
+    const score = data.score ?? 0;
+    const correctCount = data.correctCount ?? 0;
+    setFinalScore(score);
+    setFinalCorrect(correctCount);
+    const resultId = `result_${Date.now()}`;
+    saveResult({
+      id: resultId,
+      assessmentId: session.assessmentId,
+      assessmentTitle: session.title,
+      type: "Asesmen",
+      date: new Date().toLocaleDateString("id-ID"),
+      score,
+      totalQuestions: data.totalQuestions ?? session.questions.length,
+      correctCount,
+      answers: Object.fromEntries(Object.entries(ans).map(([k, v]) => [k, v])),
+    });
+    // Only surfaced when the teacher enabled allow_review - matches the
+    // same allow_review-gated reveal enforced server-side (migration 009).
+    if (data.allowReview && data.review) {
+      const review = data.review;
+      const incorrectQs: StoredIncorrectQ[] = review
+        .map((r, i) => ({ r, i }))
+        .filter(item => !item.r.isCorrect && !!item.r.yourAnswer)
+        .map(({ r, i }) => ({
+          id: `${resultId}_${i}`,
+          assessmentId: session.assessmentId,
+          assessmentTitle: session.title,
+          topic: session.questions[i]?.topic ?? "",
+          question: r.question,
+          yourAnswer: r.yourAnswer!,
+          correctAnswer: r.correctAnswer,
+          explanation: r.explanation ?? "",
+          date: new Date().toLocaleDateString("id-ID"),
+          options: r.options,
+        }));
+      if (incorrectQs.length > 0) saveIncorrectQuestions(incorrectQs);
     }
     setFinished(true);
   }
+
+  // While waiting for the network: retry when the browser reports it is
+  // back online, and every 10s as a fallback.
+  useEffect(() => {
+    if (!waitingNetwork) return;
+    const retry = () => { trySubmit(); };
+    window.addEventListener("online", retry);
+    const t = setInterval(retry, 10_000);
+    return () => { window.removeEventListener("online", retry); clearInterval(t); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waitingNetwork]);
 
   async function startExam(assessmentId: string) {
     // Must run synchronously inside the click that started the exam -
@@ -6246,9 +6311,12 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
       attemptId: data.attemptId, assessmentId, title: data.title ?? "Asesmen",
       deadlineAt: data.deadlineAt ?? null, allowReview: !!data.allowReview, questions: data.questions,
     });
-    setCurrent(0);
-    setAnswers({});
-    setConfidence({});
+    // Resuming (refresh / reconnect): restore this attempt's saved answers
+    // instead of starting blank.
+    const saved = loadExamProgress(data.attemptId);
+    setCurrent(saved?.current ?? 0);
+    setAnswers(saved?.answers ?? {});
+    setConfidence(saved?.confidence ?? {});
     onPageChange("exam");
   }
 
@@ -6262,15 +6330,6 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
       if (savedId) startExam(savedId);
       else onPageChange("pick");
     }
-    try {
-      const saved = localStorage.getItem("catchup_exam_session");
-      if (saved) {
-        const s = JSON.parse(saved) as { answers?: Record<number, string>; confidence?: Record<number, "yakin" | "cukup" | "ragu">; current?: number };
-        if (s.answers) setAnswers(s.answers);
-        if (s.confidence) setConfidence(s.confidence);
-        if (typeof s.current === "number") setCurrent(s.current);
-      }
-    } catch {}
     return () => { exitFullscreen(); };
   }, [page]);
 
@@ -6278,9 +6337,10 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   // deadline itself is always re-derived from the server, never trusted
   // from this local cache)
   React.useEffect(() => {
-    if (page !== "exam") return;
-    try { localStorage.setItem("catchup_exam_session", JSON.stringify({ answers, confidence, current })); } catch {}
-  }, [answers, confidence, current, page]);
+    const attemptId = examSession?.attemptId;
+    if (page !== "exam" || !attemptId || finished) return;
+    saveExamProgress(attemptId, { answers, confidence, current });
+  }, [answers, confidence, current, page, examSession?.attemptId, finished]);
 
   // Countdown timer, driven by the server-computed deadline (duration_minutes
   // / close_at) rather than a hardcoded 45-minute constant
@@ -6369,6 +6429,29 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     );
   }
 
+  // ── Waiting for the network to submit ──
+  if (waitingNetwork) {
+    const n = Object.keys(answers).length;
+    return (
+      <div className="min-h-dvh bg-background flex items-center justify-center px-6">
+        <div className="max-w-md rounded-card border border-warning/30 bg-surface p-8 text-center shadow-sm">
+          <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-warning-light">
+            <WifiOff className="h-8 w-8 text-warning" />
+          </div>
+          <h2 className="mt-4 text-[20px] font-bold text-ink">Menunggu internet...</h2>
+          <p className="mt-2 text-[14px] leading-relaxed text-ink-secondary">
+            Ujianmu sudah selesai. <strong>{n} jawaban aman tersimpan</strong> di perangkat ini dan akan dikirim otomatis begitu internet tersambung lagi.
+          </p>
+          <p className="mt-2 text-[13px] font-semibold text-warning">Jangan tutup halaman ini dulu.</p>
+          <div className="mt-5 flex items-center justify-center gap-2 text-[12px] text-ink-tertiary">
+            <span className="h-3 w-3 rounded-full border-2 border-warning border-t-transparent animate-spin" />Mencoba mengirim setiap 10 detik
+          </div>
+          <Button variant="outline" className="mt-5" onClick={() => trySubmit()}>Coba kirim sekarang</Button>
+        </div>
+      </div>
+    );
+  }
+
   // ── Finished screen ──
   if (finished) {
     return (
@@ -6379,10 +6462,12 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
           </div>
           <div>
             <h2 className="text-2xl font-bold text-ink">Asesmen Selesai!</h2>
-            <p className="text-[14px] text-ink-secondary mt-1">{finalCorrect} dari {examSession?.questions.length ?? 0} soal benar</p>
+            {submitNotice
+              ? <p className="text-[14px] text-ink-secondary mt-1">{submitNotice}</p>
+              : <p className="text-[14px] text-ink-secondary mt-1">{finalCorrect} dari {examSession?.questions.length ?? 0} soal benar</p>}
           </div>
-          <ScoreCircle score={finalScore} size={96} />
-          <Button variant="default" onClick={() => { onPageChange("pick"); setFinished(false); setCurrent(0); setAnswers({}); setTimeLeft(0); setExamSession(null); }}>
+          {!submitNotice && <ScoreCircle score={finalScore} size={96} />}
+          <Button variant="default" onClick={() => { onPageChange("pick"); setFinished(false); setSubmitNotice(null); setCurrent(0); setAnswers({}); setTimeLeft(0); setExamSession(null); }}>
             Kembali ke Beranda
           </Button>
         </div>
@@ -6541,20 +6626,53 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
         </div>
       </main>
 
-      {/* Submit confirmation */}
-      <ConfirmDialog
-        open={confirmSubmit}
-        title="Selesaikan Asesmen?"
-        message={`Kamu telah menjawab ${answeredCount} dari ${total} soal. ${total - answeredCount > 0 ? `${total - answeredCount} soal belum dijawab. ` : ""}Setelah disubmit, jawaban tidak dapat diubah.`}
-        confirmLabel="Selesaikan & Submit"
-        confirmVariant="success"
-        onConfirm={() => {
-          setConfirmSubmit(false);
-          warningShownRef.current = true;
-          autoSubmit();
-        }}
-        onCancel={() => setConfirmSubmit(false)}
-      />
+      {/* Submit confirmation - lists unanswered questions so the student
+          can jump back to them before submitting */}
+      {confirmSubmit && (() => {
+        const unanswered = Array.from({ length: total }, (_, i) => i).filter(i => !answers[i]);
+        return (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setConfirmSubmit(false)} />
+            <div className="relative w-full max-w-md rounded-card border border-border bg-surface p-6 shadow-xl">
+              {unanswered.length > 0 ? (
+                <>
+                  <div className="flex items-center gap-2">
+                    <AlertCircle className="h-5 w-5 shrink-0 text-warning" />
+                    <h2 className="text-[17px] font-bold text-ink">Masih ada {unanswered.length} soal yang belum dijawab!</h2>
+                  </div>
+                  <p className="mt-2 text-[13px] text-ink-secondary">Klik nomor soal untuk kembali dan menjawabnya:</p>
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    {unanswered.map(i => (
+                      <button key={i} type="button" onClick={() => { setCurrent(i); setConfirmSubmit(false); }}
+                        className="flex h-10 w-10 items-center justify-center rounded-full border-2 border-warning bg-warning-light text-[14px] font-bold text-warning hover:bg-warning hover:text-white">
+                        {i + 1}
+                      </button>
+                    ))}
+                  </div>
+                  <p className="mt-4 text-[12px] text-ink-tertiary">Soal yang tidak dijawab dihitung salah. Setelah dikumpulkan, jawaban tidak bisa diubah.</p>
+                  <div className="mt-5 flex flex-wrap justify-end gap-2">
+                    <Button variant="outline" size="sm" onClick={() => setConfirmSubmit(false)}>Kembali Mengerjakan</Button>
+                    <Button variant="danger" size="sm" onClick={() => { setConfirmSubmit(false); warningShownRef.current = true; autoSubmit(); }}>
+                      Tetap Kumpulkan
+                    </Button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h2 className="text-[17px] font-bold text-ink">Kumpulkan jawaban?</h2>
+                  <p className="mt-2 text-[13px] text-ink-secondary">Semua {total} soal sudah dijawab. 👍 Setelah dikumpulkan, jawaban tidak bisa diubah.</p>
+                  <div className="mt-5 flex justify-end gap-2">
+                    <Button variant="outline" size="sm" onClick={() => setConfirmSubmit(false)}>Periksa Lagi</Button>
+                    <Button variant="success" size="sm" onClick={() => { setConfirmSubmit(false); warningShownRef.current = true; autoSubmit(); }}>
+                      Kumpulkan
+                    </Button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* Kiosk warning dialog */}
       <ConfirmDialog
