@@ -6513,11 +6513,18 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
               onClick={() => setCurrent(c => Math.max(0, c - 1))}>
               ← Sebelumnya
             </Button>
-            <Button variant="default" className="h-9"
-              disabled={current === total - 1}
-              onClick={() => setCurrent(c => Math.min(total - 1, c + 1))}>
-              Berikutnya →
-            </Button>
+            {current === total - 1 ? (
+              // Last question: the forward button finishes the exam instead
+              // of going grey (it opens the same confirmation as the header).
+              <Button variant="success" className="h-9" onClick={() => setConfirmSubmit(true)}>
+                <CheckCircle2 className="mr-1.5 h-4 w-4" />Selesaikan Ujian
+              </Button>
+            ) : (
+              <Button variant="default" className="h-9"
+                onClick={() => setCurrent(c => Math.min(total - 1, c + 1))}>
+                Berikutnya →
+              </Button>
+            )}
           </div>
 
           {/* Question palette */}
