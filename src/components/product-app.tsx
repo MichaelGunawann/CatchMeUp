@@ -2037,13 +2037,13 @@ function TeacherMaterials() {
     if (!MATERIAL_ACCEPT.split(",").includes(ext)) {
       setUploadedFile(null);
       setFileError(ext === ".doc" || ext === ".ppt"
-        ? `Format lama ${ext} tidak bisa dibaca AI. Simpan ulang sebagai ${ext === ".ppt" ? "PPTX" : "DOCX"} atau PDF.`
-        : "Format tidak didukung. Gunakan PDF, DOCX, PPTX, atau TXT.");
+        ? `"${file.name}" memakai format lama ${ext} yang tidak bisa dibaca AI. Simpan ulang sebagai ${ext === ".ppt" ? "PPTX" : "DOCX"} atau PDF.`
+        : `"${file.name}" tidak didukung. Gunakan file PDF, DOCX, PPTX, atau TXT.`);
       return;
     }
     if (file.size > MATERIAL_MAX_BYTES) {
       setUploadedFile(null);
-      setFileError("Ukuran file melebihi 50 MB.");
+      setFileError(`"${file.name}" berukuran ${(file.size / 1024 / 1024).toFixed(0)} MB - batasnya 50 MB. Kompres PDF-nya atau pecah per bab.`);
       return;
     }
     setFileError(null);
@@ -2353,7 +2353,18 @@ function TeacherMaterials() {
                 uploadValidation.errorFor("file") || fileError ? "border-danger bg-danger/5" : "border-primary/30 bg-white hover:border-primary/60",
               )}
             >
-              {uploadedFile ? (
+              {!uploadedFile && fileError ? (
+                // Rejected file: say so inside the drop zone (a small line
+                // under it was easy to miss - it looked like nothing happened).
+                <div className="flex w-full max-w-lg items-start gap-2 rounded-[8px] border border-danger/30 bg-danger-light px-3 py-2.5 text-left">
+                  <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
+                  <div>
+                    <div className="text-[13px] font-semibold text-danger">File tidak bisa dipakai</div>
+                    <div className="text-[12px] text-ink-secondary">{fileError}</div>
+                    <div className="mt-1 text-[11px] font-semibold text-primary">Klik di sini untuk memilih file lain</div>
+                  </div>
+                </div>
+              ) : uploadedFile ? (
                 <div className="flex w-full max-w-md items-center gap-2 rounded-[8px] border border-success/30 bg-success-light px-3 py-2 text-left">
                   <CheckCircle2 className="h-4 w-4 text-success shrink-0" />
                   <div className="flex-1 min-w-0">
@@ -2376,8 +2387,8 @@ function TeacherMaterials() {
                 </>
               )}
             </div>
-            {(fileError || uploadValidation.errorFor("file")) && (
-              <p role="alert" className="mt-1 text-[11px] font-medium text-danger">{fileError ?? "Tolong pilih file materi terlebih dahulu"}</p>
+            {!fileError && uploadValidation.errorFor("file") && (
+              <p role="alert" className="mt-1 text-[11px] font-medium text-danger">Tolong pilih file materi terlebih dahulu</p>
             )}
           </div>
 
