@@ -2,6 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import Groq from "groq-sdk";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve } from "@/lib/retrieval";
+import { parseQuestionsJson } from "@/lib/ai-questions";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -169,10 +170,9 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
           max_tokens: 4000,
           temperature: 0.3,
         });
-        const text = completion.choices[0].message.content ?? "{}";
-        const jsonMatch = text.match(/\{[\s\S]*\}/);
-        const parsed = jsonMatch ? JSON.parse(jsonMatch[0]) : { questions: [] };
-        const raw = (parsed.questions ?? []) as Array<{
+        // Tolerant parsing: recovers every complete question even when the
+        // model's JSON is wrapped, slightly malformed or cut off.
+        const raw = parseQuestionsJson(completion.choices[0].message.content ?? "") as Array<{
           question: string;
           options: Record<string, string>;
           correctAnswer: string;
