@@ -160,20 +160,28 @@ export async function POST(req: Request) {
           ? `\n\nBuat soal BERDASARKAN kutipan materi dari guru berikut (jangan keluar dari isinya). Isi "sourceTitle" dan "sourcePage" sesuai tanda <<Judul, hal. N>>:\n${excerpts.map(c => `<<${c.materialTitle}${c.page ? `, hal. ${c.page}` : ""}>>\n${c.text}`).join("\n\n")}`
           : "";
 
-        const prompt = `Buat ${shortfall} soal latihan pilihan ganda (A-D) bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
+        const buildPrompt = (groundingText: string) => `Buat ${shortfall} soal latihan pilihan ganda (A-D) bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
           topic ? ` topik "${topic}"` : ""
-        } tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana dan jelas, sesuai tingkat materi.${grounding}
+        } tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana dan jelas, sesuai tingkat materi.${groundingText}
 Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":"","C":"","D":""},"correctAnswer":"A","explanation":"","topic":"","sourceTitle":"","sourcePage":1}]}
 SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langkah demi langkah dan pastikan hasilnya benar-benar cocok dengan salah satu dari 4 pilihan. correctAnswer HARUS konsisten dengan explanation.`;
-        const completion = await getGroq().chat.completions.create({
-          model: "openai/gpt-oss-120b",
-          messages: [{ role: "user", content: prompt }],
-          max_tokens: 4000,
-          temperature: 0.3,
-        });
-        // Tolerant parsing: recovers every complete question even when the
-        // model's JSON is wrapped, slightly malformed or cut off.
-        const raw = parseQuestionsJson(completion.choices[0].message.content ?? "") as Array<{
+        // Grounded in the materials first; if the excerpts didn't cover the
+        // topic well enough for the model to write questions, retry once
+        // without them so the student still gets practice.
+        const ask = async (groundingText: string) => {
+          const completion = await getGroq().chat.completions.create({
+            model: "openai/gpt-oss-120b",
+            messages: [{ role: "user", content: buildPrompt(groundingText) }],
+            max_tokens: 4000,
+            temperature: 0.3,
+          });
+          // Tolerant parsing: recovers every complete question even when the
+          // model's JSON is wrapped, slightly malformed or cut off.
+          return parseQuestionsJson(completion.choices[0].message.content ?? "");
+        };
+        let rawList = await ask(grounding);
+        if (rawList.length === 0 && grounding) rawList = await ask("");
+        const raw = rawList as Array<{
           question: string;
           options: Record<string, string>;
           correctAnswer: string;
