@@ -113,7 +113,15 @@ export default function StudentDashboardPage() {
     }
 
     load();
-    return () => { cancelled = true; };
+    // Keep the exam list fresh (teacher may publish during class).
+    const refresh = async () => {
+      if (cancelled || document.hidden) return;
+      const list = await authedPost<{ assessments: Item[] }>("/api/student/assessments");
+      if (!cancelled && list) setItems(list.assessments ?? []);
+    };
+    const timer = setInterval(refresh, 60_000);
+    document.addEventListener("visibilitychange", refresh);
+    return () => { cancelled = true; clearInterval(timer); document.removeEventListener("visibilitychange", refresh); };
   }, [router]);
 
   const now = useScheduleClock(items.flatMap(a => [

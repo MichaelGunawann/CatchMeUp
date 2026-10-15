@@ -5832,15 +5832,23 @@ function SimulatorPickList({ onStart }: { onStart: (id: string, item: StudentAss
   // Shared with Materi/Latihan and remembered across pages.
   const [subjectFilter, setSubjectFilter] = useSubjectFilter();
 
+  // Loaded on open, then refreshed every minute and whenever the student
+  // comes back to the tab - an exam a teacher publishes during class shows
+  // up without a manual reload.
   useEffect(() => {
     let cancelled = false;
-    apiPost<{ assessments: StudentAssessmentItem[]; noClass?: boolean }>("/api/student/assessments", {}).then(res => {
+    const load = () => apiPost<{ assessments: StudentAssessmentItem[]; noClass?: boolean }>("/api/student/assessments", {}).then(res => {
       if (cancelled) return;
-      if (res.error) { setLoadError(res.error); setItems([]); return; }
+      if (res.error) { setLoadError(prev => prev ?? res.error ?? null); setItems(prev => prev ?? []); return; }
+      setLoadError(null);
       setNoClass(!!res.noClass);
       setItems(res.assessments ?? []);
     });
-    return () => { cancelled = true; };
+    load();
+    const timer = setInterval(load, 60_000);
+    const onVisible = () => { if (!document.hidden) load(); };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { cancelled = true; clearInterval(timer); document.removeEventListener("visibilitychange", onVisible); };
   }, []);
 
   // Re-render exactly when any assessment opens or closes.
@@ -6343,8 +6351,8 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
           )}
 
           <div className="pt-2 border-t border-border">
-            <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-3">Latihan Mandiri (Tanpa Kiosk)</p>
-            <p className="text-[12px] text-ink-secondary mb-3">Latihan santai tanpa timer ketat dan mode layar penuh. Cocok untuk belajar sehari-hari.</p>
+            <p className="text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-3">Latihan Mandiri</p>
+            <p className="text-[12px] text-ink-secondary mb-3">Latihan tanpa nilai dan bisa diulang sepuasnya. Tetap berjalan di layar penuh - jangan pindah tab sampai selesai.</p>
             <Link href="/student/adaptive"
               className="inline-flex items-center gap-3 rounded-card border border-dashed border-primary/30 bg-primary-soft p-4 cursor-pointer hover:border-primary/50 transition-colors">
               <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-[8px] bg-primary/10">
@@ -6352,7 +6360,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
               </div>
               <div>
                 <div className="text-[13px] font-bold text-primary">Mulai Latihan Adaptif</div>
-                <div className="text-[11px] text-primary/70 mt-0.5">AI menyesuaikan soal berdasarkan kemampuanmu · Bebas kapan saja</div>
+                <div className="text-[11px] text-primary/70 mt-0.5">AI menyesuaikan soal berdasarkan kemampuanmu · Tidak dinilai</div>
               </div>
             </Link>
           </div>
