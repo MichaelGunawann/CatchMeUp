@@ -18,8 +18,20 @@ const ROMAN: Record<string, number> = { i: 1, ii: 2, iii: 3, iv: 4, v: 5, vi: 6,
 const WORDS: Record<string, number> = { satu: 1, dua: 2, tiga: 3, empat: 4, lima: 5, enam: 6, tujuh: 7, delapan: 8, sembilan: 9, sepuluh: 10 };
 const TO_ROMAN = ["", "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII"];
 
+// Folds English/Latin spellings onto Indonesian ones on both sides of the
+// match, so "mitochondria" finds "mitokondria", "photosynthesis" finds
+// "fotosintesis" (k/c, f/ph, t/th, i/y, double letters).
+function normalizeToken(w: string): string {
+  return w
+    .replace(/ch/g, "k").replace(/ph/g, "f").replace(/th/g, "t").replace(/q/g, "k")
+    .replace(/c/g, "k").replace(/x/g, "ks").replace(/y/g, "i")
+    .replace(/(.)\1+/g, "$1");
+}
+
 function tokenize(s: string): string[] {
-  return s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter(w => w.length >= 3 && !STOPWORDS.has(w));
+  return s.toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/)
+    .filter(w => w.length >= 3 && !STOPWORDS.has(w))
+    .map(normalizeToken);
 }
 
 /** Chapter number the student is asking about, if any ("bab 1", "bab I", "bab satu"). */

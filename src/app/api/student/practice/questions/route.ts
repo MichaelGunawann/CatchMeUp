@@ -2,7 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import Groq from "groq-sdk";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve } from "@/lib/retrieval";
-import { parseQuestionsJson } from "@/lib/ai-questions";
+import { QUESTION_QUALITY_RULES, parseQuestionsJson } from "@/lib/ai-questions";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -26,7 +26,7 @@ function getGroq(): Groq {
  * questions (inserted for real, not ephemeral) when there aren't enough
  * matching the filters yet.
  *
- * Request body: { subjectId: string, topic?: string, difficulty?: "Mudah"|"Sedang"|"Sulit", count?: number }
+ * Request body: { subjectId: string, topic?: string, difficulty?: "Mudah"|"Sedang"|"Sulit", count?: number, exclude?: string[] }
  */
 export async function POST(req: Request) {
   try {
@@ -58,12 +58,14 @@ export async function POST(req: Request) {
       return Response.json({ error: "Akun siswa belum aktif atau belum ditempatkan di kelas" }, { status: 403 });
     }
 
-    const { subjectId, topic, difficulty, count } = (await req.json()) as {
+    const { subjectId, topic, difficulty, count, exclude } = (await req.json()) as {
       subjectId?: string;
       topic?: string;
       difficulty?: "Mudah" | "Sedang" | "Sulit";
       count?: number;
+      exclude?: string[]; // ids already shown in this session
     };
+    const excluded = new Set((Array.isArray(exclude) ? exclude : []).slice(0, 200));
     if (!subjectId) {
       return Response.json({ error: "subjectId wajib diisi" }, { status: 400 });
     }
@@ -119,6 +121,7 @@ export async function POST(req: Request) {
       return st && st.total > 0 ? st.correct / st.total : 0.5;
     };
     const ranked = (candidates ?? [])
+      .filter(q => !excluded.has(q.id))
       .map(q => {
         const last = lastResult.get(q.id);
         let score = (1 - accuracy(q.topic)) * 2;          // weak topic -> higher
@@ -155,19 +158,22 @@ export async function POST(req: Request) {
         const texts = await Promise.all(((mats ?? []) as Array<{ id: string; title: string; file_url: string | null; content_text?: string | null }>)
           .map(async m => ({ title: m.title, text: await Promise.race([getMaterialText(m), new Promise<string>(r => setTimeout(() => r(""), 15_000))]) })));
         const chunks = texts.flatMap(t => chunkMaterial(t.title, t.text));
-        const excerpts = retrieve(chunks, topic ?? subjectRow?.name ?? "", 7000);
-        const grounding = excerpts.length
-          ? `\n\nBuat soal BERDASARKAN kutipan materi dari guru berikut (jangan keluar dari isinya). Isi "sourceTitle" dan "sourcePage" sesuai tanda <<Judul, hal. N>>:\n${excerpts.map(c => `<<${c.materialTitle}${c.page ? `, hal. ${c.page}` : ""}>>\n${c.text}`).join("\n\n")}`
+        const groundingFor = (excerpts: ReturnType<typeof retrieve>) => excerpts.length
+          ? `\n\nBuat soal BERDASARKAN kutipan materi dari guru berikut (jangan keluar dari isinya). Isi "sourceTitle" dan "sourcePage" sesuai tanda <<Judul, hal. N>> (hanya di kolom itu, jangan di teks soal/penjelasan):\n${excerpts.map(c => `<<${c.materialTitle}${c.page ? `, hal. ${c.page}` : ""}>>\n${c.text}`).join("\n\n")}`
           : "";
+        const grounding = groundingFor(retrieve(chunks, topic ?? subjectRow?.name ?? "", 7000));
 
         const buildPrompt = (groundingText: string) => `Buat ${shortfall} soal latihan pilihan ganda (A-D) bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
           topic ? ` topik "${topic}"` : ""
         } tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana dan jelas, sesuai tingkat materi.${groundingText}
 Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":"","C":"","D":""},"correctAnswer":"A","explanation":"","topic":"","sourceTitle":"","sourcePage":1}]}
+${QUESTION_QUALITY_RULES}
 SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langkah demi langkah dan pastikan hasilnya benar-benar cocok dengan salah satu dari 4 pilihan. correctAnswer HARUS konsisten dengan explanation.`;
-        // Grounded in the materials first; if the excerpts didn't cover the
-        // topic well enough for the model to write questions, retry once
-        // without them so the student still gets practice.
+        // Grounded in the materials first. If the topic's excerpts weren't
+        // enough to write questions, retry with a broader slice of the same
+        // materials - never ungrounded while materials exist, otherwise the
+        // tutor can't explain the questions afterwards. Only a subject with
+        // no readable material at all falls back to general questions.
         const ask = async (groundingText: string) => {
           const completion = await getGroq().chat.completions.create({
             model: "openai/gpt-oss-120b",
@@ -180,8 +186,8 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
           return parseQuestionsJson(completion.choices[0].message.content ?? "");
         };
         let rawList = await ask(grounding);
-        let groundedOk = !!grounding;
-        if (rawList.length === 0 && grounding) { rawList = await ask(""); groundedOk = false; }
+        const groundedOk = !!grounding;
+        if (rawList.length === 0 && grounding) rawList = await ask(groundingFor(retrieve(chunks, subjectRow?.name ?? "", 9000)));
         const raw = rawList as Array<{
           question: string;
           options: Record<string, string>;

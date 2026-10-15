@@ -2,7 +2,7 @@ export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { groqErrorResponse } from "@/lib/groq-error";
-import { MAX_QUESTIONS_PER_CALL, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
+import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -39,7 +39,7 @@ Format WAJIB — kembalikan HANYA JSON array seperti ini, tanpa teks lain:
 ]
 
 Pastikan:
-- Pertanyaan jelas dan sesuai level SMA Indonesia
+- Pertanyaan jelas dan sesuai tingkat kelas siswa
 - Ada 4 pilihan (A, B, C, D) per soal
 - Penjelasan jawaban lengkap dan edukatif
 - Jawaban tersebar merata (tidak selalu A)
@@ -49,7 +49,8 @@ Pastikan:
   dengan salah satu dari 4 pilihan yang kamu buat. Jika hasil hitunganmu
   tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
   agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
-  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.${avoidListPrompt(body.avoid)}`;
+  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.
+${QUESTION_QUALITY_RULES}${avoidListPrompt(body.avoid)}`;
 
   try {
     // Scaled to the actual question count instead of a flat 8192 - Groq's

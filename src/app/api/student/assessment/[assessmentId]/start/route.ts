@@ -245,7 +245,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
       };
     });
 
-    const startedAtMs = new Date(attempt.started_at).getTime();
+    const startedAtMs = parseDbTime(attempt.started_at);
     const durationDeadline = a.duration_minutes ? startedAtMs + a.duration_minutes * 60000 : null;
     const closeDeadline = a.close_at ? parseDbTime(a.close_at) : null;
     const deadlineAt = [durationDeadline, closeDeadline].filter((d): d is number => d !== null).sort((x, y) => x - y)[0] ?? null;

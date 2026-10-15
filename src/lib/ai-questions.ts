@@ -15,6 +15,32 @@ export type RawQuestion = {
   sourcePage?: number;
 };
 
+/**
+ * Rules every question prompt appends: questions must stand on their own.
+ * Students never see the teacher's file, so "menurut slide 4..." or
+ * "lihat halaman 12" is unanswerable, and an explanation that only points
+ * at a page teaches nothing.
+ */
+export const QUESTION_QUALITY_RULES = `
+ATURAN KUALITAS SOAL (WAJIB):
+- Siswa TIDAK melihat file materinya. Soal harus bisa dijawab tanpa membuka file: JANGAN menyebut "PPT", "slide", "halaman", "hal.", "materi ini", "teks di atas", "gambar di atas", "menurut buku", atau "pada materi disebutkan". Tulis faktanya langsung di soal bila perlu.
+- Pilihan jawaban tidak boleh "semua benar"/"semua salah", dan hanya SATU yang benar.
+- "explanation" berisi penjelasan isinya secara langsung (1-3 kalimat): kenapa jawaban itu benar dan, bila perlu, kenapa pengecoh salah. JANGAN menunjuk halaman, slide, atau "lihat materi".
+- Bahasa sederhana dan sesuai tingkat kelas siswa.`;
+
+// Soal that only make sense next to the original file ("menurut slide 3").
+const FILE_REFERENCE = /\b(ppt|power ?point|(slide|salindia|halaman)\s*(ke-?)?\s*(\d|ini|di atas|tersebut|sebelumnya)|hal\.\s*\d|materi (ini|di atas|tersebut)|teks (di atas|tersebut)|gambar (di atas|berikut|tersebut)|menurut (materi|buku|modul|presentasi)|pada (materi|presentasi|modul) (ini|disebutkan|dijelaskan))/i;
+
+// Strips "(hal. 4)", "[Sumber: ...]", "Lihat slide 3." from an explanation.
+function cleanExplanation(text: string | undefined): string {
+  return (text ?? "")
+    .replace(/\[Sumber:[^\]]*\]/gi, "")
+    .replace(/\(\s*(hal(aman)?\.?|slide)\s*\d+[^)]*\)/gi, "")
+    .replace(/[^.!?]*\b(lihat|baca|cek|perhatikan)\b[^.!?]*\b(halaman|hal\.|slide|ppt|materi)\b[^.!?]*[.!?]?/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
 function isQuestion(q: unknown): q is RawQuestion {
   const o = q as RawQuestion | null;
   return !!o && typeof o.question === "string" && !!o.question.trim() &&
@@ -35,7 +61,7 @@ export function parseQuestionsJson(text: string): RawQuestion[] {
   if (end > start) {
     try {
       const parsed = JSON.parse(text.slice(start, end + 1));
-      if (Array.isArray(parsed)) return parsed.filter(isQuestion);
+      if (Array.isArray(parsed)) return polish(parsed.filter(isQuestion));
     } catch { /* fall through to per-object recovery */ }
   }
 
@@ -62,7 +88,14 @@ export function parseQuestionsJson(text: string): RawQuestion[] {
       }
     }
   }
-  return out;
+  return polish(out);
+}
+
+/** Drops questions that reference the source file and cleans explanations. */
+function polish(qs: RawQuestion[]): RawQuestion[] {
+  return qs
+    .filter(q => !FILE_REFERENCE.test(q.question) && !Object.values(q.options).some(o => FILE_REFERENCE.test(String(o))))
+    .map(q => ({ ...q, explanation: cleanExplanation(q.explanation) }));
 }
 
 /** Prompt fragment listing already-generated questions to avoid duplicates. */

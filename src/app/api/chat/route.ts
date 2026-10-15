@@ -41,6 +41,8 @@ const HELP_INSTRUCTIONS: Record<HelpLevel, string> = {
 type Persona = { name: string; style: TeachingStyle; language: LanguageStyle; help: HelpLevel; groundingRequired: boolean };
 
 type Ctx = Persona & {
+  /** Explanations from the class question bank, as extra grounding. */
+  bankChunks: Chunk[];
   materials: Array<{ id: string; title: string; subject: string; chapter: string | null; file_url: string | null; content_text?: string | null }>;
 };
 
@@ -62,6 +64,37 @@ async function loadPersona(teacherIds: string[]): Promise<Persona> {
     help: ["petunjuk", "bertahap", "lengkap"].includes(data.help_level) ? data.help_level as HelpLevel : DEFAULT_PERSONA.help,
     groundingRequired: data.grounding_required !== false,
   };
+}
+
+const BANK_TITLE = "Pembahasan soal dari guru";
+
+/**
+ * The class's question bank (question + correct answer + explanation) as
+ * retrievable passages, so a concept asked in a quiz ("apa itu
+ * mitokondria?") can be explained even when no uploaded file covers it.
+ * Questions of assessments that are still open are left out - the tutor
+ * must never hold the answer key of an exam in progress.
+ */
+async function loadBankChunks(classId: string): Promise<Chunk[]> {
+  const nowIso = new Date().toISOString();
+  const [{ data: qs }, { data: openAssessments }] = await Promise.all([
+    supabaseAdmin.from("questions").select("id, question, options, correct_answer, explanation, topic")
+      .eq("class_id", classId).eq("status", "active").order("created_at", { ascending: false }).limit(400),
+    supabaseAdmin.from("assessments").select("id").eq("class_id", classId).eq("status", "published")
+      .or(`close_at.is.null,close_at.gt.${nowIso}`),
+  ]);
+  const openIds = (openAssessments ?? []).map(a => a.id as string);
+  const { data: inOpen } = openIds.length
+    ? await supabaseAdmin.from("assessment_questions").select("question_id").in("assessment_id", openIds)
+    : { data: [] as Array<{ question_id: string }> };
+  const blocked = new Set((inOpen ?? []).map(r => r.question_id as string));
+  return ((qs ?? []) as Array<{ id: string; question: string; options: Record<string, string>; correct_answer: string; explanation: string | null; topic: string | null }>)
+    .filter(q => !blocked.has(q.id) && q.explanation)
+    .map(q => ({
+      materialTitle: BANK_TITLE,
+      page: null,
+      text: `Topik: ${q.topic ?? "-"}. Pertanyaan: ${q.question} Jawaban: ${q.options?.[q.correct_answer] ?? q.correct_answer}. Penjelasan: ${q.explanation}`,
+    }));
 }
 
 /**
@@ -91,9 +124,13 @@ async function loadContext(req: Request): Promise<Ctx | null> {
   ]);
 
   const teacherIds = [...new Set((assignments ?? []).map(a => a.teacher_id as string))];
-  const persona = await loadPersona(teacherIds);
+  const [persona, bankChunks] = await Promise.all([
+    loadPersona(teacherIds),
+    student.class_id ? loadBankChunks(student.class_id) : Promise.resolve([] as Chunk[]),
+  ]);
   return {
     ...persona,
+    bankChunks,
     materials: ((mats ?? []) as Array<Record<string, unknown> & { subjects: { name: string } | null }>).map(m => ({
       id: m.id as string,
       title: m.title as string,
@@ -155,7 +192,7 @@ export async function POST(req: Request) {
   const withTimeout = (p: Promise<string>) =>
     Promise.race([p, new Promise<string>(resolve => setTimeout(() => resolve(""), 20_000))]);
   const texts = await Promise.all(ctx.materials.map(async m => ({ m, text: await withTimeout(getMaterialText(m)) })));
-  const chunks = texts.flatMap(({ m, text }) => chunkMaterial(m.title, text));
+  const chunks = [...texts.flatMap(({ m, text }) => chunkMaterial(m.title, text)), ...ctx.bankChunks];
   const excerpts = retrieve(chunks, query);
   const unreadable = texts.filter(t => !t.text).map(t => t.m.title);
 
@@ -181,7 +218,7 @@ CARA MENGOBROL:
 
 ATURAN MATERI:
 ${groundingRules}
-- Setiap kali memakai isi kutipan, sebutkan sumbernya dengan format persis: [Sumber: Judul Materi, hal. N] (pakai nomor halaman dari tanda <<Judul, hal. N>>).
+- Setiap kali memakai isi kutipan, sebutkan sumbernya dengan format persis: [Sumber: Judul Materi, hal. N] (pakai nomor halaman dari tanda <<Judul, hal. N>>). Kutipan bertanda <<${BANK_TITLE}>> juga boleh dipakai untuk menjelaskan, tetapi JANGAN ditulis sebagai [Sumber: ...].
 
 ${STYLE_INSTRUCTIONS[ctx.style]}
 ${LANGUAGE_INSTRUCTIONS[ctx.language]}

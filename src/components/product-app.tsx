@@ -128,6 +128,56 @@ import {
 // SHARED LOCAL UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Multi-select topic filter: a dropdown of checkboxes with "Pilih semua"
+// and "Kosongkan". An empty selection means every topic.
+function TopicMultiSelect({ topics, selected, onChange, counts, className }: {
+  topics: string[];
+  selected: Set<string>;
+  onChange: (next: Set<string>) => void;
+  counts?: Record<string, number>;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = React.useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e: MouseEvent) => { if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false); };
+    document.addEventListener("mousedown", close);
+    return () => document.removeEventListener("mousedown", close);
+  }, [open]);
+  const label = selected.size === 0 ? "Semua topik"
+    : selected.size === 1 ? [...selected][0]
+    : `${selected.size} topik dipilih`;
+  const toggle = (t: string) => { const n = new Set(selected); if (n.has(t)) n.delete(t); else n.add(t); onChange(n); };
+  return (
+    <div ref={ref} className={cn("relative", className)}>
+      <button type="button" onClick={() => setOpen(o => !o)} aria-expanded={open}
+        className="flex w-full items-center justify-between gap-2 rounded-[8px] border border-border bg-surface px-3 py-1.5 text-left text-[13px] text-ink hover:border-primary/40">
+        <span className="truncate">{label}</span>
+        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-ink-tertiary" />
+      </button>
+      {open && (
+        <div className="absolute left-0 z-40 mt-1 w-72 max-w-[85vw] rounded-[10px] border border-border bg-surface p-2 shadow-lg">
+          <div className="flex items-center justify-between gap-2 border-b border-border px-1 pb-2">
+            <button type="button" className="text-[12px] font-semibold text-primary hover:underline" onClick={() => onChange(new Set(topics))}>Pilih semua</button>
+            <button type="button" className="text-[12px] font-semibold text-ink-secondary hover:underline" onClick={() => onChange(new Set())}>Kosongkan</button>
+          </div>
+          <div className="max-h-64 overflow-y-auto pt-1">
+            {topics.length === 0 && <p className="px-2 py-3 text-[12px] text-ink-tertiary">Belum ada topik.</p>}
+            {topics.map(t => (
+              <label key={t} className="flex cursor-pointer items-center gap-2 rounded-[6px] px-2 py-1.5 text-[13px] text-ink hover:bg-background">
+                <input type="checkbox" checked={selected.has(t)} onChange={() => toggle(t)} className="h-4 w-4 accent-primary" />
+                <span className="flex-1 truncate">{t}</span>
+                {counts?.[t] !== undefined && <span className="text-[11px] text-ink-tertiary">{counts[t]}</span>}
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConfirmDialog({
   open, title, message, confirmLabel, confirmVariant = "default", cancelLabel = "Batal", onConfirm, onCancel,
 }: {
@@ -1632,6 +1682,7 @@ async function fetchAttemptReviewDetail(attemptId: string): Promise<ReviewQuesti
 type MaterialRow = {
   id: string; title: string; type: string | null; file_url: string | null; file_size: number | null;
   ai_processed: boolean; status: string; class_id: string | null; subject_id: string | null; created_at: string;
+  creator_id: string | null;
   // migration 020 - absent on databases that haven't applied it yet
   chapter?: string | null; academic_year?: string | null; publisher?: string | null; source_type?: string | null;
 };
@@ -1640,7 +1691,7 @@ type MaterialRow = {
 // structurally assignable anywhere a plain Material is expected (MaterialCard
 // etc.), while still letting callers that need to download/re-extract the
 // file get at file_url without a parallel lookup structure.
-type MaterialWithFile = Material & { fileUrl: string | null; academicYear?: string; sourceType?: string };
+type MaterialWithFile = Material & { fileUrl: string | null; academicYear?: string; sourceType?: string; creatorId?: string | null };
 
 function materialRowToMock(row: MaterialRow, className: string | undefined, subjectName: string, questionCount: number): MaterialWithFile {
   return {
@@ -1660,8 +1711,13 @@ function materialRowToMock(row: MaterialRow, className: string | undefined, subj
     publisher: row.publisher ?? undefined,
     academicYear: row.academic_year ?? undefined,
     sourceType: row.source_type ?? undefined,
+    creatorId: row.creator_id,
   };
 }
+
+// Every materials column except content_text (the cached full text of a
+// book can be hundreds of KB - it is only ever read server-side).
+const MATERIAL_COLUMNS = "id, title, type, file_url, file_size, ai_processed, status, class_id, subject_id, creator_id, created_at, chapter, academic_year, publisher, source_type";
 
 // Teacher-scoped read: RLS already restricts to the teacher's assigned
 // classes. When classId is given, further narrowed to that class + the
@@ -1673,7 +1729,7 @@ function materialRowToMock(row: MaterialRow, className: string | undefined, subj
 async function fetchTeacherMaterials(classId: string | null, subjectId: string | undefined, classNamesById: Map<string, string>, subjectNamesById: Map<string, string>): Promise<MaterialWithFile[]> {
   let query = supabase
     .from("materials")
-    .select("*")
+    .select(MATERIAL_COLUMNS)
     .order("created_at", { ascending: false });
   if (classId) {
     query = query.eq("class_id", classId);
@@ -1707,7 +1763,7 @@ async function fetchTeacherMaterials(classId: string | null, subjectId: string |
 async function fetchStudentMaterialsReal(): Promise<MaterialWithFile[]> {
   const { data } = await supabase
     .from("materials")
-    .select("*, subjects(name)")
+    .select(`${MATERIAL_COLUMNS}, subjects(name)`)
     .eq("status", "active")
     .order("created_at", { ascending: false });
   type Row = MaterialRow & { subjects: { name: string } | null };
@@ -2130,6 +2186,22 @@ function TeacherMaterials() {
   const materialsLoading = uploadedMaterials === null;
   const allMaterials = uploadedMaterials ?? [];
 
+  // Uploader names: only the uploader may edit/delete a material, so
+  // everyone else is shown whom to contact.
+  const [uploaders, setUploaders] = useState<Record<string, { creatorId: string; name: string }>>({});
+  useEffect(() => {
+    const missing = (uploadedMaterials ?? []).map(x => x.id).filter(id => !uploaders[id]);
+    if (missing.length === 0) return;
+    let cancelled = false;
+    apiPost<{ uploaders: Record<string, { creatorId: string; name: string }> }>("/api/teacher/materials/uploaders", { materialIds: missing })
+      .then(res => { if (!cancelled && res.uploaders) setUploaders(prev => ({ ...prev, ...res.uploaders })); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [uploadedMaterials]);
+  const uploaderName = (mat: MaterialWithFile) =>
+    mat.creatorId && mat.creatorId === teacher?.profileId ? `${teacher?.name ?? "Kamu"} (kamu)` : uploaders[mat.id]?.name ?? "…";
+  const isOwnMaterial = (mat: MaterialWithFile) => !!teacher && mat.creatorId === teacher.profileId;
+
   function handleProcessAI(id: string) {
     setConfirmProcessId(id);
   }
@@ -2541,7 +2613,7 @@ function TeacherMaterials() {
                     { label: "Sumber", value: m.sourceType || "-" },
                     { label: "Penerbit", value: m.publisher || "-" },
                     { label: "Tanggal Unggah", value: m.uploadedAt },
-                    { label: "Diunggah oleh", value: teacher?.name ?? "-" },
+                    { label: "Diunggah oleh", value: uploaderName(m) },
                     { label: "Status", value: m.status },
                   ].map(item => (
                     <div key={item.label}>
@@ -2657,6 +2729,11 @@ function TeacherMaterials() {
 
             {/* Footer */}
             <div className="shrink-0 flex items-center justify-between border-t border-border px-6 py-4">
+              {!isOwnMaterial(m) ? (
+                <p className="mr-4 max-w-[60%] text-[11px] leading-snug text-ink-secondary">
+                  Hanya <span className="font-semibold text-ink">{uploaders[m.id]?.name ?? "pengunggah"}</span> yang bisa mengubah atau menghapus materi ini. Hubungi beliau bila ada yang perlu diperbaiki.
+                </p>
+              ) : (
               <div className="flex items-center gap-4">
               <button onClick={() => setConfirmDeleteMaterial(m)}
                 className="flex items-center gap-1.5 text-[12px] font-semibold text-danger hover:underline">
@@ -2674,6 +2751,7 @@ function TeacherMaterials() {
                 {editMeta ? "Batalkan" : "Edit Materi"}
               </button>
               </div>
+              )}
               <div className="flex gap-2">
                 <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setSelectedMaterial(null); setEditMeta(false); }}>Tutup</Button>
                 {editMeta
@@ -3184,7 +3262,11 @@ function TeacherQuestionBank() {
           {/* Topic filter */}
           {topicOptions.length > 0 && (
             <div>
-              <div className="text-[10px] font-semibold text-ink-tertiary mb-1.5">BAB / TOPIK</div>
+              <div className="mb-1.5 flex items-center gap-3">
+                <span className="text-[10px] font-semibold text-ink-tertiary">BAB / TOPIK</span>
+                <button type="button" className="text-[11px] font-semibold text-primary hover:underline" onClick={() => setSelectedTopics(new Set(topicOptions))}>Pilih semua</button>
+                {selectedTopics.size > 0 && <button type="button" className="text-[11px] font-semibold text-ink-secondary hover:underline" onClick={() => setSelectedTopics(new Set())}>Kosongkan</button>}
+              </div>
               <div className="flex flex-wrap gap-1.5">
                 {topicOptions.map(t => (
                   <button key={t} onClick={() => toggleTopic(t)}
@@ -3606,7 +3688,7 @@ function TeacherAssessmentBuilder() {
   }, [teacher, teacherLoading, formClassId, formSubjectId]);
   const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(new Set());
   const [bankSearch, setBankSearch] = useState("");
-  const [bankTopic, setBankTopic] = useState("");
+  const [bankTopics, setBankTopics] = useState<Set<string>>(new Set());
   const [bankDifficulty, setBankDifficulty] = useState<"" | "Mudah" | "Sedang" | "Sulit">("");
   const [assessmentType, setAssessmentType] = useState<"uniform" | "adaptive">("uniform");
   const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
@@ -4199,7 +4281,7 @@ function TeacherAssessmentBuilder() {
             const topics = [...new Set(bankQs.map(q => q.topic).filter(Boolean))].sort((x, y) => x.localeCompare(y, "id"));
             const q = bankSearch.trim().toLowerCase();
             const visible = bankQs.filter(item =>
-              (bankTopic === "" || item.topic === bankTopic) &&
+              (bankTopics.size === 0 || bankTopics.has(item.topic)) &&
               (bankDifficulty === "" || item.difficulty === bankDifficulty) &&
               (!q || item.question.toLowerCase().includes(q) || item.topic.toLowerCase().includes(q)));
             const allVisibleSelected = visible.length > 0 && visible.every(item => selectedQuestions.has(item.id));
@@ -4230,8 +4312,8 @@ function TeacherAssessmentBuilder() {
                     {bankSearch && <button type="button" aria-label="Hapus pencarian" onClick={() => setBankSearch("")}><X className="h-3.5 w-3.5 text-ink-tertiary" /></button>}
                   </div>
                   <div className="w-52">
-                    <SelectField value={bankTopic} onChange={setBankTopic} placeholder="Semua topik"
-                      options={[{ value: "", label: "Semua topik" }, ...topics.map(t => ({ value: t, label: t, description: `${bankQs.filter(x => x.topic === t).length} soal` }))]} />
+                    <TopicMultiSelect topics={topics} selected={bankTopics} onChange={setBankTopics}
+                      counts={Object.fromEntries(topics.map(t => [t, bankQs.filter(x => x.topic === t).length]))} />
                   </div>
                   <div className="flex gap-1">
                     {(["", "Mudah", "Sedang", "Sulit"] as const).map(d => (
@@ -4884,15 +4966,24 @@ function TeacherResults() {
               <Button variant="outline" className="h-8 text-[12px]" onClick={() => setDetailId(null)}>Tutup</Button>
               <Button variant="default" className="h-8 text-[12px]" disabled={!resultDetail} onClick={() => {
                 if (!resultDetail) return;
-                const bom = "﻿";
-                const scoreList = resultDetail.studentRows.map(s => [s.name, s.score != null ? s.score.toString() : "—"]);
-                const rows = [["Nama Siswa", "Nilai"], ...scoreList];
-                const csv = bom + rows.map(r => r.map(cell => `"${cell}"`).join(",")).join("\n");
-                const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement("a");
-                a.href = url; a.download = `${detail.title}.csv`; a.click();
-                URL.revokeObjectURL(url);
+                // Only the students who actually submitted THIS assessment.
+                const takers = resultDetail.studentRows.filter(s => s.score != null || Object.keys(s.answers).length > 0);
+                if (takers.length === 0) {
+                  setResultsToast({ message: `Belum ada siswa yang mengumpulkan "${detail.title}", jadi belum ada nilai untuk diekspor.`, tone: "danger" });
+                  return;
+                }
+                const qs = resultDetail.questions;
+                const rows: (string | number)[][] = [
+                  ["Asesmen", detail.title],
+                  [],
+                  ["Nama Siswa", "Nilai", "Jawaban Benar", ...qs.map((_, i) => `Soal ${i + 1}`)],
+                  ...takers.map(st => {
+                    const correct = qs.filter(q => st.answers[q.assessmentQuestionId] === q.correctAnswer).length;
+                    return [st.name, st.score ?? "", correct,
+                      ...qs.map(q => st.answers[q.assessmentQuestionId] ?? "")];
+                  }),
+                ];
+                downloadCsv(`Nilai - ${detail.title}.csv`, rows);
               }}>
                 <Download className="mr-1.5 h-3.5 w-3.5" />Ekspor Nilai
               </Button>
@@ -6568,9 +6659,13 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
 
   const currentQ = examQuestions[current];
   const answeredCount = Object.keys(answers).length;
-  const timerMins = String(Math.floor(timeLeft / 60)).padStart(2, "0");
-  const timerSecs = String(timeLeft % 60).padStart(2, "0");
-  const timerCritical = timeLeft < 300;
+  // No deadline (assessment without duration/close time) -> no countdown,
+  // instead of a misleading frozen 00:00.
+  const deadlineAt = examSession?.deadlineAt ?? null;
+  const secsLeft = deadlineAt ? (timeLeft || Math.max(0, Math.round((deadlineAt - Date.now()) / 1000))) : 0;
+  const timerMins = String(Math.floor(secsLeft / 60)).padStart(2, "0");
+  const timerSecs = String(secsLeft % 60).padStart(2, "0");
+  const timerCritical = !!deadlineAt && secsLeft < 300;
 
   return (
     <div className="min-h-dvh bg-background flex flex-col select-none">
@@ -6597,7 +6692,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
             )}>
               <Clock className={cn("h-3.5 w-3.5", timerCritical ? "text-danger" : "text-warning")} />
               <span className={cn("text-[12px] font-semibold", timerCritical ? "text-danger" : "text-warning")}>
-                {timerMins}:{timerSecs}
+                {deadlineAt ? `${timerMins}:${timerSecs}` : "Tanpa batas waktu"}
               </span>
             </div>
             {/* Only submit — no exit */}
@@ -6778,78 +6873,138 @@ async function authedFetch(path: string, body: unknown) {
   return res.json();
 }
 
-function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions: PracticeQuestion[]; difficulty: string; topic?: string; onFinish: () => void }) {
-  const [current, setCurrent] = useState(0);
-  const [answers, setAnswers] = useState<Record<number, string>>({});
-  const [done, setDone] = useState(false);
-  const [grading, setGrading] = useState(false);
-  const [graded, setGraded] = useState<{ correct: number; results: Array<{ isCorrect: boolean; correctAnswer: string; explanation: string }> } | null>(null);
-  const [lockReason, setLockReason] = useState("");
+// Truly adaptive practice: one question at a time, graded immediately.
+// 2 correct in a row -> next question one level harder; 2 wrong in a row ->
+// one level easier, plus the explanation as reinforcement before moving on.
+const LEVELS = ["Mudah", "Sedang", "Sulit"] as const;
+type Level = typeof LEVELS[number];
+const ADAPTIVE_SESSION_LENGTH = 10;
+const ADAPTIVE_STREAK = 2;
 
-  // Same exam lockdown as teacher exams: leaving the page ends the practice
-  // and grades what was answered so far.
-  useExamLockdown(questions.length > 0 && !done && !grading, reason => {
+type AdaptiveResult = { q: PracticeQuestion; level: Level; answer: string; isCorrect: boolean; correctAnswer: string; explanation: string };
+
+function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId: string; startLevel: Level; topic?: string; onFinish: () => void }) {
+  const [level, setLevel] = useState<Level>(startLevel);
+  const [currentQ, setCurrentQ] = useState<PracticeQuestion | null>(null);
+  const [loadingQ, setLoadingQ] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [feedback, setFeedback] = useState<AdaptiveResult | null>(null);
+  const [levelChange, setLevelChange] = useState<"up" | "down" | null>(null);
+  const [results, setResults] = useState<AdaptiveResult[]>([]);
+  const [done, setDone] = useState(false);
+  const [lockReason, setLockReason] = useState("");
+  // Prefetched questions per level, and every id already shown.
+  const pools = React.useRef<Record<Level, PracticeQuestion[]>>({ Mudah: [], Sedang: [], Sulit: [] });
+  const seen = React.useRef(new Set<string>());
+  const inflight = React.useRef<Partial<Record<Level, Promise<void>>>>({});
+
+  function fill(lv: Level): Promise<void> {
+    if (inflight.current[lv]) return inflight.current[lv]!;
+    const p = (async () => {
+      const data = await authedFetch("/api/student/practice/questions", {
+        subjectId, topic: topic && topic !== "Semua" ? topic : undefined, difficulty: lv, count: 4,
+        exclude: [...seen.current, ...LEVELS.flatMap(l => pools.current[l].map(q => q.id))],
+      }) as { questions?: PracticeQuestion[]; error?: string } | null;
+      if (data?.error) throw new Error(data.error);
+      const fresh = (data?.questions ?? []).filter(q => !seen.current.has(q.id) && !pools.current[lv].some(x => x.id === q.id));
+      pools.current[lv].push(...fresh);
+    })().finally(() => { delete inflight.current[lv]; });
+    inflight.current[lv] = p;
+    return p;
+  }
+
+  // Next question at `lv`; falls back to the nearest level that has one.
+  async function nextQuestion(lv: Level) {
+    setLoadingQ(true);
+    setLoadError(null);
+    try {
+      if (pools.current[lv].length === 0) await fill(lv);
+      const order = [lv, ...LEVELS.filter(l => l !== lv).sort((a, b) => Math.abs(LEVELS.indexOf(a) - LEVELS.indexOf(lv)) - Math.abs(LEVELS.indexOf(b) - LEVELS.indexOf(lv)))];
+      let picked: PracticeQuestion | undefined;
+      for (const l of order) {
+        if (pools.current[l].length === 0 && l !== lv) await fill(l).catch(() => {});
+        picked = pools.current[l].shift();
+        if (picked) break;
+      }
+      if (!picked) { setCurrentQ(null); setLoadError("Soal untuk topik ini sudah habis. Coba topik lain, ya!"); return; }
+      seen.current.add(picked.id);
+      setCurrentQ(picked);
+      setSelected(null);
+      setFeedback(null);
+      // Warm up the neighbouring levels so a level change doesn't wait.
+      const i = LEVELS.indexOf(lv);
+      for (const l of [LEVELS[i - 1], LEVELS[i + 1]]) if (l && pools.current[l].length === 0) fill(l).catch(() => {});
+      if (pools.current[lv].length < 2) fill(lv).catch(() => {});
+    } catch (err) {
+      setLoadError(err instanceof Error ? err.message : "Gagal memuat soal. Coba lagi.");
+    } finally {
+      setLoadingQ(false);
+    }
+  }
+
+  useEffect(() => { nextQuestion(startLevel); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useExamLockdown(!done && !loadError, reason => {
     setLockReason(reason);
-    finishSession();
+    finish(results);
   });
+
+  function finish(all: AdaptiveResult[]) {
+    const wrong = all.filter(r => !r.isCorrect);
+    if (wrong.length > 0) saveIncorrectQuestions(wrong.map(r => ({
+      id: `adaptive_${Date.now()}_${r.q.id}`,
+      assessmentId: "adaptive",
+      assessmentTitle: `Latihan Adaptif${topic && topic !== "Semua" ? ` – ${topic}` : ""}`,
+      topic: r.q.topic ?? "",
+      question: r.q.question,
+      yourAnswer: r.answer,
+      correctAnswer: r.correctAnswer,
+      explanation: r.explanation ?? "",
+      date: new Date().toLocaleDateString("id-ID"),
+      options: { A: r.q.options.A, B: r.q.options.B, C: r.q.options.C, D: r.q.options.D, ...(r.q.options.E ? { E: r.q.options.E } : {}) },
+    })));
+    setDone(true);
+    exitExamFullscreen();
+  }
+
+  async function check() {
+    if (!currentQ || !selected || checking) return;
+    setChecking(true);
+    const r = await authedFetch("/api/student/practice/submit", { questionId: currentQ.id, answer: selected }) as
+      { isCorrect?: boolean; correctAnswer?: string; explanation?: string; error?: string } | null;
+    setChecking(false);
+    if (!r || r.error || typeof r.isCorrect !== "boolean") { setLoadError(r?.error ?? "Jawaban gagal dikirim. Periksa internetmu lalu coba lagi."); return; }
+    const result: AdaptiveResult = { q: currentQ, level, answer: selected, isCorrect: r.isCorrect, correctAnswer: r.correctAnswer ?? "", explanation: r.explanation ?? "" };
+    const all = [...results, result];
+    setResults(all);
+    setFeedback(result);
+    // Streak of the last answers at this level decides the next level.
+    const tail = all.slice(-ADAPTIVE_STREAK);
+    const i = LEVELS.indexOf(level);
+    if (tail.length === ADAPTIVE_STREAK && tail.every(x => x.isCorrect && x.level === level) && i < LEVELS.length - 1) setLevelChange("up");
+    else if (tail.length === ADAPTIVE_STREAK && tail.every(x => !x.isCorrect && x.level === level) && i > 0) setLevelChange("down");
+    else setLevelChange(null);
+  }
+
+  function next() {
+    if (results.length >= ADAPTIVE_SESSION_LENGTH) { finish(results); return; }
+    const i = LEVELS.indexOf(level);
+    const nextLevel = levelChange === "up" ? LEVELS[i + 1] : levelChange === "down" ? LEVELS[i - 1] : level;
+    setLevel(nextLevel);
+    setLevelChange(null);
+    nextQuestion(nextLevel);
+  }
 
   function exitPractice() {
     exitExamFullscreen();
     onFinish();
   }
 
-  if (questions.length === 0) {
-    return (
-      <div className="space-y-6">
-        <EmptyState title="Tidak ada soal tersedia"
-          description={`Tidak ada soal dengan filter "${topic ?? "Semua"}" / "${difficulty}" saat ini.`}
-          action={<Button variant="default" onClick={onFinish}>Kembali</Button>} />
-      </div>
-    );
-  }
-
-  const currentQ = questions[current];
-  const isLast = current === questions.length - 1;
-
-  async function finishSession() {
-    setGrading(true);
-    // Grading is server-side (correct_answer is never sent to the client
-    // before this point) - each answer is submitted and graded independently,
-    // then tallied here once every question has been graded.
-    const results = await Promise.all(
-      questions.map((q, i) => authedFetch("/api/student/practice/submit", { questionId: q.id, answer: answers[i] ?? "" }))
-    );
-    const typed = results as Array<{ isCorrect: boolean; correctAnswer: string; explanation: string } | null>;
-    const correct = typed.filter(r => r?.isCorrect).length;
-
-    const incorrectQs: StoredIncorrectQ[] = questions
-      .map((q, i) => ({ q, i, r: typed[i] }))
-      .filter((item): item is { q: PracticeQuestion; i: number; r: { isCorrect: boolean; correctAnswer: string; explanation: string } } =>
-        !!item.r && !item.r.isCorrect)
-      .map(({ q, i, r }) => ({
-        id: `adaptive_${Date.now()}_${q.id}`,
-        assessmentId: "adaptive",
-        assessmentTitle: `Latihan Adaptif${topic && topic !== "Semua" ? ` – ${topic}` : ""}`,
-        topic: q.topic ?? "",
-        question: q.question,
-        yourAnswer: answers[i] ?? "",
-        correctAnswer: r.correctAnswer,
-        explanation: r.explanation ?? "",
-        date: new Date().toLocaleDateString("id-ID"),
-        options: { A: q.options.A, B: q.options.B, C: q.options.C, D: q.options.D, ...(q.options.E ? { E: q.options.E } : {}) },
-      }));
-    if (incorrectQs.length > 0) saveIncorrectQuestions(incorrectQs);
-
-    setGraded({ correct, results: typed.map(r => r ?? { isCorrect: false, correctAnswer: "A", explanation: "" }) });
-    setGrading(false);
-    setDone(true);
-    exitExamFullscreen();
-  }
-
   if (done) {
-    const correct = graded?.correct ?? 0;
-    const score = Math.round((correct / questions.length) * 100);
-
+    const correct = results.filter(r => r.isCorrect).length;
+    const score = results.length ? Math.round((correct / results.length) * 100) : 0;
     return (
       <div className="flex flex-col items-center gap-6 py-16 text-center">
         {lockReason && (
@@ -6860,72 +7015,114 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
         </div>
         <div>
           <h2 className="text-2xl font-bold text-ink">Latihan Selesai!</h2>
-          <p className="text-[14px] text-ink-secondary mt-1">{correct} dari {questions.length} soal benar</p>
+          <p className="text-[14px] text-ink-secondary mt-1">{correct} dari {results.length} soal benar · tingkat terakhir: <span className="font-semibold text-ink">{level}</span></p>
         </div>
         <ScoreCircle score={score} size={96} />
+        <div className="flex flex-wrap justify-center gap-1.5">
+          {results.map((r, i) => (
+            <span key={i} title={`Soal ${i + 1}: ${r.level}`}
+              className={cn("rounded-full px-2 py-0.5 text-[11px] font-semibold", r.isCorrect ? "bg-success-light text-success" : "bg-danger-light text-danger")}>
+              {i + 1}·{r.level}
+            </span>
+          ))}
+        </div>
         <Button variant="default" onClick={exitPractice}>Selesai</Button>
       </div>
     );
   }
 
-  const opts = [currentQ.options.A, currentQ.options.B, currentQ.options.C, currentQ.options.D, currentQ.options.E ?? ""];
+  const opts = currentQ ? [currentQ.options.A, currentQ.options.B, currentQ.options.C, currentQ.options.D, currentQ.options.E ?? ""] : [];
+  const number = results.length + (feedback ? 0 : 1);
 
-  // Full-screen layer (portalled to <body>): the sidebar/menu can't be
-  // reached during practice.
   return createPortal(
     <div className="fixed inset-0 z-[80] overflow-y-auto bg-background p-4 sm:p-8">
     <div className="space-y-5 max-w-2xl mx-auto">
       <div className="flex items-center justify-between">
         <div>
-          <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">Latihan Adaptif · {topic ?? "Semua"} · {difficulty}</p>
-          <h2 className="text-[18px] font-bold text-ink">Soal {current + 1} dari {questions.length}</h2>
+          <p className="text-[11px] font-bold uppercase tracking-[0.1em] text-primary">Latihan Adaptif · {topic ?? "Semua"}</p>
+          <h2 className="text-[18px] font-bold text-ink">Soal {Math.min(number, ADAPTIVE_SESSION_LENGTH)} dari {ADAPTIVE_SESSION_LENGTH}</h2>
         </div>
-        <Button variant="ghost" className="h-8 text-[12px]" onClick={exitPractice}>
-          <X className="mr-1.5 h-3.5 w-3.5" />Keluar
-        </Button>
+        <div className="flex items-center gap-2">
+          <Badge tone={level === "Mudah" ? "success" : level === "Sedang" ? "warning" : "danger"}>Tingkat: {level}</Badge>
+          <Button variant="ghost" className="h-8 text-[12px]" onClick={() => results.length ? finish(results) : exitPractice()}>
+            <X className="mr-1.5 h-3.5 w-3.5" />Keluar
+          </Button>
+        </div>
       </div>
       <div className="h-1.5 rounded-full bg-border overflow-hidden">
-        <div className="h-full bg-primary transition-all" style={{ width: `${((current + 1) / questions.length) * 100}%` }} />
+        <div className="h-full bg-primary transition-all" style={{ width: `${(results.length / ADAPTIVE_SESSION_LENGTH) * 100}%` }} />
       </div>
-      <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
-        <div className="flex items-center gap-2 mb-3">
-          <Badge tone="neutral">Soal {current + 1}</Badge>
-          <Badge tone={currentQ.difficulty === "Mudah" ? "success" : currentQ.difficulty === "Sedang" ? "warning" : "danger"}>{currentQ.difficulty}</Badge>
-          {currentQ.topic && <Badge tone="neutral">{currentQ.topic}</Badge>}
-        </div>
-        <p className="text-[15px] font-medium text-ink leading-relaxed">{currentQ.question}</p>
-      </div>
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-        {["A", "B", "C", "D", "E"].map((opt, i) => {
-          if (!opts[i]) return null;
-          const sel = answers[current] === opt;
-          return (
-            <button key={opt} onClick={() => setAnswers(prev => ({ ...prev, [current]: opt }))}
-              className={cn("flex items-center gap-3 rounded-[10px] border p-3.5 text-left transition-all",
-                sel ? "border-primary/40 bg-primary-soft" : "border-border bg-surface hover:border-primary/20 hover:bg-background"
-              )}>
-              <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-bold transition-colors",
-                sel ? "bg-primary text-white" : "bg-background border border-border text-ink-secondary"
-              )}>{opt}</span>
-              <span className="text-[13px] font-medium text-ink">{opts[i]}</span>
-            </button>
-          );
-        })}
-      </div>
-      <div className="flex justify-between items-center">
-        <Button variant="outline" className="h-9" disabled={current === 0} onClick={() => setCurrent(c => Math.max(0, c - 1))}>
-          ← Sebelumnya
-        </Button>
-        {isLast ? (
-          <Button variant="success" className="h-9" disabled={grading} onClick={finishSession}>
-            {grading ? "Menilai..." : "Selesai & Lihat Nilai"}
-          </Button>
-        ) : (
-          <Button variant="default" className="h-9" onClick={() => setCurrent(c => c + 1)}>
-            Berikutnya →
-          </Button>
-        )}
-      </div>
+      <p className="text-[12px] text-ink-secondary">Jawab benar {ADAPTIVE_STREAK}× berturut-turut → soal jadi lebih sulit. Salah {ADAPTIVE_STREAK}× berturut-turut → soal jadi lebih mudah.</p>
+
+      {loadingQ && <SectionLoading message={`Menyiapkan soal tingkat ${level}...`} />}
+      {!loadingQ && loadError && (
+        <AlertPanel tone="warning" title="Latihan tidak bisa dilanjutkan">
+          {loadError}
+          <div className="mt-3 flex gap-2">
+            {results.length > 0 && <Button variant="default" size="sm" onClick={() => finish(results)}>Lihat Nilai</Button>}
+            <Button variant="outline" size="sm" onClick={exitPractice}>Kembali</Button>
+          </div>
+        </AlertPanel>
+      )}
+
+      {!loadingQ && !loadError && currentQ && (
+        <>
+          <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
+            <div className="flex items-center gap-2 mb-3">
+              <Badge tone={currentQ.difficulty === "Mudah" ? "success" : currentQ.difficulty === "Sedang" ? "warning" : "danger"}>{currentQ.difficulty}</Badge>
+              {currentQ.topic && <Badge tone="neutral">{currentQ.topic}</Badge>}
+            </div>
+            <p className="text-[15px] font-medium text-ink leading-relaxed">{currentQ.question}</p>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+            {["A", "B", "C", "D", "E"].map((opt, i) => {
+              if (!opts[i]) return null;
+              const isSel = selected === opt;
+              const isRight = feedback && feedback.correctAnswer === opt;
+              const isWrongPick = feedback && isSel && !feedback.isCorrect;
+              return (
+                <button key={opt} disabled={!!feedback || checking} onClick={() => setSelected(opt)}
+                  className={cn("flex items-center gap-3 rounded-[10px] border p-3.5 text-left transition-all disabled:cursor-default",
+                    isRight ? "border-success bg-success-light" : isWrongPick ? "border-danger bg-danger-light"
+                      : isSel ? "border-primary/40 bg-primary-soft" : "border-border bg-surface hover:border-primary/20 hover:bg-background"
+                  )}>
+                  <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-bold transition-colors",
+                    isRight ? "bg-success text-white" : isWrongPick ? "bg-danger text-white" : isSel ? "bg-primary text-white" : "bg-background border border-border text-ink-secondary"
+                  )}>{opt}</span>
+                  <span className="text-[13px] font-medium text-ink">{opts[i]}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {feedback && (
+            <div className={cn("rounded-card border p-4", feedback.isCorrect ? "border-success/30 bg-success-light" : "border-danger/30 bg-danger-light")}>
+              <p className={cn("text-[14px] font-bold", feedback.isCorrect ? "text-success" : "text-danger")}>
+                {feedback.isCorrect ? "Benar! 🎉" : `Belum tepat. Jawaban yang benar: ${feedback.correctAnswer}`}
+              </p>
+              {feedback.explanation && <p className="mt-1 text-[13px] leading-relaxed text-ink">{feedback.explanation}</p>}
+              {levelChange === "up" && <p className="mt-2 text-[13px] font-semibold text-primary">Hebat, {ADAPTIVE_STREAK} benar berturut-turut! Soal berikutnya lebih sulit 💪</p>}
+              {levelChange === "down" && (
+                <p className="mt-2 text-[13px] font-semibold text-warning">
+                  Tidak apa-apa! Baca lagi penjelasan di atas ya. Soal berikutnya dibuat lebih mudah supaya kamu makin paham.
+                </p>
+              )}
+            </div>
+          )}
+
+          <div className="flex justify-end">
+            {!feedback ? (
+              <Button variant="default" className="h-10 px-6" disabled={!selected || checking} onClick={check}>
+                {checking ? "Memeriksa..." : "Periksa Jawaban"}
+              </Button>
+            ) : (
+              <Button variant={results.length >= ADAPTIVE_SESSION_LENGTH ? "success" : "default"} className="h-10 px-6" onClick={next}>
+                {results.length >= ADAPTIVE_SESSION_LENGTH ? "Selesai & Lihat Nilai" : "Soal Berikutnya →"}
+              </Button>
+            )}
+          </div>
+        </>
+      )}
     </div>
     </div>,
     document.body,
@@ -6933,10 +7130,10 @@ function AdaptiveSession({ questions, difficulty, topic, onFinish }: { questions
 }
 
 function StudentAdaptive() {
-  const [difficulty, setDifficulty] = useState<"Mudah" | "Sedang" | "Sulit" | "Campur">("Campur");
+  const [difficulty, setDifficulty] = useState<Level>("Sedang");
   const [selectedTopic, setSelectedTopic] = useState<string>("Semua");
-  const [sessionQs, setSessionQs] = useState<PracticeQuestion[] | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [session, setSession] = useState<{ subjectId: string; level: Level } | null>(null);
+  const loading = false;
   const [subjects, setSubjects] = useState<{ id: string; name: string }[] | null>(null);
   const [selectedSubjectId, setSelectedSubjectId] = useState<string>("");
   const [topics, setTopics] = useState<string[] | null>(["Semua"]);
@@ -6994,31 +7191,19 @@ function StudentAdaptive() {
     return () => { cancelled = true; };
   }, [selectedSubjectId]);
 
-  async function startSession(overrideTopic?: string, overrideSubjectId?: string) {
+  function startSession(overrideTopic?: string, overrideSubjectId?: string) {
     const subjectId = overrideSubjectId ?? selectedSubjectId;
     if (!subjectId) { setPracticeError("Tolong pilih mata pelajaran terlebih dahulu."); return; }
     setPracticeError(null);
     requestExamFullscreen(); // must run inside the click that starts practice
     const topic = overrideTopic ?? selectedTopic;
     setSessionTopic(topic);
-    setLoading(true);
-    try {
-      const data = await authedFetch("/api/student/practice/questions", {
-        subjectId,
-        topic: topic === "Semua" ? undefined : topic,
-        difficulty: difficulty === "Campur" ? undefined : difficulty,
-        count: 10,
-      }) as { questions?: PracticeQuestion[]; error?: string } | null;
-      if (data?.error) { exitExamFullscreen(); setPracticeError(data.error); return; }
-      if (!data?.questions?.length) exitExamFullscreen();
-      setSessionQs(data?.questions ?? []);
-    } finally {
-      setLoading(false);
-    }
+    setSession({ subjectId, level: difficulty });
   }
 
-  if (sessionQs !== null) {
-    return <AdaptiveSession questions={sessionQs} difficulty={difficulty} topic={sessionTopic} onFinish={() => { exitExamFullscreen(); setSessionQs(null); }} />;
+  if (session) {
+    return <AdaptiveSession subjectId={session.subjectId} startLevel={session.level} topic={sessionTopic}
+      onFinish={() => { exitExamFullscreen(); setSession(null); }} />;
   }
 
   return (
@@ -7062,9 +7247,9 @@ function StudentAdaptive() {
           </div>
         </div>
         <div>
-          <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Tingkat Kesulitan</label>
+          <label className="block text-[11px] font-bold uppercase tracking-[0.08em] text-ink-secondary mb-2">Mulai dari tingkat</label>
           <div className="flex gap-2 flex-wrap">
-            {(["Mudah", "Sedang", "Sulit", "Campur"] as const).map(d => (
+            {(["Mudah", "Sedang", "Sulit"] as const).map(d => (
               <button key={d} onClick={() => setDifficulty(d)}
                 className={cn("rounded-full px-4 py-1.5 text-[12px] font-semibold transition-colors border",
                   difficulty === d ? "bg-primary text-white border-primary" : "bg-background text-ink-secondary border-border hover:border-primary/30")}>
@@ -7072,6 +7257,7 @@ function StudentAdaptive() {
               </button>
             ))}
           </div>
+          <p className="mt-2 text-[11px] text-ink-tertiary">Tingkat soal akan naik kalau kamu sering benar, dan turun kalau sering salah.</p>
         </div>
       </div>
 
@@ -7322,47 +7508,83 @@ function StudentWeakTopics() {
 
 // ── Student Incorrect ─────────────────────────────────────────────────────────
 
-function StudentIncorrect() {
-  const [questions, setQuestions] = useState<StoredIncorrectQ[]>([]);
-  useEffect(() => { initIncorrectStore(); setQuestions([..._incorrectStore.questions]); }, []);
+type WrongAnswerItem = {
+  id: string; source: string; topic: string; question: string; options: Record<string, string>;
+  yourAnswer: string | null; correctAnswer: string; explanation: string; at: number;
+};
 
-  function handleDelete(id: string) {
-    deleteIncorrectQuestion(id);
-    setQuestions(prev => prev.filter(q => q.id !== id));
+function StudentIncorrect() {
+  const [items, setItems] = useState<WrongAnswerItem[] | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  // Hidden items are remembered per account on this device.
+  const [hiddenKey, setHiddenKey] = useState<string | null>(null);
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    supabase.auth.getSession().then(async ({ data }) => {
+      const session = data.session;
+      if (!session) { if (!cancelled) setItems([]); return; }
+      const key = `catchup_hidden_wrong_${session.user.id}`;
+      setHiddenKey(key);
+      setHidden(new Set(lsGet<string[]>(key) ?? []));
+      try {
+        const res = await fetch("/api/student/wrong-answers", { headers: { Authorization: `Bearer ${session.access_token}` } });
+        const body = await res.json() as { items?: WrongAnswerItem[] };
+        if (!cancelled) setItems(body.items ?? []);
+      } catch {
+        if (!cancelled) { setLoadError(true); setItems([]); }
+      }
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  function handleHide(id: string) {
+    const next = new Set(hidden); next.add(id);
+    setHidden(next);
+    if (hiddenKey) lsSet(hiddenKey, [...next]);
   }
+
+  const visible = (items ?? []).filter(q => !hidden.has(q.id));
+  const answerText = (q: WrongAnswerItem, key: string | null) =>
+    key ? `${key}. ${q.options[key] ?? ""}` : "Tidak dijawab";
 
   return (
     <div className="space-y-6">
-      <TabIntro text="Soal yang kamu jawab salah saat latihan, lengkap dengan jawaban benarnya." />
-      {questions.length === 0 ? (
+      <TabIntro text="Soal yang kamu jawab salah saat latihan dan asesmen, lengkap dengan jawaban benarnya." />
+      {items === null ? (
+        <SectionLoading message="Memuat soal salah..." />
+      ) : loadError ? (
+        <AlertPanel tone="danger" title="Gagal memuat soal salah">Periksa internetmu lalu muat ulang halaman.</AlertPanel>
+      ) : visible.length === 0 ? (
         <div className="flex flex-col items-center gap-3 py-16 text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-full bg-background border border-border">
             <CheckCircle2 className="h-6 w-6 text-success" />
           </div>
           <p className="text-[14px] font-semibold text-ink">Belum ada soal salah</p>
-          <p className="text-[12px] text-ink-secondary">Soal yang salah saat asesmen akan muncul di sini</p>
+          <p className="text-[12px] text-ink-secondary">Soal yang salah saat latihan atau asesmen akan muncul di sini</p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {questions.map(q => (
+          {visible.map(q => (
             <div key={q.id} className="rounded-card border border-danger/20 bg-surface p-4 space-y-3">
               <div className="flex items-center gap-2 flex-wrap">
-                <Badge tone="neutral">{q.topic}</Badge>
-                <span className="text-[10px] text-ink-tertiary">{q.assessmentTitle} · {q.date}</span>
-                <button onClick={() => handleDelete(q.id)}
+                {q.topic && <Badge tone="neutral">{q.topic}</Badge>}
+                <span className="text-[10px] text-ink-tertiary">{q.source}{q.at ? ` · ${new Date(q.at).toLocaleDateString("id-ID")}` : ""}</span>
+                <button onClick={() => handleHide(q.id)}
                   className="ml-auto flex items-center gap-1 rounded-[4px] px-2 py-0.5 text-[10px] font-semibold text-ink-tertiary hover:text-danger hover:bg-danger-light transition-colors">
-                  <X className="h-3 w-3" />Hapus
+                  <X className="h-3 w-3" />Sembunyikan
                 </button>
               </div>
               <p className="text-[13px] font-medium text-ink leading-snug">{q.question}</p>
               <div className="grid grid-cols-2 gap-2">
                 <div className="rounded-[6px] bg-danger-light border border-danger/20 p-2.5">
                   <div className="text-[9px] font-bold uppercase text-danger mb-1">Jawaban kamu</div>
-                  <div className="text-[11px] text-ink">{q.yourAnswer}: {q.options[q.yourAnswer] ?? ""}</div>
+                  <div className="text-[11px] text-ink">{q.yourAnswer ? answerText(q, q.yourAnswer) : "(tidak tercatat)"}</div>
                 </div>
                 <div className="rounded-[6px] bg-success-light border border-success/20 p-2.5">
                   <div className="text-[9px] font-bold uppercase text-success mb-1">Jawaban benar</div>
-                  <div className="text-[11px] text-ink">{q.correctAnswer}: {q.options[q.correctAnswer] ?? ""}</div>
+                  <div className="text-[11px] text-ink">{answerText(q, q.correctAnswer)}</div>
                 </div>
               </div>
               {q.explanation && (

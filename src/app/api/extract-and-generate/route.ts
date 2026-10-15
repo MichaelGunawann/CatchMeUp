@@ -4,7 +4,7 @@ import Groq from "groq-sdk";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { sampleTextForPrompt, documentSegment } from "@/lib/office-text";
-import { MAX_QUESTIONS_PER_CALL, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
+import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
 import { cacheMaterialText, extractTextFromBuffer } from "@/lib/material-text";
 
 let _groq: Groq | null = null;
@@ -129,7 +129,7 @@ export async function POST(req: Request) {
     }, { status: 400 });
   }
 
-  const prompt = `Kamu adalah pembuat soal profesional untuk ujian SMA Indonesia.
+  const prompt = `Kamu adalah pembuat soal profesional untuk sekolah di Indonesia (SD sampai SMA), sesuaikan tingkat soal dengan materinya.
 Berikut adalah isi materi dari file "${materialTitle}" (${subject}):
 
 ---
@@ -144,7 +144,7 @@ Format WAJIB — kembalikan HANYA JSON array, tanpa teks lain:
     "question": "Pertanyaan berdasarkan isi materi",
     "options": { "A": "...", "B": "...", "C": "...", "D": "..." },
     "correctAnswer": "B",
-    "explanation": "Penjelasan singkat mengapa jawaban ini benar, merujuk ke materi",
+    "explanation": "Penjelasan singkat isi konsepnya, mengapa jawaban ini benar",
     "topic": "Topik spesifik dari materi",
     "difficulty": "Sedang",
     "sourceTitle": "${materialTitle}",
@@ -160,7 +160,8 @@ Pastikan:
   dengan salah satu dari 4 pilihan yang kamu buat. Jika hasil hitunganmu
   tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
   agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
-  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.${avoidListPrompt(avoid)}`;
+  pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.
+${QUESTION_QUALITY_RULES}${avoidListPrompt(avoid)}`;
 
   try {
     // Scaled to the actual question count instead of a flat 4096 - see

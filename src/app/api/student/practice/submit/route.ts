@@ -75,11 +75,11 @@ export async function POST(req: Request) {
       return Response.json({ isCorrect, correctAnswer: question.correct_answer, explanation: question.explanation, duplicate: true });
     }
 
-    await supabaseAdmin.from("practice_attempts").insert({
-      student_id: student.id,
-      question_id: questionId,
-      is_correct: isCorrect,
-    });
+    const row = { student_id: student.id, question_id: questionId, is_correct: isCorrect };
+    // student_answer (migration 024) powers "Soal Salah"; older databases
+    // without the column still record the attempt.
+    const { error: insertError } = await supabaseAdmin.from("practice_attempts").insert({ ...row, student_answer: answer });
+    if (insertError) await supabaseAdmin.from("practice_attempts").insert(row);
 
     // Any answered practice question counts as activity for the daily
     // streak; only correct answers earn XP.

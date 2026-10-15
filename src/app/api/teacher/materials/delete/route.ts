@@ -6,8 +6,9 @@ export const dynamic = "force-dynamic";
 /**
  * POST /api/teacher/materials/delete  { materialId }
  *
- * Deletes a material and its stored file. Allowed for the uploader or any
- * teacher assigned to the material's class+subject. Questions that were
+ * Deletes a material and its stored file. Only the teacher who uploaded
+ * it may delete it (same rule as editing - see the materials UPDATE RLS
+ * policy); other teachers are told whom to contact. Questions that were
  * generated from it stay in the bank (only their source link is cleared -
  * questions.source_material_id has no ON DELETE action, so it must be
  * nulled first or the delete would fail).
@@ -22,9 +23,13 @@ export async function POST(req: Request) {
     const { data: m } = await supabaseAdmin
       .from("materials").select("id, title, file_url, class_id, subject_id, creator_id").eq("id", materialId).single();
     if (!m) return Response.json({ error: "Materi tidak ditemukan" }, { status: 404 });
-    const assigned = t.assignments.some(a => a.class_id === m.class_id && (!m.subject_id || a.subject_id === m.subject_id));
-    if (m.creator_id !== t.profileId && !assigned) {
-      return Response.json({ error: "Kamu tidak mengajar kelas/mapel untuk materi ini" }, { status: 403 });
+    if (m.creator_id !== t.profileId) {
+      const { data: uploader } = m.creator_id
+        ? await supabaseAdmin.from("user_profiles").select("full_name").eq("id", m.creator_id).maybeSingle()
+        : { data: null };
+      return Response.json({
+        error: `Hanya pengunggah materi ini${uploader?.full_name ? ` (${uploader.full_name})` : ""} yang bisa menghapusnya. Hubungi beliau bila materi perlu dihapus.`,
+      }, { status: 403 });
     }
 
     const { error: unlinkError } = await supabaseAdmin.from("questions").update({ source_material_id: null }).eq("source_material_id", m.id);
