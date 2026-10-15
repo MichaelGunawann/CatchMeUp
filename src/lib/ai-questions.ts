@@ -29,7 +29,7 @@ ATURAN KUALITAS SOAL (WAJIB):
 - Bahasa sederhana dan sesuai tingkat kelas siswa.`;
 
 // Soal that only make sense next to the original file ("menurut slide 3").
-const FILE_REFERENCE = /\b(ppt|power ?point|(slide|salindia|halaman)\s*(ke-?)?\s*(\d|ini|di atas|tersebut|sebelumnya)|hal\.\s*\d|materi (ini|di atas|tersebut)|teks (di atas|tersebut)|gambar (di atas|berikut|tersebut)|menurut (materi|buku|modul|presentasi)|pada (materi|presentasi|modul) (ini|disebutkan|dijelaskan))/i;
+const FILE_REFERENCE = /\b(ppt|power ?point|(slide|salindia|halaman)\s*(ke-?)?\s*(\d|ini|di atas|tersebut|sebelumnya)|hal\.\s*\d|materi (ini|di atas|tersebut)|teks (di atas|tersebut)|gambar (di atas|berikut|tersebut)|menurut (materi|buku|modul|presentasi|teks|bacaan)|(dalam|di|oleh) (materi|presentasi|modul)\b|materi (menggambarkan|menjelaskan|menyebutkan|membahas|disebutkan)|disebutkan (dalam|di) (materi|teks|buku)|secara eksplisit|pada (materi|presentasi|modul) (ini|disebutkan|dijelaskan))/i;
 
 // Strips "(hal. 4)", "[Sumber: ...]", "Lihat slide 3." from an explanation.
 function cleanExplanation(text: string | undefined): string {
