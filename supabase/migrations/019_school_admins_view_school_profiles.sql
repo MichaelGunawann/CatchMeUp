@@ -43,3 +43,4 @@ CREATE POLICY "School admins can view profiles in their school"
   USING (
     is_profile_in_my_admin_schools(id)
   );
+  
