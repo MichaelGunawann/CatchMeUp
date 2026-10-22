@@ -5,7 +5,7 @@ import { requireTeacher } from "@/lib/auth/api-teacher";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { sampleTextForPrompt, documentSegment } from "@/lib/office-text";
-import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
+import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type AiQuestionType } from "@/lib/ai-questions";
 import { cacheMaterialText, extractTextFromBuffer } from "@/lib/material-text";
 
 let _groq: Groq | null = null;
@@ -23,6 +23,22 @@ function getGroq(): Groq {
  * hasn't uploaded to Storage yet). The multipart path is subject to
  * Vercel's serverless request body size cap; the storagePath path is not.
  */
+async function generateTyped(type: AiQuestionType, count: number, context: string, avoid: string[] | undefined) {
+  const prompt = `Kamu adalah pembuat soal profesional untuk sekolah di Indonesia (SD sampai SMA); sesuaikan tingkat soal dengan materinya.
+${context}
+
+${typedFormatPrompt(type, count)}
+${QUESTION_QUALITY_RULES}
+Pastikan kunci jawaban benar-benar sesuai isi materi; periksa ulang setiap kunci sebelum menulis.${avoidListPrompt(avoid)}`;
+  const completion = await getGroq().chat.completions.create({
+    model: "openai/gpt-oss-120b",
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: Math.min(8192, count * 450 + 600),
+    temperature: 0.3,
+  });
+  return parseTypedQuestions(completion.choices[0].message.content ?? "", type);
+}
+
 export async function POST(req: Request) {
   // Teachers only - this spends AI quota.
   const teacherCheck = await requireTeacher(req);
@@ -37,6 +53,7 @@ export async function POST(req: Request) {
   let segments = 1;
   let avoid: string[] = [];
   let storagePath = "";
+  let questionType: AiQuestionType = "pg";
   let cachedText = "";
 
   if (contentType.includes("application/json")) {
@@ -45,7 +62,10 @@ export async function POST(req: Request) {
       // Batched callers: which part of the document this call should use,
       // and question texts already generated (to avoid duplicates).
       segment?: number; segments?: number; avoid?: string[];
+      /** TKA format to generate (default pg) */
+      questionType?: AiQuestionType;
     };
+    if (body.questionType && ["pg", "pg_kompleks", "benar_salah", "menjodohkan", "esai"].includes(body.questionType)) questionType = body.questionType;
     segment = body.segment ?? 0;
     segments = body.segments ?? 1;
     avoid = Array.isArray(body.avoid) ? body.avoid : [];
@@ -136,6 +156,18 @@ export async function POST(req: Request) {
       error: "Tidak ada teks yang bisa dibaca dari file ini. Kalau ini PDF hasil scan (gambar), AI belum bisa membacanya — gunakan PDF yang teksnya bisa diseleksi.",
       questions: [],
     }, { status: 400 });
+  }
+
+  if (questionType !== "pg") {
+    try {
+      const questions = await generateTyped(questionType, count,
+        `Buat soal BERDASARKAN isi materi "${materialTitle}" (${subject}) berikut:\n---\n${extractedText}\n---`, avoid);
+      if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal yang valid. Coba lagi.", questions: [] }, { status: 502 });
+      return Response.json({ questions: questions.map(q => ({ ...q, sourceTitle: materialTitle })) });
+    } catch (err) {
+      const { message, status } = groqErrorResponse(err);
+      return Response.json({ error: message, questions: [] }, { status });
+    }
   }
 
   const prompt = `Kamu adalah pembuat soal profesional untuk sekolah di Indonesia (SD sampai SMA), sesuaikan tingkat soal dengan materinya.

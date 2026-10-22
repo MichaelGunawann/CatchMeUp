@@ -3,13 +3,29 @@ export const maxDuration = 60;
 import Groq from "groq-sdk";
 import { requireTeacher } from "@/lib/auth/api-teacher";
 import { groqErrorResponse } from "@/lib/groq-error";
-import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
+import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type AiQuestionType } from "@/lib/ai-questions";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
   if (_groq) return _groq;
   _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
   return _groq;
+}
+
+async function generateTyped(type: AiQuestionType, count: number, context: string, avoid: string[] | undefined) {
+  const prompt = `Kamu adalah pembuat soal profesional untuk sekolah di Indonesia (SD sampai SMA); sesuaikan tingkat soal dengan materinya.
+${context}
+
+${typedFormatPrompt(type, count)}
+${QUESTION_QUALITY_RULES}
+Pastikan kunci jawaban benar-benar sesuai isi materi; periksa ulang setiap kunci sebelum menulis.${avoidListPrompt(avoid)}`;
+  const completion = await getGroq().chat.completions.create({
+    model: "openai/gpt-oss-120b",
+    messages: [{ role: "user", content: prompt }],
+    max_tokens: Math.min(8192, count * 450 + 600),
+    temperature: 0.3,
+  });
+  return parseTypedQuestions(completion.choices[0].message.content ?? "", type);
 }
 
 export async function POST(req: Request) {
@@ -22,11 +38,24 @@ export async function POST(req: Request) {
     subject: string;
     count?: number;
     difficulty?: string;
+    questionType?: AiQuestionType;
     avoid?: string[];
   };
   const { materialTitle, topic, subject, difficulty = "Sedang" } = body;
   // Capped per call - callers batch larger requests (45 at once timed out).
   const count = Math.min(Math.max(1, body.count ?? 5), MAX_QUESTIONS_PER_CALL);
+
+  if (body.questionType && body.questionType !== "pg" && ["pg_kompleks", "benar_salah", "menjodohkan", "esai"].includes(body.questionType)) {
+    try {
+      const questions = await generateTyped(body.questionType, count,
+        `Mata pelajaran ${subject}, topik "${topic}" (materi: ${materialTitle}), tingkat kesulitan ${difficulty}.`, body.avoid);
+      if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal yang valid. Coba lagi.", questions: [] }, { status: 502 });
+      return Response.json({ questions });
+    } catch (err) {
+      const { message, status } = groqErrorResponse(err);
+      return Response.json({ error: message, questions: [] }, { status });
+    }
+  }
 
   const prompt = `Buatkan ${count} soal pilihan ganda tingkat ${difficulty} untuk topik "${topic}" pada mata pelajaran ${subject} (materi: ${materialTitle}).
 

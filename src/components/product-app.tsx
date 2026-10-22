@@ -1161,16 +1161,19 @@ function bankRowToPending(row: BankRow): PendingQuestion {
   return {
     id: row.id,
     question: row.question,
-    optionA: row.options.A,
-    optionB: row.options.B,
-    optionC: row.options.C,
-    optionD: row.options.D,
+    optionA: row.options.A ?? "",
+    optionB: row.options.B ?? "",
+    optionC: row.options.C ?? "",
+    optionD: row.options.D ?? "",
     correctAnswer: row.correct_answer as "A" | "B" | "C" | "D",
     explanation: row.explanation ?? "",
     topic: row.topic,
     difficulty: row.difficulty ?? "Sedang",
     sourceRef: row.source_title ?? "AI Generated",
     status: "Perlu Ditinjau",
+    questionType: row.question_type ?? "pg",
+    answerKey: row.answer_key ?? null,
+    rawOptions: row.options as unknown as Record<string, unknown>,
   };
 }
 
@@ -1313,8 +1316,14 @@ async function apiPost<T = Record<string, unknown>>(path: string, body: unknown)
 }
 
 // Insert freshly AI-generated questions straight into the review queue (status 'pending')
+/** A question as the generation routes return it (any TKA type). */
+type PendingRawQuestion = {
+  question: string; options: Record<string, unknown>; correctAnswer: string | null; explanation?: string;
+  topic?: string; difficulty?: string; questionType?: QuestionType; answerKey?: unknown;
+};
+
 async function insertPendingQuestions(
-  raw: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }>,
+  raw: PendingRawQuestion[],
   schoolId: string, classId: string, subjectId: string, creatorId: string, sourceTitle: string,
   sourceMaterialId?: string,
 ): Promise<void> {
@@ -1330,12 +1339,18 @@ async function insertPendingQuestions(
     source: "ai_generated" as const,
     topic: q.topic || "Umum",
     subtopic: q.topic || "Umum",
-    difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as Difficulty,
+    difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty ?? "") ? q.difficulty : "Sedang") as Difficulty,
     bloom_level: "Menerapkan" as const,
     question: q.question,
-    options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
-    correct_answer: (["A", "B", "C", "D", "E"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D" | "E",
-    explanation: q.explanation,
+    ...((q.questionType ?? "pg") === "pg"
+      ? {
+          options: { A: String(q.options.A ?? ""), B: String(q.options.B ?? ""), C: String(q.options.C ?? ""), D: String(q.options.D ?? "") },
+          correct_answer: (["A", "B", "C", "D", "E"].includes(q.correctAnswer ?? "") ? q.correctAnswer : "A") as "A" | "B" | "C" | "D" | "E" | null,
+        }
+      : { options: q.options, correct_answer: null }),
+    question_type: q.questionType ?? "pg",
+    answer_key: q.answerKey ?? null,
+    explanation: q.explanation ?? "",
     status: (autoApprove ? "active" : "pending") as "active" | "pending",
     source_title: sourceTitle,
     source_material_id: sourceMaterialId ?? null,
@@ -1688,9 +1703,11 @@ function ManualQuestionFields({ value, onChange, errorFor, attempted, topicOptio
 
 
 function pendingToApprovePayload(m: PendingQuestion) {
+  // TKA types: options/key are kept as generated (the server ignores them).
+  const isPg = (m.questionType ?? "pg") === "pg";
   return {
     id: m.id, question: m.question, topic: m.topic, difficulty: m.difficulty, explanation: m.explanation,
-    correctAnswer: m.correctAnswer, options: { A: m.optionA, B: m.optionB, C: m.optionC, D: m.optionD },
+    ...(isPg ? { correctAnswer: m.correctAnswer, options: { A: m.optionA, B: m.optionB, C: m.optionC, D: m.optionD } } : {}),
   };
 }
 
@@ -2203,10 +2220,12 @@ async function createAssessment(params: {
       bloom_level: "Menerapkan" as const,
       question: q.question,
       options: q.options,
-      correct_answer: q.correctAnswer,
+      correct_answer: (q.questionType ?? "pg") === "pg" ? q.correctAnswer : null,
       explanation: q.explanation,
       status: "active" as const,
       source_title: q.source,
+      question_type: q.questionType ?? "pg",
+      answer_key: q.answerKey ?? null,
     }));
     const { data: inserted, error: qError } = await supabase.from("questions").insert(rows).select("id");
     if (qError) return { error: `Asesmen tersimpan, tetapi soal gagal disimpan: ${qError.message}` };
@@ -2331,6 +2350,7 @@ function TeacherMaterials() {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialWithFile | null>(null);
   const [confirmProcessId, setConfirmProcessId] = useState<string | null>(null);
+  const [processCounts, setProcessCounts] = useState<Partial<Record<QuestionType, number>>>({ pg: 5 });
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
   const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
@@ -2489,6 +2509,7 @@ function TeacherMaterials() {
     storagePathOverride?: string,
     matOverride?: { title: string; subject: string },
     target?: { classId: string; subjectId: string },
+    types: Array<[QuestionType, number]> = [["pg", 5]],
   ): Promise<number> {
     const mat = matOverride ?? allMaterials.find(m => m.id === id);
     const listMat = allMaterials.find(m => m.id === id);
@@ -2500,48 +2521,30 @@ function TeacherMaterials() {
       ?? activeSubjectId;
     const storagePath = storagePathOverride ?? (mat && "fileUrl" in mat ? (mat as MaterialWithFile).fileUrl ?? undefined : undefined);
 
-    let rawQuestions: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> = [];
-
-    if (storagePath) {
-      // Real extraction: the server fetches the file directly from Storage
-      // (not through this request), so this isn't subject to Vercel's
-      // serverless request body size cap the way sending the raw file would be.
+    let rawQuestions: PendingRawQuestion[] = [];
+    let lastError = "";
+    // One request per question type (the server makes one type per call).
+    for (const [qType, count] of types) {
+      if (count <= 0) continue;
       try {
-        const res = await fetch("/api/extract-and-generate", {
+        const res = await fetch(storagePath ? "/api/extract-and-generate" : "/api/generate-questions", {
           method: "POST",
           headers: await jsonAuthHeaders(),
-          body: JSON.stringify({ storagePath, fileName: mat?.title ?? "Materi", count: 5, materialTitle: mat?.title ?? "Materi", subject: mat?.subject ?? activeSubjectName }),
+          body: JSON.stringify(storagePath
+            ? { storagePath, fileName: mat?.title ?? "Materi", count, materialTitle: mat?.title ?? "Materi", subject: mat?.subject ?? activeSubjectName, questionType: qType }
+            : { materialTitle: mat?.title ?? "Materi", topic: mat?.subject ?? mat?.title ?? "Umum", subject: mat?.subject ?? activeSubjectName, count, difficulty: "Sedang", questionType: qType }),
         });
-        const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
-        if (data.error && !data.questions?.length) {
-          setToast({ message: data.error, tone: "primary" });
-          return 0;
-        }
-        rawQuestions = data.questions ?? [];
+        const data = await res.json().catch(() => null) as { questions?: PendingRawQuestion[]; error?: string } | null;
+        if (data?.questions?.length) rawQuestions = [...rawQuestions, ...data.questions.map(q => ({ ...q, questionType: q.questionType ?? qType }))];
+        else lastError = data?.error ?? `Server error (${res.status})`;
+        if (res.status === 429) break; // quota gone - the other types would fail too
       } catch {
-        setToast({ message: "Gagal menghubungi AI. Periksa koneksi dan API key.", tone: "primary" });
-        return 0;
+        lastError = "Gagal menghubungi AI. Periksa koneksi internet.";
       }
-    } else {
-      // Fallback for demo materials: generate from metadata
-      try {
-        const res = await fetch("/api/generate-questions", {
-          method: "POST",
-          headers: await jsonAuthHeaders(),
-          body: JSON.stringify({
-            materialTitle: mat?.title ?? "Materi",
-            topic: mat?.subject ?? mat?.title ?? "Umum",
-            subject: mat?.subject ?? activeSubjectName,
-            count: 5,
-            difficulty: "Sedang",
-          }),
-        });
-        const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
-        rawQuestions = data.questions ?? [];
-      } catch {
-        setToast({ message: "Gagal menghubungi AI. Periksa koneksi dan API key.", tone: "primary" });
-        return 0;
-      }
+    }
+    if (!rawQuestions.length && lastError) {
+      setToast({ message: `Gagal membuat soal: ${lastError}`, tone: "primary" });
+      return 0;
     }
 
     if (!rawQuestions.length) {
@@ -2553,19 +2556,20 @@ function TeacherMaterials() {
     const generated: typeof questionBank = rawQuestions.map((q, i) => ({
       id: `ai-${id}-${existingCount + i}`,
       question: q.question,
-      topic: q.topic,
-      subtopic: q.topic,
+      topic: q.topic ?? "Umum",
+      subtopic: q.topic ?? "Umum",
       bloom: "Menerapkan" as const,
-      difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
+      difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty ?? "") ? q.difficulty : "Sedang") as "Mudah" | "Sedang" | "Sulit",
       styleType: "TKA" as const,
       source: mat?.title ?? "AI Generated",
       usageCount: 0,
       successRate: 0,
       status: "Disetujui" as const,
       isLocked: false,
-      options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
-      correctAnswer: (["A","B","C","D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
-      explanation: q.explanation,
+      options: { A: String(q.options.A ?? ""), B: String(q.options.B ?? ""), C: String(q.options.C ?? ""), D: String(q.options.D ?? "") },
+      correctAnswer: (["A","B","C","D"].includes(q.correctAnswer ?? "") ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
+      explanation: q.explanation ?? "",
+      questionType: q.questionType ?? "pg",
     }));
 
     setMaterialQuestions(prev => ({ ...prev, [id]: append ? [...(prev[id] ?? []), ...generated] : generated }));
@@ -2585,7 +2589,8 @@ function TeacherMaterials() {
   async function startAIProcess(id: string) {
     setConfirmProcessId(null);
     setProcessingIds(prev => new Set([...prev, id]));
-    const count = await generateQuestionsFromMaterial(id, false);
+    const count = await generateQuestionsFromMaterial(id, false, undefined, undefined, undefined,
+      QUESTION_TYPES.map(t => [t, processCounts[t] ?? 0] as [QuestionType, number]));
     setProcessingIds(prev => { const next = new Set(prev); next.delete(id); return next; });
     setProcessedIds(prev => new Set([...prev, id]));
     if (count > 0) {
@@ -3056,15 +3061,33 @@ function TeacherMaterials() {
       />
 
       {/* ── AI Process Confirmation ── */}
-      <ConfirmDialog
-        open={!!confirmProcessId}
-        title="Proses Materi dengan AI?"
-        message="AI akan menganalisis materi ini dan mengekstrak soal secara otomatis. Proses membutuhkan beberapa detik dan tidak dapat dibatalkan."
-        confirmLabel="Proses Sekarang"
-        confirmVariant="default"
-        onConfirm={() => { if (confirmProcessId) startAIProcess(confirmProcessId); }}
-        onCancel={() => setConfirmProcessId(null)}
-      />
+      {confirmProcessId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setConfirmProcessId(null)} />
+          <div className="relative w-full max-w-md rounded-card border border-border bg-surface p-6 shadow-xl">
+            <h2 className="text-[16px] font-bold text-ink">Buat soal dari materi ini</h2>
+            <p className="mt-1 text-[12px] text-ink-secondary">Pilih berapa soal tiap jenis. Soal masuk ke Tinjau Soal AI untuk dicek dulu sebelum dipakai.</p>
+            <div className="mt-4 space-y-2">
+              {QUESTION_TYPES.map(t => (
+                <label key={t} className="flex items-center justify-between gap-3 rounded-[8px] border border-border bg-background px-3 py-2">
+                  <span className="text-[13px] font-medium text-ink">{QUESTION_TYPE_LABEL[t]}</span>
+                  <input type="number" min={0} max={10} value={processCounts[t] ?? 0}
+                    onChange={e => setProcessCounts(p => ({ ...p, [t]: Math.min(10, Math.max(0, Math.round(Number(e.target.value) || 0))) }))}
+                    className="w-16 rounded-[6px] border border-border bg-surface px-2 py-1 text-right text-[13px] text-ink focus:border-primary focus:outline-none" />
+                </label>
+              ))}
+            </div>
+            <p className="mt-2 text-[11px] text-ink-tertiary">Total {Object.values(processCounts).reduce((a, b) => a + (b ?? 0), 0)} soal · maks. 10 per jenis.</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setConfirmProcessId(null)}>Batal</Button>
+              <Button variant="default" size="sm" disabled={Object.values(processCounts).every(v => !v)}
+                onClick={() => startAIProcess(confirmProcessId)}>
+                <Sparkles className="mr-1.5 h-3.5 w-3.5" />Buat Soal
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Toast Notification ── */}
       {toast && <AppToast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
@@ -3803,10 +3826,44 @@ function TeacherQuestionReview() {
           <div className="grid gap-5 lg:grid-cols-2">
             {pending.map(q => (
               <div key={q.id} className={cn("relative transition-opacity", busyIds.has(q.id) && "pointer-events-none opacity-50")}>
+                {(q.questionType ?? "pg") === "pg" ? (
                 <QuestionReviewCard question={{ ...q, ...edits[q.id] } as PendingQuestion}
                   onApprove={() => approveQuestion({ ...q, ...edits[q.id] } as PendingQuestion)}
                   onReject={() => rejectQuestion(q.id)}
                   onEdit={() => { setEditAttempted(false); setEditingId(q.id); }} />
+                ) : (
+                  <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
+                    <div className="mb-2 flex flex-wrap gap-1.5">
+                      <Badge tone="primary">{QUESTION_TYPE_LABEL[q.questionType as QuestionType]}</Badge>
+                      <Badge tone="neutral">{q.topic}</Badge>
+                      <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+                    </div>
+                    <p className="whitespace-pre-line text-[13px] font-medium text-ink">{q.question}</p>
+                    {(q.questionType === "pg_kompleks") && (
+                      <div className="mt-2 space-y-1">
+                        {(["A", "B", "C", "D", "E"] as const).filter(k => q.rawOptions?.[k]).map(k => {
+                          const right = Array.isArray(q.answerKey) && (q.answerKey as string[]).includes(k);
+                          return (
+                            <div key={k} className={cn("rounded-[6px] border px-2.5 py-1.5 text-[12px]", right ? "border-success/30 bg-success-light text-ink" : "border-border bg-background text-ink-secondary")}>
+                              <span className="font-bold">{k}.</span> {String(q.rawOptions?.[k])}{right && <span className="ml-1 font-semibold text-success">✓</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                    {q.questionType !== "pg_kompleks" && (
+                      <p className="mt-2 whitespace-pre-line rounded-[6px] border border-success/20 bg-success-light p-2.5 text-[12px] text-ink">
+                        <span className="font-semibold text-success">Kunci: </span>
+                        {describeKey({ question_type: q.questionType, options: q.rawOptions ?? {}, correct_answer: null, answer_key: q.answerKey })}
+                      </p>
+                    )}
+                    {q.explanation && <p className="mt-2 text-[12px] text-ink-secondary">{q.explanation}</p>}
+                    <div className="mt-3 flex justify-end gap-2">
+                      <Button variant="outline" size="sm" onClick={() => rejectQuestion(q.id)}>Tolak</Button>
+                      <Button variant="success" size="sm" onClick={() => approveQuestion(q)}>Setujui</Button>
+                    </div>
+                  </div>
+                )}
                 {busyIds.has(q.id) && (
                   <div className="absolute inset-0 flex items-center justify-center">
                     <span className="h-6 w-6 rounded-full border-2 border-primary border-t-transparent animate-spin" />
@@ -3964,6 +4021,10 @@ function TeacherAssessmentBuilder() {
   const [styleFlags, setStyleFlags] = useState({ randomizeQuestions: false, randomizeOptions: false, allowReview: true });
   const [selectedMaterials, setSelectedMaterials] = useState<Set<string>>(new Set());
   const [aiGenerating, setAiGenerating] = useState(false);
+  // How many of each TKA type the AI should make; the rest are plain PG.
+  const [aiTypeCounts, setAiTypeCounts] = useState<Record<Exclude<QuestionType, "pg">, number>>({ pg_kompleks: 0, benar_salah: 0, menjodohkan: 0, esai: 0 });
+  const aiOtherCount = Object.values(aiTypeCounts).reduce((a, b) => a + b, 0);
+  const aiPgCount = Math.max(0, formQuestionCount - aiOtherCount);
   const [aiGenerated, setAiGenerated] = useState(false);
   const [aiGeneratedQuestions, setAiGeneratedQuestions] = useState<typeof questionBank>([]);
   const [aiProgress, setAiProgress] = useState<{ done: number; total: number } | null>(null);
@@ -4139,25 +4200,34 @@ function TeacherAssessmentBuilder() {
     setAiGenerating(true);
     if (!append) { setAiGeneratedQuestions([]); setSelectedQuestions(new Set()); }
 
-    const BATCH = 8;
-    type Job = { mat: MaterialWithFile; count: number; segment: number; segments: number };
+    type Job = { mat: MaterialWithFile; count: number; segment: number; segments: number; type: QuestionType };
     const jobs: Job[] = [];
-    matList.forEach((mat, i) => {
-      // Spread the target evenly across materials (first ones take the remainder).
-      const share = Math.floor(target / matList.length) + (i < target % matList.length ? 1 : 0);
-      const segments = Math.max(1, Math.ceil(share / BATCH));
-      for (let k = 0; k < segments; k++) {
-        const count = Math.min(BATCH, share - k * BATCH);
-        if (count > 0) jobs.push({ mat, count, segment: k, segments });
-      }
-    });
+    // What is still missing per type (a top-up only makes the missing ones).
+    const have = (t: QuestionType) => existing.filter(q => (q.questionType ?? "pg") === t).length;
+    const wanted: Array<[QuestionType, number]> = [
+      ["pg", Math.max(0, aiPgCount - have("pg"))],
+      ...(Object.entries(aiTypeCounts) as Array<[QuestionType, number]>).map(([t, n]) => [t, Math.max(0, n - have(t))] as [QuestionType, number]),
+    ];
+    for (const [type, total] of wanted) {
+      if (total <= 0) continue;
+      const BATCH = type === "pg" ? 8 : 5;
+      matList.forEach((mat, i) => {
+        // Spread each type evenly across materials (first ones take the remainder).
+        const share = Math.floor(total / matList.length) + (i < total % matList.length ? 1 : 0);
+        const segments = Math.max(1, Math.ceil(share / BATCH));
+        for (let k = 0; k < segments; k++) {
+          const count = Math.min(BATCH, share - k * BATCH);
+          if (count > 0) jobs.push({ mat, count, segment: k, segments, type });
+        }
+      });
+    }
 
     const generated: typeof questionBank = [...existing];
     let lastError = "";
     let done = 0;
     setAiProgress({ done: 0, total: jobs.length });
 
-    type ApiQ = { question: string; options: Record<string, string>; correctAnswer: string; explanation?: string; topic?: string; difficulty?: string };
+    type ApiQ = { question: string; options: Record<string, string>; correctAnswer: string | null; explanation?: string; topic?: string; difficulty?: string; questionType?: QuestionType; answerKey?: unknown };
     async function runJob(job: Job): Promise<void> {
       for (let attempt = 0; attempt < 2; attempt++) {
         const avoid = generated.map(q => q.question);
@@ -4165,12 +4235,12 @@ function TeacherAssessmentBuilder() {
         try {
           const res = await fetch(useFile ? "/api/extract-and-generate" : "/api/generate-questions", {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers: await jsonAuthHeaders(),
             body: JSON.stringify(useFile
               ? { storagePath: job.mat.fileUrl, fileName: job.mat.title, materialTitle: job.mat.title, subject: job.mat.subject ?? "Umum",
-                  count: job.count, segment: job.segment, segments: job.segments, avoid }
+                  count: job.count, segment: job.segment, segments: job.segments, avoid, questionType: job.type }
               : { materialTitle: job.mat.title, topic: job.mat.chapter || job.mat.subject || job.mat.title, subject: job.mat.subject ?? "Umum",
-                  count: job.count, difficulty: "Sedang", avoid }),
+                  count: job.count, difficulty: "Sedang", avoid, questionType: job.type }),
           });
           const data = await res.json().catch(() => null) as { questions?: ApiQ[]; error?: string } | null;
           if (!data) { lastError = res.status === 504 ? "Server AI terlalu lama merespons" : `Server error (${res.status})`; }
@@ -4189,8 +4259,18 @@ function TeacherAssessmentBuilder() {
                 successRate: 0,
                 status: "Disetujui" as const,
                 isLocked: false,
-                options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
-                correctAnswer: (["A", "B", "C", "D"].includes(q.correctAnswer) ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
+                ...((q.questionType ?? "pg") === "pg"
+                  ? {
+                      options: { A: q.options.A ?? "", B: q.options.B ?? "", C: q.options.C ?? "", D: q.options.D ?? "" },
+                      correctAnswer: (["A", "B", "C", "D"].includes(q.correctAnswer ?? "") ? q.correctAnswer : "A") as "A" | "B" | "C" | "D",
+                    }
+                  : {
+                      // TKA type: options/answerKey in the stored shape; correctAnswer unused
+                      options: q.options as unknown as { A: string; B: string; C: string; D: string },
+                      correctAnswer: "A" as const,
+                      questionType: q.questionType,
+                      answerKey: q.answerKey,
+                    }),
                 explanation: q.explanation ?? "",
               });
             }
@@ -4442,6 +4522,29 @@ function TeacherAssessmentBuilder() {
                   );
                 })}
               </div>
+              <div className="border-t border-border px-5 py-3.5">
+                <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-ink-tertiary">Jenis soal yang dibuat AI</p>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                  <div className="rounded-[8px] border border-border bg-background px-3 py-2">
+                    <div className="text-[11px] font-semibold text-ink-secondary">Pilihan Ganda</div>
+                    <div className="text-[16px] font-bold text-ink">{aiPgCount}</div>
+                    <div className="text-[10px] text-ink-tertiary">sisa dari {formQuestionCount}</div>
+                  </div>
+                  {(Object.keys(aiTypeCounts) as Array<keyof typeof aiTypeCounts>).map(t => (
+                    <label key={t} className="rounded-[8px] border border-border bg-background px-3 py-2">
+                      <div className="text-[11px] font-semibold text-ink-secondary">{QUESTION_TYPE_LABEL[t]}</div>
+                      <input type="number" min={0} max={formQuestionCount} value={aiTypeCounts[t]}
+                        onChange={e => {
+                          const v = Math.max(0, Math.round(Number(e.target.value) || 0));
+                          const others = aiOtherCount - aiTypeCounts[t];
+                          setAiTypeCounts(p => ({ ...p, [t]: Math.min(v, Math.max(0, formQuestionCount - others)) }));
+                        }}
+                        className="w-full bg-transparent text-[16px] font-bold text-ink focus:outline-none" />
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-1.5 text-[10px] text-ink-tertiary">Total mengikuti jumlah soal di langkah 1 ({formQuestionCount}). Soal tipe lain bisa dicek di daftar hasil sebelum dipakai.</p>
+              </div>
               <div className="border-t border-border px-5 py-3.5 flex items-center justify-between">
                 <span className="text-[11px] text-ink-secondary">
                   {selectedMaterials.size === 0
@@ -4507,6 +4610,7 @@ function TeacherAssessmentBuilder() {
                             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                               <Badge tone="primary">{q.topic}</Badge>
                               <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+                              {q.questionType && q.questionType !== "pg" && <Badge tone="neutral">{QUESTION_TYPE_LABEL[q.questionType as QuestionType]}</Badge>}
                               {selectedQuestions.has(q.id) && (
                                 <PointsInput value={questionPoints[q.id] ?? 1} onChange={v => setQuestionPoints(p => ({ ...p, [q.id]: v }))} />
                               )}
@@ -4515,7 +4619,7 @@ function TeacherAssessmentBuilder() {
 
                           {/* Actions */}
                           <div className="flex items-center gap-1 shrink-0">
-                            <button
+                            {(q.questionType ?? "pg") === "pg" && <button
                               title="Edit soal"
                               onClick={() => {
                                 if (isEditing) { setEditingId(null); setEditDraft(null); }
@@ -4526,7 +4630,7 @@ function TeacherAssessmentBuilder() {
                                 isEditing ? "border-primary bg-primary text-white" : "border-border bg-background text-ink-secondary hover:border-primary/40 hover:text-primary"
                               )}>
                               <Pencil className="h-3.5 w-3.5" />
-                            </button>
+                            </button>}
                             <button
                               title={isExpanded ? "Sembunyikan" : "Lihat pilihan jawaban"}
                               onClick={() => { setExpandedId(isExpanded ? null : q.id); if (isEditing) { setEditingId(null); setEditDraft(null); } }}
@@ -4537,7 +4641,16 @@ function TeacherAssessmentBuilder() {
                         </div>
 
                         {/* Expanded: options + answer */}
-                        {isExpanded && !isEditing && (
+                        {isExpanded && !isEditing && (q.questionType ?? "pg") !== "pg" && (
+                          <div className="border-t border-border px-4 pb-4 pt-3">
+                            <p className="whitespace-pre-line text-[12px] text-ink">
+                              <span className="font-semibold text-success">Kunci: </span>
+                              {describeKey({ question_type: q.questionType, options: q.options as unknown as Record<string, unknown>, correct_answer: null, answer_key: q.answerKey })}
+                            </p>
+                            {q.explanation && <p className="mt-1.5 text-[12px] text-ink-secondary">{q.explanation}</p>}
+                          </div>
+                        )}
+                        {isExpanded && !isEditing && (q.questionType ?? "pg") === "pg" && (
                           <div className="border-t border-border px-4 pb-4 pt-3 space-y-2">
                             {(["A","B","C","D"] as const).map(opt => (
                               <div key={opt} className={cn(

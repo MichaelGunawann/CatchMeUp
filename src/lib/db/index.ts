@@ -235,6 +235,8 @@ export type PendingQuestion = {
   id: string; question: string; optionA: string; optionB: string; optionC: string; optionD: string;
   correctAnswer: "A" | "B" | "C" | "D"; explanation: string; topic: string; difficulty: Difficulty;
   sourceRef: string; status: QuestionStatus;
+  /** TKA type (absent = pg); non-pg keep their structure in rawOptions/answerKey */
+  questionType?: string; answerKey?: unknown; rawOptions?: Record<string, unknown>;
 };
 
 export const pendingQuestions: PendingQuestion[] = [];

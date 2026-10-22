@@ -98,6 +98,19 @@ export async function POST(req: Request) {
     for (const q of body.questions ?? []) {
       const question = q.question?.trim();
       const topic = q.topic?.trim();
+      // TKA types (pg_kompleks, benar_salah, ...): only text/topic/level are
+      // editable here; their options/key stay exactly as generated.
+      const { data: current } = await supabaseAdmin.from("questions").select("*").eq("id", q.id).maybeSingle();
+      if (current && (current.question_type ?? "pg") !== "pg") {
+        if (!question || !topic) return Response.json({ error: "Pertanyaan dan topik wajib diisi sebelum disetujui" }, { status: 400 });
+        const { error } = await supabaseAdmin.from("questions").update({
+          status: "active", question, topic, subtopic: topic,
+          difficulty: ["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang",
+          explanation: q.explanation ?? "", updated_at: new Date().toISOString(),
+        }).eq("id", q.id).eq("status", "pending");
+        if (error) return Response.json({ error: error.message }, { status: 500 });
+        continue;
+      }
       const opts = q.options ?? { A: "", B: "", C: "", D: "" };
       if (!question || !topic || !opts.A?.trim() || !opts.B?.trim() || !opts.C?.trim() || !opts.D?.trim()) {
         return Response.json({ error: "Pertanyaan, topik, dan pilihan A–D wajib diisi sebelum disetujui" }, { status: 400 });
