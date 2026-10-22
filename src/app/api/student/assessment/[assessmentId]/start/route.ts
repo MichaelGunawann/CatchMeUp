@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { getAssessmentAvailability, parseDbTime } from "@/lib/auth/assessment-availability";
+import { letterOptions, matchingOf, questionTypeOf, seededOrder, statementsOf } from "@/lib/question-types";
 import type { Assessment, AssessmentAttempt, Question } from "@/lib/supabase/types";
 
 export const dynamic = "force-dynamic";
@@ -230,19 +231,34 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
     }
 
     const questions = rows.map((row) => {
-      const q = row.questions;
-      const opts = q.options as unknown as { A: string; B: string; C: string; D: string; E?: string };
-      const keys = (["A", "B", "C", "D", ...(opts.E ? ["E" as const] : [])] as const).filter((k) => opts[k]);
-      const displayOrder = a.randomize_options ? seededShuffle(keys, attempt.id + row.id) : keys;
-
-      return {
+      const q = row.questions as typeof row.questions & { question_type?: string | null; image_url?: string | null };
+      const type = questionTypeOf(q);
+      const base = {
         assessmentQuestionId: row.id,
+        type,
         topic: q.topic,
         difficulty: q.difficulty,
         question: q.question,
+        imageUrl: q.image_url ?? null,
         points: row.points,
-        displayOptions: displayOrder.map((k) => ({ key: k, text: opts[k] })),
       };
+      if (type === "benar_salah") {
+        return { ...base, displayOptions: [], statements: statementsOf(q.options as never) };
+      }
+      if (type === "menjodohkan") {
+        // Right column shuffled per student; answers refer to ORIGINAL indices.
+        const { left, right } = matchingOf(q.options as never);
+        const order = seededOrder(right.length, attempt.id + row.id);
+        return { ...base, displayOptions: [], matchLeft: left, matchRight: order.map(i => ({ index: i, text: right[i] })) };
+      }
+      if (type === "esai") {
+        return { ...base, displayOptions: [] };
+      }
+      const opts = letterOptions(q.options as never);
+      const keys = opts.map(o => o.key);
+      const displayOrder = a.randomize_options ? seededShuffle(keys, attempt.id + row.id) : keys;
+      const textOf = Object.fromEntries(opts.map(o => [o.key, o.text]));
+      return { ...base, displayOptions: displayOrder.map((k) => ({ key: k, text: textOf[k] })) };
     });
 
     const startedAtMs = parseDbTime(attempt.started_at);

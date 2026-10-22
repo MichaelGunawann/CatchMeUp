@@ -3,6 +3,7 @@ import Groq from "groq-sdk";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve } from "@/lib/retrieval";
 import { QUESTION_QUALITY_RULES, isSelfContained, parseQuestionsJson } from "@/lib/ai-questions";
+import { questionTypeOf } from "@/lib/question-types";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -90,7 +91,7 @@ export async function POST(req: Request) {
     // little randomness so sessions vary.
     let query = supabaseAdmin
       .from("questions")
-      .select("id, question, options, topic, difficulty, correct_answer, explanation")
+      .select("*") // question_type exists only after migration 026
       .eq("school_id", student.school_id)
       .eq("class_id", student.class_id)
       .eq("subject_id", subjectId)
@@ -122,7 +123,9 @@ export async function POST(req: Request) {
     };
     const ranked = (candidates ?? [])
       // Older bank questions may still say "menurut slide 3..." - skip them.
-      .filter(q => !excluded.has(q.id) && isSelfContained(q))
+      // Practice is auto-graded single-answer only (PG kompleks, menjodohkan,
+      // esai etc. are for assessments).
+      .filter(q => !excluded.has(q.id) && isSelfContained(q) && questionTypeOf(q) === "pg")
       .map(q => {
         const last = lastResult.get(q.id);
         let score = (1 - accuracy(q.topic)) * 2;          // weak topic -> higher

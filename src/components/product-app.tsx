@@ -86,6 +86,11 @@ import { parseDbTime } from "@/lib/auth/assessment-availability";
 import { useScheduleClock, formatCountdown } from "@/lib/hooks/use-schedule-clock";
 import { useExamLockdown, requestExamFullscreen, exitExamFullscreen } from "@/lib/hooks/use-exam-lockdown";
 import { useSubjectFilter } from "@/lib/hooks/use-subject-filter";
+import {
+  QUESTION_TYPES, QUESTION_TYPE_LABEL, QUESTION_TYPE_HINT, type QuestionType,
+  questionTypeOf, decodeComplex, encodeComplex,
+  describeAnswer, describeKey, isAnswered,
+} from "@/lib/question-types";
 import Link from "next/link";
 import {
   AlertCircle,
@@ -127,6 +132,18 @@ import {
 // ═══════════════════════════════════════════════════════════════════════════════
 // SHARED LOCAL UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
+
+// Points for one question in the assessment builder (clicks don't toggle the row).
+function PointsInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <label onClick={e => e.stopPropagation()} className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-surface px-2 py-0.5 text-[11px] font-semibold text-primary">
+      Poin
+      <input type="number" min={1} max={100} step={1} value={value}
+        onChange={e => onChange(Math.min(100, Math.max(1, Math.round(Number(e.target.value) || 1))))}
+        className="w-12 bg-transparent text-right text-[12px] text-ink focus:outline-none" />
+    </label>
+  );
+}
 
 // Multi-select topic filter: a dropdown of checkboxes with "Pilih semua"
 // and "Kosongkan". An empty selection means every topic.
@@ -1146,6 +1163,8 @@ type BankRow = {
   correct_answer: "A" | "B" | "C" | "D" | "E"; explanation: string | null;
   source_title: string | null; source_page: number | null;
   status: string; usage_count: number; success_rate: number | null;
+  // migration 026 - absent before it runs
+  question_type?: string | null; answer_key?: unknown; image_url?: string | null;
 };
 
 function bankRowToEntry(row: BankRow): QuestionBankEntry {
@@ -1167,6 +1186,9 @@ function bankRowToEntry(row: BankRow): QuestionBankEntry {
     explanation: row.explanation ?? "",
     sourceTitle: row.source_title ?? undefined,
     sourcePage: row.source_page ?? undefined,
+    questionType: row.question_type ?? "pg",
+    answerKey: row.answer_key ?? null,
+    imageUrl: row.image_url ?? null,
   };
 }
 
@@ -1202,7 +1224,7 @@ async function loadBankAndReview(classId: string, subjectId: string): Promise<vo
   _bankLoading = (async () => {
     const { data } = await supabase
       .from("questions")
-      .select("id, source, topic, subtopic, difficulty, bloom_level, question, options, correct_answer, explanation, source_title, source_page, status, usage_count, success_rate")
+      .select("*") // includes question_type / answer_key / image_url once migration 026 ran
       .eq("class_id", classId)
       .eq("subject_id", subjectId)
       .in("status", ["active", "pending"])
@@ -1355,11 +1377,31 @@ async function saveManualQToBank(
   q: typeof EMPTY_MANUAL_Q,
   schoolId: string, classId: string, subjectId: string, creatorId: string,
 ): Promise<string | null> {
-  if (!q.text.trim() || !q.optA.trim() || !q.optB.trim() || !q.optC.trim() || !q.optD.trim() || !q.topic.trim()) {
-    return "Lengkapi semua kolom bertanda *.";
+  const structureError = manualStructureError(q);
+  if (!q.text.trim() || !q.topic.trim() || structureError) {
+    return structureError ?? "Lengkapi semua kolom bertanda *.";
   }
-  if (!["A", "B", "C", "D"].includes(q.correct)) return "Kunci jawaban wajib diisi.";
-  const { error } = await supabase.from("questions").insert({
+  const type = q.type as QuestionType;
+  const letters = (["A", "B", "C", "D", "E"] as const).filter(k => manualOpt(q, k).trim());
+  const letterOptions = Object.fromEntries(letters.map(k => [k, manualOpt(q, k).trim()]));
+  let options: Record<string, unknown> = {};
+  let correct: string | null = null;
+  let answerKey: unknown = null;
+  if (type === "pg") { options = letterOptions; correct = q.correct; }
+  else if (type === "pg_kompleks") { options = letterOptions; answerKey = decodeComplex(q.complex); }
+  else if (type === "benar_salah") {
+    const st = parseDraft<TFDraftRow>(q.statements).filter(s => s.text.trim());
+    options = { statements: st.map(s => s.text.trim()) };
+    answerKey = st.map(s => s.answer);
+  } else if (type === "menjodohkan") {
+    const pairs = parseDraft<PairDraftRow>(q.pairs).filter(p => p.left.trim() && p.right.trim());
+    const extras = parseDraft<string>(q.extras).map(e => e.trim()).filter(Boolean);
+    options = { left: pairs.map(p => p.left.trim()), right: [...pairs.map(p => p.right.trim()), ...extras] };
+    answerKey = pairs.map((_, i) => i);
+  } else if (type === "esai") {
+    answerKey = q.rubric.trim() ? { rubric: q.rubric.trim() } : null;
+  }
+  const row = {
     school_id: schoolId,
     class_id: classId,
     subject_id: subjectId,
@@ -1370,48 +1412,252 @@ async function saveManualQToBank(
     difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as Difficulty,
     bloom_level: "Menerapkan",
     question: q.text.trim(),
-    options: { A: q.optA.trim(), B: q.optB.trim(), C: q.optC.trim(), D: q.optD.trim() },
-    correct_answer: q.correct as "A" | "B" | "C" | "D",
+    options,
+    correct_answer: correct,
     explanation: q.explanation.trim(),
     status: "active",
     source_title: "Manual Guru",
-  });
+    question_type: type,
+    answer_key: answerKey,
+    image_url: q.imageUrl || null,
+  };
+  let { error } = await supabase.from("questions").insert(row as never);
+  if (isMissingColumnError(error)) {
+    // Before migration 026: plain PG without a picture still saves.
+    if (type !== "pg" || row.image_url) return "Database belum mendukung tipe soal & gambar. Jalankan migrasi 026 terlebih dahulu.";
+    const { question_type: _t, answer_key: _k, image_url: _i, ...legacy } = row;
+    ({ error } = await supabase.from("questions").insert(legacy as never));
+  }
   if (error) return error.message;
   await refreshBankAndReview(classId, subjectId);
   return null;
 }
 
+type TFDraftRow = { text: string; answer: "B" | "S" | "" };
+type PairDraftRow = { left: string; right: string };
+function parseDraft<T>(json: string): T[] {
+  try { const v = JSON.parse(json || "[]"); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+function manualOpt(q: typeof EMPTY_MANUAL_Q, k: "A" | "B" | "C" | "D" | "E"): string {
+  return q[`opt${k}` as "optA"];
+}
+
+/** Required simple fields for the chosen type (structure is checked by manualStructureError). */
+function manualRequired(q: typeof EMPTY_MANUAL_Q): (keyof typeof EMPTY_MANUAL_Q)[] {
+  if (q.type === "pg") return ["text", "optA", "optB", "optC", "optD", "correct", "topic"];
+  if (q.type === "pg_kompleks") return ["text", "optA", "optB", "optC", "optD", "topic"];
+  return ["text", "topic"];
+}
+
+/** What is still missing in a type's structure (key, statements, pairs), or null. */
+function manualStructureError(q: typeof EMPTY_MANUAL_Q): string | null {
+  switch (q.type) {
+    case "pg":
+      return ["A", "B", "C", "D", "E"].includes(q.correct) ? null : "Kunci jawaban wajib diisi.";
+    case "pg_kompleks": {
+      const keys = decodeComplex(q.complex).filter(k => manualOpt(q, k as "A").trim());
+      return keys.length >= 1 ? null : "Centang minimal satu jawaban benar.";
+    }
+    case "benar_salah": {
+      const st = parseDraft<TFDraftRow>(q.statements).filter(s => s.text.trim());
+      if (st.length < 2) return "Isi minimal 2 pernyataan.";
+      return st.every(s => s.answer === "B" || s.answer === "S") ? null : "Tentukan Benar/Salah untuk setiap pernyataan.";
+    }
+    case "menjodohkan": {
+      const pairs = parseDraft<PairDraftRow>(q.pairs);
+      const filled = pairs.filter(p => p.left.trim() && p.right.trim());
+      if (filled.length < 2) return "Isi minimal 2 pasangan.";
+      return pairs.some(p => !!p.left.trim() !== !!p.right.trim()) ? "Setiap pasangan harus diisi kiri dan kanan." : null;
+    }
+    default:
+      return null;
+  }
+}
+
+// Uploads a picture for a question; returns its public URL or an error.
+async function uploadQuestionImage(file: File): Promise<{ url: string } | { error: string }> {
+  const ticket = await apiPost<{ path: string; token: string; publicUrl: string }>("/api/teacher/question-image", { fileName: file.name, fileSize: file.size });
+  if (ticket.error || !ticket.token) return { error: ticket.error ?? "Gagal menyiapkan unggahan" };
+  const { error } = await supabase.storage.from("question-images").uploadToSignedUrl(ticket.path, ticket.token, file);
+  if (error) return { error: `Gambar gagal diunggah: ${error.message}` };
+  return { url: ticket.publicUrl };
+}
+
+function QuestionImagePicker({ value, onChange }: { value: string; onChange: (url: string) => void }) {
+  const inputRef = React.useRef<HTMLInputElement>(null);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  async function pick(file: File | undefined) {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) { setErr("File harus berupa gambar (PNG, JPG, WEBP, GIF)."); return; }
+    if (file.size > 3 * 1024 * 1024) { setErr("Ukuran gambar maksimal 3 MB."); return; }
+    setErr(null); setBusy(true);
+    const res = await uploadQuestionImage(file);
+    setBusy(false);
+    if ("error" in res) setErr(res.error); else onChange(res.url);
+  }
+  return (
+    <div>
+      <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden"
+        onChange={e => { pick(e.target.files?.[0]); e.target.value = ""; }} />
+      {value ? (
+        <div className="flex items-start gap-3">
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={value} alt="Gambar soal" className="max-h-40 rounded-[8px] border border-border object-contain" />
+          <div className="flex flex-col gap-1.5">
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => inputRef.current?.click()}>Ganti</Button>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => onChange("")}>Hapus</Button>
+          </div>
+        </div>
+      ) : (
+        <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => inputRef.current?.click()}>
+          <Plus className="mr-1.5 h-3.5 w-3.5" />{busy ? "Mengunggah..." : "Tambah Gambar"}
+        </Button>
+      )}
+      {err && <p className="mt-1 text-[11px] font-medium text-danger">{err}</p>}
+    </div>
+  );
+}
+
+const QUESTION_TYPE_OPTIONS: SelectOption[] = QUESTION_TYPES.map(t => ({ value: t, label: QUESTION_TYPE_LABEL[t], description: QUESTION_TYPE_HINT[t] }));
+
 // Shared manual-question form used by Bank Soal and the assessment
 // builder's "Tambah Soal Baru" dialog - every * field turns red with a
-// message if submit is attempted while it's empty.
-function ManualQuestionFields({ value, onChange, errorFor }: {
+// message if submit is attempted while it's empty. The type selector
+// switches the answer section (PG, PG kompleks, Benar/Salah, menjodohkan, esai).
+function ManualQuestionFields({ value, onChange, errorFor, attempted }: {
   value: typeof EMPTY_MANUAL_Q;
   onChange: (next: typeof EMPTY_MANUAL_Q) => void;
   errorFor: (k: keyof typeof EMPTY_MANUAL_Q) => string | null;
+  attempted?: boolean;
 }) {
   const set = (k: keyof typeof EMPTY_MANUAL_Q, v: string) => onChange({ ...value, [k]: v });
+  const type = value.type as QuestionType;
+  const structureError = attempted ? manualStructureError(value) : null;
+  const statements = parseDraft<TFDraftRow>(value.statements);
+  const pairs = parseDraft<PairDraftRow>(value.pairs);
+  const extras = parseDraft<string>(value.extras);
+  const complexKeys = decodeComplex(value.complex);
+
+  const letterInputs = (letters: readonly ("A" | "B" | "C" | "D" | "E")[], complex: boolean) => letters.map(opt => {
+    const k = `opt${opt}` as "optA";
+    const optional = opt === "E";
+    return (
+      <FormField key={opt} label={`Pilihan ${opt}${optional ? " (opsional)" : ""}`} required={!optional} error={errorFor(k)}>
+        <div className="flex items-center gap-2">
+          {complex && (
+            <label className="flex shrink-0 items-center gap-1 text-[11px] font-semibold text-ink-secondary">
+              <input type="checkbox" className="h-4 w-4 accent-primary" checked={complexKeys.includes(opt)}
+                onChange={() => set("complex", encodeComplex(complexKeys.includes(opt) ? complexKeys.filter(x => x !== opt) : [...complexKeys, opt]))} />
+              Benar
+            </label>
+          )}
+          <input type="text" placeholder={`Jawaban pilihan ${opt}`}
+            value={value[k]} onChange={e => set(k, e.target.value)}
+            className={fieldClass(!!errorFor(k))} />
+        </div>
+      </FormField>
+    );
+  });
+
   return (
     <>
+      <FormField label="Tipe Soal" required>
+        <SelectField value={value.type} options={QUESTION_TYPE_OPTIONS} onChange={v => set("type", v)} />
+      </FormField>
       <FormField label="Pertanyaan" required error={errorFor("text")}>
         <textarea rows={3} placeholder="Tuliskan pertanyaan di sini..."
           value={value.text} onChange={e => set("text", e.target.value)}
           className={fieldClass(!!errorFor("text"), "resize-none")} />
       </FormField>
-      {(["A", "B", "C", "D"] as const).map(opt => {
-        const k = `opt${opt}` as "optA" | "optB" | "optC" | "optD";
-        return (
-          <FormField key={opt} label={`Pilihan ${opt}`} required error={errorFor(k)}>
-            <input type="text" placeholder={`Jawaban pilihan ${opt}`}
-              value={value[k]} onChange={e => set(k, e.target.value)}
-              className={fieldClass(!!errorFor(k))} />
-          </FormField>
-        );
-      })}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <FormField label="Kunci Jawaban" required error={errorFor("correct") ? "Kunci jawaban wajib diisi" : null}>
-          <SelectField value={value.correct} options={ANSWER_OPTIONS} placeholder="Pilih kunci..."
-            invalid={!!errorFor("correct")} onChange={v => set("correct", v)} />
+      <FormField label="Gambar (opsional)">
+        <QuestionImagePicker value={value.imageUrl} onChange={url => set("imageUrl", url)} />
+      </FormField>
+
+      {(type === "pg" || type === "pg_kompleks") && letterInputs(["A", "B", "C", "D", "E"], type === "pg_kompleks")}
+
+      {type === "benar_salah" && (
+        <FormField label="Pernyataan" required>
+          <div className="space-y-2">
+            {(statements.length ? statements : [{ text: "", answer: "" as const }, { text: "", answer: "" as const }]).map((s, i, arr) => (
+              <div key={i} className="flex items-center gap-2">
+                <span className="w-5 shrink-0 text-[12px] font-semibold text-ink-secondary">{i + 1}.</span>
+                <input type="text" value={s.text} placeholder="Tulis pernyataan..."
+                  onChange={e => set("statements", JSON.stringify(arr.map((x, j) => j === i ? { ...x, text: e.target.value } : x)))}
+                  className={fieldClass(false)} />
+                {(["B", "S"] as const).map(v => (
+                  <button key={v} type="button" onClick={() => set("statements", JSON.stringify(arr.map((x, j) => j === i ? { ...x, answer: v } : x)))}
+                    className={cn("shrink-0 rounded-full border px-3 py-1 text-[12px] font-semibold",
+                      s.answer === v ? (v === "B" ? "border-success bg-success text-white" : "border-danger bg-danger text-white") : "border-border bg-surface text-ink-secondary")}>
+                    {v === "B" ? "Benar" : "Salah"}
+                  </button>
+                ))}
+                {arr.length > 2 && (
+                  <button type="button" aria-label="Hapus pernyataan" onClick={() => set("statements", JSON.stringify(arr.filter((_, j) => j !== i)))}>
+                    <X className="h-4 w-4 text-ink-tertiary" />
+                  </button>
+                )}
+              </div>
+            ))}
+            <Button type="button" variant="outline" size="sm"
+              onClick={() => set("statements", JSON.stringify([...(statements.length ? statements : [{ text: "", answer: "" }, { text: "", answer: "" }]), { text: "", answer: "" }]))}>
+              <Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Pernyataan
+            </Button>
+          </div>
         </FormField>
+      )}
+
+      {type === "menjodohkan" && (
+        <FormField label="Pasangan yang benar" required>
+          <div className="space-y-2">
+            {(pairs.length ? pairs : [{ left: "", right: "" }, { left: "", right: "" }]).map((p, i, arr) => (
+              <div key={i} className="flex items-center gap-2">
+                <input type="text" value={p.left} placeholder={`Item kiri ${i + 1}`}
+                  onChange={e => set("pairs", JSON.stringify(arr.map((x, j) => j === i ? { ...x, left: e.target.value } : x)))}
+                  className={fieldClass(false)} />
+                <span className="shrink-0 text-ink-tertiary">→</span>
+                <input type="text" value={p.right} placeholder="Pasangannya"
+                  onChange={e => set("pairs", JSON.stringify(arr.map((x, j) => j === i ? { ...x, right: e.target.value } : x)))}
+                  className={fieldClass(false)} />
+                {arr.length > 2 && (
+                  <button type="button" aria-label="Hapus pasangan" onClick={() => set("pairs", JSON.stringify(arr.filter((_, j) => j !== i)))}>
+                    <X className="h-4 w-4 text-ink-tertiary" />
+                  </button>
+                )}
+              </div>
+            ))}
+            <Button type="button" variant="outline" size="sm"
+              onClick={() => set("pairs", JSON.stringify([...(pairs.length ? pairs : [{ left: "", right: "" }, { left: "", right: "" }]), { left: "", right: "" }]))}>
+              <Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Pasangan
+            </Button>
+            <div>
+              <p className="mt-2 mb-1 text-[11px] text-ink-secondary">Pengecoh di kolom kanan (opsional, pisahkan dengan baris baru):</p>
+              <textarea rows={2} value={extras.join("\n")} placeholder="Jawaban tambahan yang tidak punya pasangan"
+                onChange={e => set("extras", JSON.stringify(e.target.value.split("\n")))}
+                className={fieldClass(false, "resize-none")} />
+            </div>
+            <p className="text-[11px] text-ink-tertiary">Urutan kolom kanan diacak otomatis untuk setiap siswa.</p>
+          </div>
+        </FormField>
+      )}
+
+      {type === "esai" && (
+        <FormField label="Pedoman penilaian (opsional)">
+          <textarea rows={2} placeholder="Poin-poin yang harus ada di jawaban siswa..."
+            value={value.rubric} onChange={e => set("rubric", e.target.value)}
+            className={fieldClass(false, "resize-none")} />
+        </FormField>
+      )}
+
+      {structureError && <p role="alert" className="text-[12px] font-medium text-danger">{structureError}</p>}
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        {type === "pg" && (
+          <FormField label="Kunci Jawaban" required error={errorFor("correct") ? "Kunci jawaban wajib diisi" : null}>
+            <SelectField value={value.correct} options={ANSWER_OPTIONS.concat(manualOpt(value, "E").trim() ? [{ value: "E", label: "E" }] : [])} placeholder="Pilih kunci..."
+              invalid={!!errorFor("correct")} onChange={v => set("correct", v)} />
+          </FormField>
+        )}
         <FormField label="Kesulitan" required>
           <SelectField value={value.difficulty} options={DIFFICULTY_OPTIONS} onChange={v => set("difficulty", v)} />
         </FormField>
@@ -1421,7 +1667,7 @@ function ManualQuestionFields({ value, onChange, errorFor }: {
             className={fieldClass(!!errorFor("topic"))} />
         </FormField>
       </div>
-      <FormField label="Pembahasan (opsional)">
+      <FormField label={type === "esai" ? "Contoh jawaban / pembahasan (opsional)" : "Pembahasan (opsional)"}>
         <textarea rows={2} placeholder="Jelaskan jawaban benar..."
           value={value.explanation} onChange={e => set("explanation", e.target.value)}
           className={fieldClass(false, "resize-none")} />
@@ -1430,7 +1676,6 @@ function ManualQuestionFields({ value, onChange, errorFor }: {
   );
 }
 
-const MANUAL_Q_REQUIRED: (keyof typeof EMPTY_MANUAL_Q)[] = ["text", "optA", "optB", "optC", "optD", "correct", "topic"];
 
 function pendingToApprovePayload(m: PendingQuestion) {
   return {
@@ -1550,6 +1795,8 @@ type ReviewListItem = { attemptId: string; assessmentId: string; assessmentTitle
 type ReviewQuestionDetail = {
   question: string; options: Record<string, string>; correctAnswer: string; explanation: string;
   yourAnswer: string | null; isCorrect: boolean; topic: string; sourceTitle: string | null; sourcePage: number | null;
+  type: QuestionType; imageUrl: string | null; yourText: string; keyText: string;
+  /** essay not graded yet */ pending: boolean; earned: number | null; points: number; feedback: string | null;
 };
 
 // Student-scoped read: RLS already restricts assessment_attempts to the
@@ -1649,28 +1896,38 @@ async function fetchScoreTrendAndSubjectMastery(studentId: string): Promise<{ sc
 async function fetchAttemptReviewDetail(attemptId: string): Promise<ReviewQuestionDetail[]> {
   const { data } = await supabase
     .from("question_attempts")
-    .select("student_answer, is_correct, assessment_questions(question_order, questions(question, options, correct_answer, explanation, topic, source_title, source_page))")
+    .select("*, assessment_questions(question_order, points, questions(*))")
     .eq("assessment_attempt_id", attemptId);
+  type QRow = { question: string; options: Record<string, string>; correct_answer: string | null; explanation: string | null; topic: string; source_title: string | null; source_page: number | null; question_type?: string | null; answer_key?: unknown; image_url?: string | null };
   type Row = {
-    student_answer: string | null; is_correct: boolean | null;
-    assessment_questions: {
-      question_order: number;
-      questions: { question: string; options: Record<string, string>; correct_answer: string; explanation: string | null; topic: string; source_title: string | null; source_page: number | null } | null;
-    } | null;
+    student_answer: string | null; is_correct: boolean | null; points_earned: number | null; teacher_feedback?: string | null;
+    assessment_questions: { question_order: number; points: number; questions: QRow | null } | null;
   };
   const rows = ((data ?? []) as unknown as Row[]).filter(r => r.assessment_questions?.questions);
   rows.sort((a, b) => (a.assessment_questions?.question_order ?? 0) - (b.assessment_questions?.question_order ?? 0));
-  return rows.map(r => ({
-    question: r.assessment_questions!.questions!.question,
-    options: r.assessment_questions!.questions!.options,
-    correctAnswer: r.assessment_questions!.questions!.correct_answer,
-    explanation: r.assessment_questions!.questions!.explanation ?? "",
-    yourAnswer: r.student_answer,
-    isCorrect: !!r.is_correct,
-    topic: r.assessment_questions!.questions!.topic,
-    sourceTitle: r.assessment_questions!.questions!.source_title,
-    sourcePage: r.assessment_questions!.questions!.source_page,
-  }));
+  return rows.map(r => {
+    const q = r.assessment_questions!.questions!;
+    const type = questionTypeOf(q);
+    return {
+      question: q.question,
+      options: q.options,
+      correctAnswer: q.correct_answer ?? "",
+      explanation: q.explanation ?? "",
+      yourAnswer: r.student_answer,
+      isCorrect: !!r.is_correct,
+      topic: q.topic,
+      sourceTitle: q.source_title,
+      sourcePage: q.source_page,
+      type,
+      imageUrl: q.image_url ?? null,
+      yourText: describeAnswer(q, r.student_answer),
+      keyText: describeKey(q),
+      pending: type === "esai" && r.is_correct === null && !!r.student_answer,
+      earned: r.points_earned == null ? null : Number(r.points_earned),
+      points: Number(r.assessment_questions!.points) || 1,
+      feedback: r.teacher_feedback ?? null,
+    };
+  });
 }
 
 // ── Real materials (materials table + 'materials' Storage bucket) ─────────────
@@ -1885,6 +2142,8 @@ async function createAssessment(params: {
   questionSource: "ai" | "bank";
   aiQuestions: typeof questionBank;
   bankQuestionIds: string[];
+  /** Points per question, keyed by the id shown in the builder (default 1). */
+  points?: Record<string, number>;
 }): Promise<{ id: string } | { error: string }> {
   const base = {
     school_id: params.schoolId,
@@ -1915,7 +2174,13 @@ async function createAssessment(params: {
   if (error || !assessmentRow) return { error: error?.message ?? "Gagal menyimpan asesmen" };
 
   let questionIds: string[] = [];
+  let pointsList: number[] = [];
+  const pointsOf = (id: string) => {
+    const v = params.points?.[id];
+    return typeof v === "number" && v > 0 ? v : 1;
+  };
   if (params.questionSource === "ai" && params.aiQuestions.length > 0) {
+    pointsList = params.aiQuestions.map(q => pointsOf(q.id));
     const rows = params.aiQuestions.map(q => ({
       school_id: params.schoolId,
       class_id: params.classId,
@@ -1939,6 +2204,7 @@ async function createAssessment(params: {
     await refreshBankAndReview(params.classId, params.subjectId);
   } else {
     questionIds = params.bankQuestionIds;
+    pointsList = params.bankQuestionIds.map(pointsOf);
   }
 
   if (questionIds.length > 0) {
@@ -1946,6 +2212,7 @@ async function createAssessment(params: {
       assessment_id: assessmentRow!.id,
       question_id: qid,
       question_order: i + 1,
+      points: pointsList[i] ?? 1,
       status: "approved" as const,
     }));
     const { error: linkError } = await supabase.from("assessment_questions").insert(aqRows);
@@ -3166,7 +3433,12 @@ function TeacherAssessmentStyles() {
 const DIFFICULTY_OPTIONS: SelectOption[] = ["Mudah", "Sedang", "Sulit"].map(d => ({ value: d, label: d }));
 const ANSWER_OPTIONS: SelectOption[] = ["A", "B", "C", "D"].map(o => ({ value: o, label: o }));
 
-const EMPTY_MANUAL_Q = { text: "", optA: "", optB: "", optC: "", optD: "", correct: "", difficulty: "Sedang", topic: "", explanation: "" };
+const EMPTY_MANUAL_Q = {
+  type: "pg", text: "", optA: "", optB: "", optC: "", optD: "", optE: "", correct: "", complex: "",
+  // JSON-encoded drafts for Benar/Salah and Menjodohkan (keeps the form flat for useRequiredFields)
+  statements: "", pairs: "", extras: "", rubric: "",
+  difficulty: "Sedang", topic: "", explanation: "", imageUrl: "",
+};
 
 function TeacherQuestionBank() {
   const teacher = useRealTeacher();
@@ -3180,7 +3452,7 @@ function TeacherQuestionBank() {
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
   const { bank: bankQs, pending: reviewQs, loading: bankLoading } = useQuestionBank(activeClass, activeSubjectId);
   const reviewCount = reviewQs.length;
-  const manualValidation = useRequiredFields(manualQ, MANUAL_Q_REQUIRED);
+  const manualValidation = useRequiredFields(manualQ, manualRequired(manualQ));
   const [savingManual, setSavingManual] = useState(false);
   const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
   const [selectedStyles, setSelectedStyles] = useState<Set<string>>(new Set());
@@ -3358,13 +3630,13 @@ function TeacherQuestionBank() {
               </button>
             </div>
             <div className="overflow-y-auto p-5 space-y-4">
-              <ManualQuestionFields value={manualQ} onChange={setManualQ} errorFor={manualValidation.errorFor} />
+              <ManualQuestionFields value={manualQ} onChange={setManualQ} errorFor={manualValidation.errorFor} attempted={manualValidation.attempted} />
               {manualError && <p className="text-[12px] text-danger">{manualError}</p>}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
               <Button variant="outline" size="sm" onClick={() => { setShowManualAdd(false); setManualQ({ ...EMPTY_MANUAL_Q }); setManualError(""); manualValidation.reset(); }}>Batal</Button>
               <Button variant="default" size="sm" disabled={savingManual} onClick={async () => {
-                if (!manualValidation.validate()) { setManualError("Tolong lengkapi kolom bertanda *."); return; }
+                if (!manualValidation.validate() || manualStructureError(manualQ)) { setManualError(manualStructureError(manualQ) ?? "Tolong lengkapi kolom bertanda *."); return; }
                 if (!teacher || !activeClass || !activeSubjectId) { setManualError("Pilih kelas aktif terlebih dahulu."); return; }
                 setSavingManual(true);
                 const err = await saveManualQToBank(manualQ, teacher.schoolId, activeClass, activeSubjectId, teacher.profileId);
@@ -3687,6 +3959,8 @@ function TeacherAssessmentBuilder() {
     return () => { cancelled = true; };
   }, [teacher, teacherLoading, formClassId, formSubjectId]);
   const [selectedQuestions, setSelectedQuestions] = useState<Set<string>>(new Set());
+  // Points per selected question (default 1) - the score is earned/total points.
+  const [questionPoints, setQuestionPoints] = useState<Record<string, number>>({});
   const [bankSearch, setBankSearch] = useState("");
   const [bankTopics, setBankTopics] = useState<Set<string>>(new Set());
   const [bankDifficulty, setBankDifficulty] = useState<"" | "Mudah" | "Sedang" | "Sulit">("");
@@ -3699,7 +3973,7 @@ function TeacherAssessmentBuilder() {
   const [selectedStyle, setSelectedStyle] = useState<string>(CUSTOM_STYLE_ID);
   const styleIsLocked = !!selectedStyle && !!styleDefaults[selectedStyle];
   const [newQ, setNewQ] = useState({ ...EMPTY_MANUAL_Q });
-  const newQValidation = useRequiredFields(newQ, MANUAL_Q_REQUIRED);
+  const newQValidation = useRequiredFields(newQ, manualRequired(newQ));
   const selectedStyleData = assessmentStyles.find(s => s.id === selectedStyle);
   const styleOptions: SelectOption[] = [
     ...assessmentStyles.map(s => ({ value: s.id, label: s.name, description: `${styleDefaults[s.id]?.questions ?? "-"} soal · ${styleDefaults[s.id]?.duration ?? "-"} menit` })),
@@ -3764,6 +4038,7 @@ function TeacherAssessmentBuilder() {
       distributionMode: assessmentType, questionCount: formQuestionCount,
       ...styleFlags,
       questionSource, aiQuestions: chosenAi, bankQuestionIds: chosenBankIds,
+      points: questionPoints,
     });
     setSaving(false);
     if ("error" in result) {
@@ -3776,7 +4051,7 @@ function TeacherAssessmentBuilder() {
     setStep(1);
     setFormTitle(""); setFormType(""); setSelectedStyle(CUSTOM_STYLE_ID); setFormOpenAt(""); setFormCloseAt("");
     setStep3Attempted(false); step1.reset();
-    setSelectedQuestions(new Set()); setAiGeneratedQuestions([]); setAiGenerated(false); setSelectedMaterials(new Set());
+    setSelectedQuestions(new Set()); setQuestionPoints({}); setAiGeneratedQuestions([]); setAiGenerated(false); setSelectedMaterials(new Set());
   }
 
   function toggleMaterial(id: string) {
@@ -4172,6 +4447,9 @@ function TeacherAssessmentBuilder() {
                             <div className="flex items-center gap-2 mt-1.5 flex-wrap">
                               <Badge tone="primary">{q.topic}</Badge>
                               <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+                              {selectedQuestions.has(q.id) && (
+                                <PointsInput value={questionPoints[q.id] ?? 1} onChange={v => setQuestionPoints(p => ({ ...p, [q.id]: v }))} />
+                              )}
                             </div>
                           </div>
 
@@ -4349,9 +4627,14 @@ function TeacherAssessmentBuilder() {
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="text-[13px] font-medium text-ink line-clamp-2">{item.question}</div>
-                      <div className="flex items-center gap-2 mt-1">
+                      <div className="flex flex-wrap items-center gap-2 mt-1">
                         <Badge tone="neutral">{item.topic}</Badge>
                         <Badge tone={item.difficulty === "Mudah" ? "success" : item.difficulty === "Sedang" ? "warning" : "danger"}>{item.difficulty}</Badge>
+                        {item.questionType && item.questionType !== "pg" && <Badge tone="primary">{QUESTION_TYPE_LABEL[item.questionType as QuestionType] ?? item.questionType}</Badge>}
+                        {item.imageUrl && <Badge tone="neutral">🖼 Gambar</Badge>}
+                        {selectedQuestions.has(item.id) && (
+                          <PointsInput value={questionPoints[item.id] ?? 1} onChange={v => setQuestionPoints(p => ({ ...p, [item.id]: v }))} />
+                        )}
                       </div>
                     </div>
                   </div>
@@ -4390,10 +4673,10 @@ function TeacherAssessmentBuilder() {
                   <h2 className="text-[16px] font-bold text-ink">Tambah Soal ke Bank Soal</h2>
                   <button onClick={() => setShowAddQuestion(false)} className="text-ink-secondary hover:text-ink"><X className="h-4 w-4" /></button>
                 </div>
-                <ManualQuestionFields value={newQ} onChange={setNewQ} errorFor={newQValidation.errorFor} />
+                <ManualQuestionFields value={newQ} onChange={setNewQ} errorFor={newQValidation.errorFor} attempted={newQValidation.attempted} />
                 <div className="flex justify-end gap-2 pt-2">
                   <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowAddQuestion(false); setNewQ({ ...EMPTY_MANUAL_Q }); newQValidation.reset(); }}>Batal</Button>
-                  <Button variant="default" className="h-8 text-[12px]" onClick={() => { if (!newQValidation.validate()) return; setShowAddQuestion(false); setConfirmAddToBank(true); }}>
+                  <Button variant="default" className="h-8 text-[12px]" onClick={() => { if (!newQValidation.validate() || manualStructureError(newQ)) return; setShowAddQuestion(false); setConfirmAddToBank(true); }}>
                     Simpan ke Bank Soal
                   </Button>
                 </div>
@@ -4533,8 +4816,16 @@ type ResultQuestionRow = {
   correctAnswer: "A" | "B" | "C" | "D" | "E";
   topic: string;
   difficulty: "Mudah" | "Sedang" | "Sulit";
+  type: QuestionType;
+  points: number;
+  /** raw row for describeAnswer/describeKey */
+  raw: { question_type?: string | null; options: Record<string, unknown>; correct_answer: string | null; answer_key?: unknown };
 };
-type ResultStudentRow = { studentId: string; name: string; score: number | null; answers: Record<string, string> };
+type ResultStudentRow = {
+  studentId: string; name: string; score: number | null; answers: Record<string, string>;
+  /** per assessment-question grading (essays: isCorrect null until graded) */
+  results: Record<string, { qaId: string; isCorrect: boolean | null; earned: number; feedback: string | null }>;
+};
 type AssessmentResultDetail = { questions: ResultQuestionRow[]; distributions: Record<string, Record<string, number>>; studentRows: ResultStudentRow[] };
 
 // Attach real participant count / average score / completion status
@@ -4570,10 +4861,10 @@ async function attachAssessmentStats(rows: SavedAssessment[]): Promise<SavedAsse
 async function loadAssessmentResultDetail(assessmentId: string, classId: string): Promise<AssessmentResultDetail> {
   const { data: aqRows } = await supabase
     .from("assessment_questions")
-    .select("id, question_order, questions(question, options, correct_answer, topic, difficulty)")
+    .select("id, question_order, points, questions(*)")
     .eq("assessment_id", assessmentId)
     .order("question_order", { ascending: true });
-  type AQRow = { id: string; question_order: number; questions: { question: string; options: { A: string; B: string; C: string; D: string; E?: string }; correct_answer: string; topic: string; difficulty: string } | null };
+  type AQRow = { id: string; question_order: number; points: number; questions: { question: string; options: { A: string; B: string; C: string; D: string; E?: string }; correct_answer: string; topic: string; difficulty: string; question_type?: string | null; answer_key?: unknown } | null };
   const questions: ResultQuestionRow[] = ((aqRows ?? []) as unknown as AQRow[])
     .filter((r): r is AQRow & { questions: NonNullable<AQRow["questions"]> } => !!r.questions)
     .map(r => ({
@@ -4583,6 +4874,9 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
       correctAnswer: r.questions.correct_answer as "A" | "B" | "C" | "D" | "E",
       topic: r.questions.topic,
       difficulty: r.questions.difficulty as "Mudah" | "Sedang" | "Sulit",
+      type: questionTypeOf(r.questions),
+      points: Number(r.points) || 1,
+      raw: r.questions as unknown as ResultQuestionRow["raw"],
     }));
 
   const { data: attemptData } = await supabase
@@ -4594,13 +4888,17 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
   const attempts = (attemptData ?? []) as AttemptRow[];
 
   const answersByAttempt: Record<string, Record<string, string>> = {};
+  const resultsByAttempt: Record<string, ResultStudentRow["results"]> = {};
   const distCounts: Record<string, Record<string, number>> = {};
   if (attempts.length > 0) {
     const { data: qaRows } = await supabase
       .from("question_attempts")
-      .select("assessment_attempt_id, assessment_question_id, student_answer")
+      .select("*")
       .in("assessment_attempt_id", attempts.map(a => a.id));
-    for (const row of (qaRows ?? []) as Array<{ assessment_attempt_id: string; assessment_question_id: string; student_answer: string | null }>) {
+    for (const row of (qaRows ?? []) as Array<{ id: string; assessment_attempt_id: string; assessment_question_id: string; student_answer: string | null; is_correct: boolean | null; points_earned: number | null; teacher_feedback?: string | null }>) {
+      (resultsByAttempt[row.assessment_attempt_id] ??= {})[row.assessment_question_id] = {
+        qaId: row.id, isCorrect: row.is_correct, earned: Number(row.points_earned) || 0, feedback: row.teacher_feedback ?? null,
+      };
       if (!row.student_answer) continue;
       (answersByAttempt[row.assessment_attempt_id] ??= {})[row.assessment_question_id] = row.student_answer;
       const bucket = (distCounts[row.assessment_question_id] ??= {});
@@ -4629,10 +4927,81 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
       name: s.user_profiles?.full_name ?? "-",
       score: attempt?.score ?? null,
       answers: attempt ? (answersByAttempt[attempt.id] ?? {}) : {},
+      results: attempt ? (resultsByAttempt[attempt.id] ?? {}) : {},
     };
   });
 
   return { questions, distributions, studentRows };
+}
+
+// Teacher scores essay answers (0..points) with optional feedback.
+function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetail; onGraded: () => void }) {
+  const essays = detail.questions.filter(q => q.type === "esai");
+  const [drafts, setDrafts] = useState<Record<string, { points: string; feedback: string }>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{ text: string; tone: "success" | "danger" } | null>(null);
+
+  async function save(qaId: string, max: number) {
+    const d = drafts[qaId];
+    const pts = Number(d?.points);
+    if (d?.points === undefined || d.points === "" || !Number.isFinite(pts) || pts < 0 || pts > max) {
+      setMsg({ text: `Isi nilai antara 0 dan ${max}.`, tone: "danger" }); return;
+    }
+    setSaving(qaId); setMsg(null);
+    const res = await apiPost<{ score?: number }>("/api/teacher/grade-essay", { questionAttemptId: qaId, points: pts, feedback: d.feedback ?? "" });
+    setSaving(null);
+    if (res.error) { setMsg({ text: `Gagal menyimpan: ${res.error}`, tone: "danger" }); return; }
+    setMsg({ text: "Nilai tersimpan. Nilai akhir siswa sudah dihitung ulang.", tone: "success" });
+    onGraded();
+  }
+
+  return (
+    <div className="space-y-5">
+      {msg && <p className={cn("text-[12px] font-medium", msg.tone === "success" ? "text-success" : "text-danger")}>{msg.text}</p>}
+      {essays.map((q) => {
+        const idx = detail.questions.indexOf(q) + 1;
+        const answers = detail.studentRows.filter(st => st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]);
+        return (
+          <div key={q.assessmentQuestionId} className="rounded-[10px] border border-border bg-background p-4">
+            <p className="text-[12px] font-bold text-ink">Soal {idx} · maks. {q.points} poin</p>
+            <p className="mt-1 whitespace-pre-line text-[12px] text-ink">{q.question}</p>
+            <p className="mt-1 text-[11px] text-ink-secondary">{describeKey(q.raw)}</p>
+            {answers.length === 0 && <p className="mt-3 text-[12px] text-ink-tertiary">Belum ada jawaban.</p>}
+            <div className="mt-3 space-y-3">
+              {answers.map(st => {
+                const r = st.results[q.assessmentQuestionId];
+                const d = drafts[r.qaId] ?? { points: r.isCorrect === null ? "" : String(r.earned), feedback: r.feedback ?? "" };
+                return (
+                  <div key={st.studentId} className="rounded-[8px] border border-border bg-surface p-3">
+                    <div className="mb-1 flex items-center gap-2">
+                      <span className="text-[12px] font-semibold text-ink">{st.name}</span>
+                      {r.isCorrect === null ? <Badge tone="warning">Belum dinilai</Badge> : <Badge tone="success">{r.earned}/{q.points} poin</Badge>}
+                    </div>
+                    <p className="whitespace-pre-line rounded-[6px] bg-background p-2.5 text-[12px] text-ink">{st.answers[q.assessmentQuestionId]}</p>
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <label className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary">
+                        Nilai
+                        <input type="number" min={0} max={q.points} step={0.5} value={d.points}
+                          onChange={e => setDrafts(p => ({ ...p, [r.qaId]: { ...d, points: e.target.value } }))}
+                          className="w-20 rounded-[6px] border border-border bg-background px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
+                        / {q.points}
+                      </label>
+                      <input type="text" placeholder="Catatan untuk siswa (opsional)" value={d.feedback}
+                        onChange={e => setDrafts(p => ({ ...p, [r.qaId]: { ...d, feedback: e.target.value } }))}
+                        className="min-w-[180px] flex-1 rounded-[6px] border border-border bg-background px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
+                      <Button variant="default" size="sm" disabled={saving === r.qaId} onClick={() => save(r.qaId, q.points)}>
+                        {saving === r.qaId ? "Menyimpan..." : "Simpan"}
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 function TeacherResults() {
@@ -4640,7 +5009,7 @@ function TeacherResults() {
   const [activeClass] = useActiveClass();
   const activeSubjectId = findActiveAssignment(teacher, activeClass)?.subjectId;
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<"soal" | "siswa">("soal");
+  const [detailTab, setDetailTab] = useState<"soal" | "siswa" | "esai">("soal");
   // null = still loading - never show "Belum ada asesmen" before the fetch returns
   const [assessmentRows, setAssessmentRows] = useState<SavedAssessment[] | null>(null);
   const allAssessments = assessmentRows ?? [];
@@ -4671,6 +5040,10 @@ function TeacherResults() {
     setAiAnalysis(null); setAiLoading(false); setDetailTab("soal"); setResultDetail(null);
     if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail);
   }, [detailId, activeClass]);
+
+  const essayPendingCount = resultDetail
+    ? resultDetail.studentRows.reduce((n, st) => n + resultDetail.questions.filter(q => q.type === "esai" && st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]?.isCorrect === null).length, 0)
+    : 0;
 
   async function loadAIAnalysis() {
     if (!resultDetail?.questions.length) return;
@@ -4799,6 +5172,7 @@ function TeacherResults() {
                   {([
                     { key: "soal" as const, label: "Analisis Soal" },
                     { key: "siswa" as const, label: "Jawaban Siswa" },
+                    ...(resultDetail.questions.some(q => q.type === "esai") ? [{ key: "esai" as const, label: `Nilai Esai${essayPendingCount ? ` (${essayPendingCount})` : ""}` }] : []),
                   ]).map(t => (
                     <button key={t.key} onClick={() => setDetailTab(t.key)}
                       className={cn(
@@ -4851,6 +5225,24 @@ function TeacherResults() {
                             <p className="text-[12px] font-medium text-ink leading-snug">{q.question}</p>
                           </div>
 
+                          {q.type !== "pg" ? (() => {
+                            const rs = resultDetail.studentRows.map(st => st.results[q.assessmentQuestionId]).filter((r): r is NonNullable<typeof r> => !!r);
+                            const right = rs.filter(r => r.isCorrect === true).length;
+                            const pending = rs.filter(r => r.isCorrect === null).length;
+                            const partial = rs.filter(r => r.isCorrect === false && r.earned > 0).length;
+                            const pct = (n: number) => rs.length ? Math.round((n / rs.length) * 100) : 0;
+                            return (
+                              <div className="ml-7 space-y-1.5">
+                                <p className="text-[11px] text-ink-secondary"><span className="font-semibold text-ink">{QUESTION_TYPE_LABEL[q.type]}</span> · {q.points} poin · Kunci: {describeKey(q.raw)}</p>
+                                <div className="flex flex-wrap gap-1.5">
+                                  <Badge tone="success">Benar {pct(right)}%</Badge>
+                                  {partial > 0 && <Badge tone="warning">Sebagian {pct(partial)}%</Badge>}
+                                  <Badge tone="danger">Salah {pct(rs.length - right - pending - partial)}%</Badge>
+                                  {pending > 0 && <Badge tone="warning">Belum dinilai {pending}</Badge>}
+                                </div>
+                              </div>
+                            );
+                          })() : (
                           <div className="space-y-1.5 ml-7">
                             {(["A","B","C","D"] as const).map(opt => {
                               const pct = dist[opt];
@@ -4879,11 +5271,12 @@ function TeacherResults() {
                               );
                             })}
                           </div>
+                          )}
 
                           <div className="ml-7 flex flex-wrap gap-1.5">
                             <Badge tone="primary">{q.topic}</Badge>
                             <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
-                            {dist[majorityWrong] > 30 && <Badge tone="danger">Mayoritas pilih {majorityWrong} ({dist[majorityWrong]}%)</Badge>}
+                            {q.type === "pg" && dist[majorityWrong] > 30 && <Badge tone="danger">Mayoritas pilih {majorityWrong} ({dist[majorityWrong]}%)</Badge>}
                           </div>
 
                           {qAnalysis && (
@@ -4932,6 +5325,18 @@ function TeacherResults() {
                               {resultDetail.questions.map(q => {
                                 const ans = s.answers[q.assessmentQuestionId];
                                 const isCorrect = ans === q.correctAnswer;
+                                if (q.type !== "pg") {
+                                  const r = s.results[q.assessmentQuestionId];
+                                  const mark = !ans ? null : r?.isCorrect === null ? "⏳" : r?.isCorrect ? "✓" : (r?.earned ?? 0) > 0 ? "½" : "✗";
+                                  return (
+                                    <td key={q.assessmentQuestionId} className="px-2 py-1.5 text-center" title={ans ? describeAnswer(q.raw, ans) : "Tidak dijawab"}>
+                                      {mark ? (
+                                        <span className={cn("inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1 text-[9px] font-bold",
+                                          mark === "✓" ? "bg-success/15 text-success" : mark === "✗" ? "bg-danger/15 text-danger" : "bg-warning/15 text-warning")}>{mark}</span>
+                                      ) : <span className="text-ink-tertiary">—</span>}
+                                    </td>
+                                  );
+                                }
                                 return (
                                   <td key={q.assessmentQuestionId} className="px-2 py-1.5 text-center">
                                     {ans ? (
@@ -4958,6 +5363,12 @@ function TeacherResults() {
                   )}
                 </div>
               )}
+
+              {/* TAB: Nilai Esai */}
+              {detailTab === "esai" && resultDetail && (
+                <EssayGradingPanel detail={resultDetail}
+                  onGraded={() => { if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail); }} />
+              )}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-6 py-4 shrink-0">
               <Button variant="danger" className="mr-auto h-8 text-[12px]" onClick={() => setConfirmDelete({ id: detail.id, title: detail.title })}>
@@ -4978,9 +5389,15 @@ function TeacherResults() {
                   [],
                   ["Nama Siswa", "Nilai", "Jawaban Benar", ...qs.map((_, i) => `Soal ${i + 1}`)],
                   ...takers.map(st => {
-                    const correct = qs.filter(q => st.answers[q.assessmentQuestionId] === q.correctAnswer).length;
+                    const correct = qs.filter(q => q.type === "pg" ? st.answers[q.assessmentQuestionId] === q.correctAnswer : st.results[q.assessmentQuestionId]?.isCorrect === true).length;
                     return [st.name, st.score ?? "", correct,
-                      ...qs.map(q => st.answers[q.assessmentQuestionId] ?? "")];
+                      ...qs.map(q => {
+                        const ans = st.answers[q.assessmentQuestionId];
+                        if (!ans) return "";
+                        if (q.type === "pg") return ans;
+                        const r = st.results[q.assessmentQuestionId];
+                        return `${describeAnswer(q.raw, ans)}${r ? ` [${r.isCorrect === null ? "belum dinilai" : `${r.earned}/${q.points} poin`}]` : ""}`;
+                      })];
                   }),
                 ];
                 downloadCsv(`Nilai - ${detail.title}.csv`, rows);
@@ -6296,7 +6713,105 @@ function ExamTrial({ item, onCancel, onStart }: { item: StudentAssessmentItem; o
 type ExamQuestion = {
   assessmentQuestionId: string; topic: string; difficulty: string; question: string; points: number;
   displayOptions: { key: string; text: string }[];
+  // TKA types (migration 026); older servers send only displayOptions
+  type?: QuestionType; imageUrl?: string | null;
+  statements?: string[];
+  matchLeft?: string[]; matchRight?: { index: number; text: string }[];
 };
+
+function examPartCount(q: ExamQuestion): number {
+  return q.type === "benar_salah" ? (q.statements?.length ?? 0) : q.type === "menjodohkan" ? (q.matchLeft?.length ?? 0) : 0;
+}
+function examAnswered(q: ExamQuestion | undefined, ans: string | undefined): boolean {
+  return !!q && isAnswered(q.type ?? "pg", ans, examPartCount(q));
+}
+function parseJsonArray(ans: string | undefined, n: number): (string | number | null)[] {
+  let arr: unknown[] = [];
+  try { const v = JSON.parse(ans ?? "[]"); if (Array.isArray(v)) arr = v; } catch { /* empty */ }
+  return Array.from({ length: n }, (_, i) => (arr[i] ?? null) as string | number | null);
+}
+
+/** Answer area for one exam question, per question type. */
+function ExamAnswerInput({ q, value, onChange }: { q: ExamQuestion; value: string | undefined; onChange: (v: string) => void }) {
+  const type = q.type ?? "pg";
+  if (type === "esai") {
+    return (
+      <div>
+        <textarea rows={8} value={value ?? ""} maxLength={5000} placeholder="Tulis jawabanmu di sini..."
+          onChange={e => onChange(e.target.value)}
+          className="w-full select-text resize-y rounded-[10px] border border-border bg-surface p-3.5 text-[14px] leading-relaxed text-ink focus:border-primary focus:outline-none" />
+        <p className="mt-1 text-right text-[11px] text-ink-tertiary">{(value ?? "").length}/5000 · dinilai oleh guru</p>
+      </div>
+    );
+  }
+  if (type === "benar_salah") {
+    const st = q.statements ?? [];
+    const vals = parseJsonArray(value, st.length);
+    return (
+      <div className="overflow-hidden rounded-[10px] border border-border bg-surface">
+        {st.map((text, i) => (
+          <div key={i} className="flex flex-col gap-2 border-b border-border p-3.5 last:border-0 sm:flex-row sm:items-center">
+            <p className="flex-1 text-[13px] text-ink"><span className="mr-1.5 font-semibold text-ink-secondary">{i + 1}.</span>{text}</p>
+            <div className="flex shrink-0 gap-2">
+              {(["B", "S"] as const).map(v => (
+                <button key={v} type="button" onClick={() => onChange(JSON.stringify(vals.map((x, j) => j === i ? v : x)))}
+                  className={cn("rounded-full border px-4 py-1.5 text-[12px] font-semibold transition-colors",
+                    vals[i] === v ? "border-primary bg-primary text-white" : "border-border bg-background text-ink-secondary hover:border-primary/30")}>
+                  {v === "B" ? "Benar" : "Salah"}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  if (type === "menjodohkan") {
+    const left = q.matchLeft ?? [];
+    const right = q.matchRight ?? [];
+    const vals = parseJsonArray(value, left.length);
+    return (
+      <div className="space-y-2.5">
+        {left.map((text, i) => (
+          <div key={i} className="flex flex-col gap-2 rounded-[10px] border border-border bg-surface p-3.5 sm:flex-row sm:items-center">
+            <p className="flex-1 text-[13px] font-medium text-ink">{text}</p>
+            <select value={vals[i] == null ? "" : String(vals[i])}
+              onChange={e => onChange(JSON.stringify(vals.map((x, j) => j === i ? (e.target.value === "" ? null : Number(e.target.value)) : x)))}
+              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] text-ink focus:border-primary focus:outline-none sm:w-64">
+              <option value="">Pilih pasangan...</option>
+              {right.map(r => <option key={r.index} value={r.index}>{r.text}</option>)}
+            </select>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  const complex = type === "pg_kompleks";
+  const picked = complex ? decodeComplex(value) : [];
+  return (
+    <div>
+      {complex && <p className="mb-2 text-[12px] font-semibold text-primary">Pilih SEMUA jawaban yang benar (bisa lebih dari satu).</p>}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3">
+        {q.displayOptions.map((opt) => {
+          const sel = complex ? picked.includes(opt.key) : value === opt.key;
+          return (
+            <button key={opt.key} type="button"
+              onClick={() => onChange(complex ? encodeComplex(sel ? picked.filter(k => k !== opt.key) : [...picked, opt.key]) : opt.key)}
+              className={cn("flex items-center gap-3 rounded-[10px] border p-3.5 sm:p-4 text-left transition-all",
+                sel ? "border-primary/40 bg-primary-soft" : "border-border bg-surface hover:border-primary/20 hover:bg-background"
+              )}>
+              <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center text-[12px] font-bold transition-colors",
+                complex ? "rounded-[6px]" : "rounded-full",
+                sel ? "bg-primary text-white" : "bg-background border border-border text-ink-secondary"
+              )}>{complex && sel ? "✓" : opt.key}</span>
+              <span className="text-[13px] font-medium text-ink">{opt.text}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
 type ExamSession = { attemptId: string; assessmentId: string; title: string; deadlineAt: number | null; allowReview: boolean; questions: ExamQuestion[] };
 
 // In-progress exam answers live on the device, keyed by ATTEMPT, so a
@@ -6360,6 +6875,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   const submittingRef = React.useRef(false);
   const [waitingNetwork, setWaitingNetwork] = useState(false);
   const [submitNotice, setSubmitNotice] = useState<string | null>(null);
+  const [pendingEssays, setPendingEssays] = useState(0);
 
   async function autoSubmit() {
     if (finishedRef.current) return;
@@ -6379,7 +6895,8 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
 
     type SubmitResult = {
       score?: number; correctCount?: number; totalQuestions?: number; allowReview?: boolean; error?: string; alreadySubmitted?: boolean;
-      review?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; yourAnswer: string | null; isCorrect: boolean }>;
+      pendingCount?: number;
+      review?: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; yourAnswer: string | null; isCorrect: boolean; type?: QuestionType }>;
     };
     let data: SubmitResult | null = null;
     try {
@@ -6412,6 +6929,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     const correctCount = data.correctCount ?? 0;
     setFinalScore(score);
     setFinalCorrect(correctCount);
+    setPendingEssays(data.pendingCount ?? 0);
     const resultId = `result_${Date.now()}`;
     saveResult({
       id: resultId,
@@ -6430,7 +6948,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
       const review = data.review;
       const incorrectQs: StoredIncorrectQ[] = review
         .map((r, i) => ({ r, i }))
-        .filter(item => !item.r.isCorrect && !!item.r.yourAnswer)
+        .filter(item => item.r.isCorrect === false && !!item.r.yourAnswer && (item.r.type ?? "pg") === "pg")
         .map(({ r, i }) => ({
           id: `${resultId}_${i}`,
           assessmentId: session.assessmentId,
@@ -6630,6 +7148,11 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
             {submitNotice
               ? <p className="text-[14px] text-ink-secondary mt-1">{submitNotice}</p>
               : <p className="text-[14px] text-ink-secondary mt-1">{finalCorrect} dari {examSession?.questions.length ?? 0} soal benar</p>}
+            {!submitNotice && pendingEssays > 0 && (
+              <p className="mt-2 max-w-sm text-[13px] font-medium text-warning">
+                {pendingEssays} soal esai masih dinilai guru, jadi nilai di bawah ini sementara dan bisa naik.
+              </p>
+            )}
           </div>
           {!submitNotice && <ScoreCircle score={finalScore} size={96} />}
           <Button variant="default" onClick={() => { onPageChange("pick"); setFinished(false); setSubmitNotice(null); setCurrent(0); setAnswers({}); setTimeLeft(0); setExamSession(null); }}>
@@ -6658,7 +7181,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   }
 
   const currentQ = examQuestions[current];
-  const answeredCount = Object.keys(answers).length;
+  const answeredCount = examQuestions.filter((q, i) => examAnswered(q, answers[i])).length;
   // No deadline (assessment without duration/close time) -> no countdown,
   // instead of a misleading frozen 00:00.
   const deadlineAt = examSession?.deadlineAt ?? null;
@@ -6713,30 +7236,22 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
           <div className="rounded-card border border-border bg-surface p-5 sm:p-6 shadow-sm">
             <div className="flex items-center gap-2 mb-3">
               <Badge tone="neutral">Soal {current + 1}</Badge>
-              <Badge tone="warning">Sedang</Badge>
+              {currentQ.type && currentQ.type !== "pg" && <Badge tone="primary">{QUESTION_TYPE_LABEL[currentQ.type]}</Badge>}
+              {currentQ.points > 1 && <Badge tone="neutral">{currentQ.points} poin</Badge>}
               <span className="ml-auto text-[11px] text-ink-tertiary tabular-nums">
                 {answeredCount}/{total} terjawab
               </span>
             </div>
-            <p className="text-[15px] sm:text-[16px] font-medium text-ink leading-relaxed">{currentQ.question}</p>
+            <p className="whitespace-pre-line text-[15px] sm:text-[16px] font-medium text-ink leading-relaxed">{currentQ.question}</p>
+            {currentQ.imageUrl && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={currentQ.imageUrl} alt={`Gambar soal ${current + 1}`} draggable={false}
+                className="mt-4 max-h-80 w-auto max-w-full rounded-[8px] border border-border object-contain" />
+            )}
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 sm:gap-3">
-            {currentQ.displayOptions.map((opt) => {
-              const sel = answers[current] === opt.key;
-              return (
-                <button key={opt.key} onClick={() => setAnswers(prev => ({ ...prev, [current]: opt.key }))}
-                  className={cn("flex items-center gap-3 rounded-[10px] border p-3.5 sm:p-4 text-left transition-all",
-                    sel ? "border-primary/40 bg-primary-soft" : "border-border bg-surface hover:border-primary/20 hover:bg-background"
-                  )}>
-                  <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[12px] font-bold transition-colors",
-                    sel ? "bg-primary text-white" : "bg-background border border-border text-ink-secondary"
-                  )}>{opt.key}</span>
-                  <span className="text-[13px] font-medium text-ink">{opt.text}</span>
-                </button>
-              );
-            })}
-          </div>
+          <ExamAnswerInput q={currentQ} value={answers[current]}
+            onChange={v => setAnswers(prev => ({ ...prev, [current]: v }))} />
 
           {/* Confidence selector */}
           <div className="rounded-card border border-border bg-surface p-4 shadow-sm">
@@ -6787,7 +7302,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
               <button key={i} onClick={() => setCurrent(i)}
                 className={cn("h-8 w-8 rounded-full text-[11px] font-semibold transition-colors",
                   current === i ? "bg-primary text-white ring-2 ring-primary/30" :
-                  answers[i] ? "bg-success-light text-success border border-success/30" :
+                  examAnswered(examQuestions[i], answers[i]) ? "bg-success-light text-success border border-success/30" :
                   "bg-background border border-border text-ink-secondary hover:border-primary/30"
                 )}>{i + 1}</button>
             ))}
@@ -6798,7 +7313,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
       {/* Submit confirmation - lists unanswered questions so the student
           can jump back to them before submitting */}
       {confirmSubmit && (() => {
-        const unanswered = Array.from({ length: total }, (_, i) => i).filter(i => !answers[i]);
+        const unanswered = Array.from({ length: total }, (_, i) => i).filter(i => !examAnswered(examQuestions[i], answers[i]));
         return (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
             <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setConfirmSubmit(false)} />
@@ -7383,18 +7898,38 @@ function StudentReview() {
                 </p>
               ) : reviewQs.map((q, idx) => {
                 const studentAns = q.yourAnswer ?? undefined;
-                const isWrong = studentAns !== undefined && !q.isCorrect;
+                const isWrong = studentAns !== undefined && !q.isCorrect && !q.pending;
+                const partial = q.type === "menjodohkan" && !q.isCorrect && (q.earned ?? 0) > 0;
                 const opts = q.options;
                 return (
                   <div key={idx} className={cn("rounded-card border p-4", isWrong ? "border-danger/20 bg-danger-light/30" : "border-border bg-surface")}>
-                    <div className="flex items-center gap-2 mb-2">
+                    <div className="flex flex-wrap items-center gap-2 mb-2">
                       <span className="text-[11px] font-bold text-ink-secondary">Soal {idx + 1}</span>
-                      <Badge tone={studentAns === undefined ? "neutral" : isWrong ? "danger" : "success"}>
-                        {studentAns === undefined ? "Tidak dijawab" : isWrong ? "Salah" : "Benar"}
+                      <Badge tone={studentAns === undefined ? "neutral" : q.pending ? "warning" : partial ? "warning" : isWrong ? "danger" : "success"}>
+                        {studentAns === undefined ? "Tidak dijawab" : q.pending ? "Menunggu dinilai guru" : partial ? "Sebagian benar" : isWrong ? "Salah" : "Benar"}
                       </Badge>
+                      {q.type !== "pg" && <Badge tone="primary">{QUESTION_TYPE_LABEL[q.type]}</Badge>}
                       <Badge tone="neutral">{q.topic}</Badge>
+                      {!q.pending && q.earned != null && <span className="ml-auto text-[11px] font-semibold text-ink-secondary">{q.earned}/{q.points} poin</span>}
                     </div>
-                    <p className="text-[13px] font-medium text-ink mb-3">{q.question}</p>
+                    <p className="whitespace-pre-line text-[13px] font-medium text-ink mb-3">{q.question}</p>
+                    {q.imageUrl && (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={q.imageUrl} alt="" className="mb-3 max-h-60 rounded-[8px] border border-border object-contain" />
+                    )}
+                    {q.type !== "pg" ? (
+                      <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <div className={cn("rounded-[6px] border p-2.5", isWrong ? "border-danger/20 bg-danger-light" : "border-border bg-background")}>
+                          <div className="mb-1 text-[9px] font-bold uppercase text-ink-secondary">Jawaban kamu</div>
+                          <p className="whitespace-pre-line text-[12px] text-ink">{q.yourText}</p>
+                        </div>
+                        <div className="rounded-[6px] border border-success/20 bg-success-light p-2.5">
+                          <div className="mb-1 text-[9px] font-bold uppercase text-success">{q.type === "esai" ? "Pedoman / nilai guru" : "Jawaban benar"}</div>
+                          <p className="whitespace-pre-line text-[12px] text-ink">{q.keyText}</p>
+                          {q.feedback && <p className="mt-1.5 text-[12px] text-ink"><span className="font-semibold">Catatan guru:</span> {q.feedback}</p>}
+                        </div>
+                      </div>
+                    ) : (
                     <div className="grid grid-cols-1 gap-1.5 mb-3">
                       {Object.entries(opts).map(([opt, text]) => {
                         const isCorrect = q.correctAnswer === opt;
@@ -7418,6 +7953,7 @@ function StudentReview() {
                         );
                       })}
                     </div>
+                    )}
                     {q.explanation && (
                       <div className="rounded-[6px] bg-background border border-border p-2.5">
                         <p className="text-[11px] text-ink leading-relaxed">{q.explanation}</p>
@@ -7511,6 +8047,7 @@ function StudentWeakTopics() {
 type WrongAnswerItem = {
   id: string; source: string; topic: string; question: string; options: Record<string, string>;
   yourAnswer: string | null; correctAnswer: string; explanation: string; at: number;
+  yourText?: string; keyText?: string;
 };
 
 function StudentIncorrect() {
@@ -7580,11 +8117,11 @@ function StudentIncorrect() {
               <div className="grid grid-cols-2 gap-2">
                 <div className="rounded-[6px] bg-danger-light border border-danger/20 p-2.5">
                   <div className="text-[9px] font-bold uppercase text-danger mb-1">Jawaban kamu</div>
-                  <div className="text-[11px] text-ink">{q.yourAnswer ? answerText(q, q.yourAnswer) : "(tidak tercatat)"}</div>
+                  <div className="whitespace-pre-line text-[11px] text-ink">{q.yourText ?? (q.yourAnswer ? answerText(q, q.yourAnswer) : "(tidak tercatat)")}</div>
                 </div>
                 <div className="rounded-[6px] bg-success-light border border-success/20 p-2.5">
                   <div className="text-[9px] font-bold uppercase text-success mb-1">Jawaban benar</div>
-                  <div className="text-[11px] text-ink">{answerText(q, q.correctAnswer)}</div>
+                  <div className="whitespace-pre-line text-[11px] text-ink">{q.keyText ?? answerText(q, q.correctAnswer)}</div>
                 </div>
               </div>
               {q.explanation && (

@@ -1,5 +1,6 @@
 "use client";
 
+import { QUESTION_TYPE_LABEL } from "@/lib/question-types";
 import React from "react";
 import Link from "next/link";
 import {
@@ -1040,10 +1041,16 @@ export function QuestionBankRow({
           <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-tertiary" />
         )}
         <div className="flex-1 min-w-0">
-          <p className="text-[13px] font-medium text-ink leading-snug line-clamp-2">{entry.question}</p>
+          <div className="flex items-start gap-3">
+            <p className="flex-1 text-[13px] font-medium text-ink leading-snug line-clamp-2">{entry.question}</p>
+            {entry.imageUrl && (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img src={entry.imageUrl} alt="" className="h-12 w-16 shrink-0 rounded-[6px] border border-border object-cover" />
+            )}
+          </div>
           <div className="flex flex-wrap items-center gap-2 mt-2.5">
             <Badge tone="primary">{entry.topic}</Badge>
-            <Badge tone="neutral">{entry.styleType}</Badge>
+            <Badge tone="neutral">{QUESTION_TYPE_LABEL[(entry.questionType ?? "pg") as keyof typeof QUESTION_TYPE_LABEL] ?? "Pilihan Ganda"}</Badge>
             <DifficultyBadge difficulty={entry.difficulty} />
             <BloomBadge level={entry.bloom} />
             <Badge tone={entry.status === "Disetujui" ? "success" : entry.status === "Perlu Ditinjau" ? "warning" : "danger"}>

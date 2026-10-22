@@ -5,6 +5,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve, type Chunk } from "@/lib/retrieval";
+import { describeKey } from "@/lib/question-types";
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {
@@ -79,7 +80,7 @@ const BANK_TITLE = "Pembahasan soal dari guru";
 async function loadBankChunks(classId: string, studentId: string): Promise<Chunk[]> {
   const nowIso = new Date().toISOString();
   const [{ data: qs }, { data: openAssessments }] = await Promise.all([
-    supabaseAdmin.from("questions").select("id, question, options, correct_answer, explanation, topic")
+    supabaseAdmin.from("questions").select("*")
       .eq("class_id", classId).eq("status", "active").order("created_at", { ascending: false }).limit(400),
     supabaseAdmin.from("assessments").select("id").eq("class_id", classId).eq("status", "published")
       .or(`close_at.is.null,close_at.gt.${nowIso}`),
@@ -92,12 +93,12 @@ async function loadBankChunks(classId: string, studentId: string): Promise<Chunk
     ? await supabaseAdmin.from("assessment_questions").select("question_id").in("assessment_id", openIds)
     : { data: [] as Array<{ question_id: string }> };
   const blocked = new Set((inOpen ?? []).map(r => r.question_id as string));
-  return ((qs ?? []) as Array<{ id: string; question: string; options: Record<string, string>; correct_answer: string; explanation: string | null; topic: string | null }>)
+  return ((qs ?? []) as Array<{ id: string; question: string; options: Record<string, string>; correct_answer: string | null; explanation: string | null; topic: string | null; question_type?: string | null; answer_key?: unknown }>)
     .filter(q => !blocked.has(q.id) && q.explanation)
     .map(q => ({
       materialTitle: BANK_TITLE,
       page: null,
-      text: `Topik: ${q.topic ?? "-"}. Pertanyaan: ${q.question} Jawaban: ${q.options?.[q.correct_answer] ?? q.correct_answer}. Penjelasan: ${q.explanation}`,
+      text: `Topik: ${q.topic ?? "-"}. Pertanyaan: ${q.question} Jawaban: ${describeKey(q)}. Penjelasan: ${q.explanation}`,
     }));
 }
 

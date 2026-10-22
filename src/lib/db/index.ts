@@ -222,6 +222,8 @@ export type QuestionBankEntry = {
   explanation: string;
   sourceTitle?: string; sourcePage?: number;
   classId?: string;
+  /** TKA question type (migration 026); absent = plain multiple choice */
+  questionType?: string; answerKey?: unknown; imageUrl?: string | null;
 };
 
 export const questionBank: QuestionBankEntry[] = [];

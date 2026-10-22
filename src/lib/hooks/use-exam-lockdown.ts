@@ -58,7 +58,13 @@ export function useExamLockdown(active: boolean, onViolation: (reason: string) =
       if (document.fullscreenElement) { wasFullscreen = true; return; }
       if (wasFullscreen) violate("Kamu keluar dari layar penuh.");
     };
-    const block = (e: Event) => e.preventDefault();
+    const block = (e: Event) => {
+      // Essay answers: selecting/moving the cursor inside the answer box is fine
+      // (copy/paste stay blocked everywhere).
+      const el = e.target as HTMLElement | null;
+      if (e.type === "selectstart" && el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")) return;
+      e.preventDefault();
+    };
     const onKey = (e: KeyboardEvent) => {
       const k = e.key.toLowerCase();
       if (k === "escape" || k === "f11" || k === "f12" || ((e.ctrlKey || e.metaKey) && BLOCKED_COMBOS.has(k)) ||

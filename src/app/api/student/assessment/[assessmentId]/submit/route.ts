@@ -2,6 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import { parseDbTime } from "@/lib/auth/assessment-availability";
 import { awardXpAndStreak, checkAndAwardAchievements } from "@/lib/gamification/award";
 import type { Assessment, Question } from "@/lib/supabase/types";
+import { describeAnswer, describeKey, gradeAnswer, questionTypeOf } from "@/lib/question-types";
 
 export const dynamic = "force-dynamic";
 
@@ -17,7 +18,10 @@ const XP_PER_CORRECT_ANSWER = 10;
  * there is no way to let a student write `student_answer` directly
  * while forbidding them from also writing `is_correct`/`score`).
  *
- * Request body: { attemptId: string, answers: Record<assessmentQuestionId, "A"|"B"|"C"|"D"|"E"> }
+ * Request body: { attemptId: string, answers: Record<assessmentQuestionId, string> }
+ * (answer encoding per question type: see src/lib/question-types.ts).
+ * Essays are left for the teacher: the attempt stays 'submitted' (score
+ * provisional) until every essay is graded via /api/teacher/grade-essay.
  */
 export async function POST(req: Request, { params }: { params: Promise<{ assessmentId: string }> }) {
   try {
@@ -121,11 +125,12 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
     let totalPoints = 0;
     let earnedPoints = 0;
     let correctCount = 0;
+    let pendingCount = 0;
     const questionAttemptRows: Array<{
       assessment_attempt_id: string;
       assessment_question_id: string;
       student_answer: string | null;
-      is_correct: boolean;
+      is_correct: boolean | null;
       points_earned: number;
     }> = [];
     const wrongAnswerRows: Array<{
@@ -136,14 +141,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
       attempted_at: string;
     }> = [];
 
+    const graded = new Map<string, ReturnType<typeof gradeAnswer>>();
     for (const row of rows) {
-      const submittedAnswer = answers[row.id] ?? null;
-      const isCorrect = submittedAnswer === row.questions.correct_answer;
-      const pointsEarned = isCorrect ? row.points : 0;
+      const raw = answers[row.id];
+      const submittedAnswer = typeof raw === "string" && raw.length > 0 ? raw.slice(0, 5000) : null;
+      const points = Number(row.points) || 1;
+      const g = gradeAnswer(row.questions as never, submittedAnswer, points);
+      graded.set(row.id, g);
+      const isCorrect = g.isCorrect;
+      const pointsEarned = g.earned;
 
-      totalPoints += row.points;
+      totalPoints += points;
       earnedPoints += pointsEarned;
       if (isCorrect) correctCount += 1;
+      if (g.pending) pendingCount += 1;
 
       questionAttemptRows.push({
         assessment_attempt_id: attemptId,
@@ -153,7 +164,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
         points_earned: pointsEarned,
       });
 
-      if (!isCorrect) {
+      if (isCorrect === false) {
         wrongAnswerRows.push({
           student_id: student.id,
           assessment_attempt_id: attemptId,
@@ -173,9 +184,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
 
     const score = totalPoints > 0 ? Math.round((earnedPoints / totalPoints) * 100) : 0;
 
+    // With ungraded essays the attempt stays 'submitted' and the score is
+    // provisional until the teacher grades them.
     await supabaseAdmin
       .from("assessment_attempts")
-      .update({ status: "graded", submitted_at: new Date().toISOString(), score, total_points: totalPoints })
+      .update({ status: pendingCount > 0 ? "submitted" : "graded", submitted_at: new Date().toISOString(), score, total_points: totalPoints })
       .eq("id", attemptId);
 
     await awardXpAndStreak(student.id, correctCount * XP_PER_CORRECT_ANSWER);
@@ -183,20 +196,29 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
 
     let review = null;
     if (a.allow_review) {
-      review = rows.map((row) => ({
-        question: row.questions.question,
-        options: row.questions.options,
-        correctAnswer: row.questions.correct_answer,
-        explanation: row.questions.explanation,
-        yourAnswer: answers[row.id] ?? null,
-        isCorrect: answers[row.id] === row.questions.correct_answer,
-      }));
+      review = rows.map((row) => {
+        const q = row.questions as never;
+        const g = graded.get(row.id);
+        return {
+          type: questionTypeOf(q),
+          question: row.questions.question,
+          options: row.questions.options,
+          correctAnswer: row.questions.correct_answer,
+          correctText: describeKey(q),
+          explanation: row.questions.explanation,
+          yourAnswer: answers[row.id] ?? null,
+          yourText: describeAnswer(q, answers[row.id] ?? null),
+          isCorrect: g?.isCorrect ?? false,
+          pending: g?.pending ?? false,
+        };
+      });
     }
 
     return Response.json({
       success: true,
       score,
       correctCount,
+      pendingCount,
       totalQuestions: rows.length,
       allowReview: a.allow_review,
       review,
