@@ -26,7 +26,7 @@ export const QUESTION_TYPE_LABEL: Record<QuestionType, string> = {
 
 export const QUESTION_TYPE_HINT: Record<QuestionType, string> = {
   pg: "Satu jawaban benar.",
-  pg_kompleks: "Jawaban benar bisa lebih dari satu. Nilai parsial; centang yang salah mengurangi nilai.",
+  pg_kompleks: "Jawaban benar bisa lebih dari satu. Nilai parsial per opsi (dicentang/tidak dicentang dengan benar).",
   benar_salah: "Beberapa pernyataan, siswa menentukan Benar/Salah. Nilai parsial per pernyataan.",
   menjodohkan: "Siswa memasangkan item kiri dengan kanan. Nilai parsial per pasangan.",
   esai: "Jawaban uraian, dinilai guru setelah dikumpulkan.",
@@ -111,9 +111,10 @@ export type GradeResult = {
 /**
  * Grades one answer. Scoring rules:
  * - pg: exact letter
- * - pg_kompleks: partial - (correct options ticked - wrong options ticked)
- *   / number of correct options, never below 0. Wrong ticks cost points so
- *   ticking every option doesn't earn full marks.
+ * - pg_kompleks: partial per option - every option is one decision worth
+ *   points / number of options: a key option ticked, or a non-key option
+ *   left unticked, earns its share; a wrong decision earns 0 (no minus).
+ *   Ticking nothing at all = 0 (not attempted).
  * - benar_salah: partial - share of statements judged correctly
  * - menjodohkan: partial - share of correctly matched pairs
  * - esai: waits for the teacher (0 points until graded); empty = 0
@@ -125,11 +126,11 @@ export function gradeAnswer(q: QuestionLike, answer: string | null | undefined, 
     case "pg_kompleks": {
       const key = complexKey(q.answer_key);
       const picked = decodeComplex(ans);
-      const right = picked.filter(p => key.includes(p)).length;
-      const wrong = picked.length - right;
-      const ok = key.length > 0 && right === key.length && wrong === 0;
-      const share = key.length ? Math.max(0, right - wrong) / key.length : 0;
-      return { isCorrect: ok, earned: roundPoints(points * share), pending: false };
+      const all = letterOptions(q.options).map(o => o.key);
+      const decisionsRight = all.filter(k => key.includes(k) === picked.includes(k)).length;
+      const ok = key.length > 0 && decisionsRight === all.length;
+      if (picked.length === 0 || all.length === 0) return { isCorrect: false, earned: 0, pending: false };
+      return { isCorrect: ok, earned: roundPoints(points * decisionsRight / all.length), pending: false };
     }
     case "benar_salah": {
       const key = Array.isArray(q.answer_key) ? q.answer_key.map(String) : [];
