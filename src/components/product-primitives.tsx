@@ -1025,17 +1025,22 @@ export function QuestionBankRow({
   onApprove,
   onReject,
   onEdit,
+  onOpen,
 }: {
   entry: QuestionBankEntry;
   onApprove?: () => void;
   onReject?: () => void;
   onEdit?: () => void;
+  /** click the row to see the full question */
+  onOpen?: () => void;
 }) {
   const successRate = entry.successRate;
   const successColor = successRate >= 70 ? "text-success" : successRate >= 50 ? "text-warning" : "text-danger";
 
   return (
-    <div className="rounded-card border border-border bg-surface p-4 hover:border-primary/20 hover:shadow-sm transition-all">
+    <div onClick={onOpen} role={onOpen ? "button" : undefined} tabIndex={onOpen ? 0 : undefined}
+      onKeyDown={onOpen ? (e => { if (e.key === "Enter") onOpen(); }) : undefined}
+      className={cn("rounded-card border border-border bg-surface p-4 hover:border-primary/20 hover:shadow-sm transition-all", onOpen && "cursor-pointer")}>
       <div className="flex items-start gap-3">
         {entry.isLocked && (
           <Lock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-tertiary" />

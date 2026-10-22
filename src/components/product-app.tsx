@@ -3510,6 +3510,7 @@ function TeacherQuestionBank() {
     .map(a => ({ value: a.subjectId, label: a.subjectName }));
   const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
   const [selectedTypes, setSelectedTypes] = useState<Set<QuestionType>>(new Set());
+  const [detailQ, setDetailQ] = useState<QuestionBankEntry | null>(null);
   const [selectedDifficulty, setSelectedDifficulty] = useState<string | null>(null);
 
   // Bank/review are scoped by subject (real schema has no per-class column on
@@ -3609,7 +3610,7 @@ function TeacherQuestionBank() {
 
       <div className="space-y-3">
         {bankLoading && <SectionLoading message="Memuat bank soal..." />}
-        {!bankLoading && filtered.map(q => <QuestionBankRow key={q.id} entry={q} />)}
+        {!bankLoading && filtered.map(q => <QuestionBankRow key={q.id} entry={q} onOpen={() => setDetailQ(q)} />)}
         {!bankLoading && filtered.length === 0 && (
           <EmptyState
             icon={Database}
@@ -3661,7 +3662,113 @@ function TeacherQuestionBank() {
         </div>
       )}
 
+      {detailQ && <QuestionDetailDialog q={detailQ} onClose={() => setDetailQ(null)} />}
+
       {toast && <AppToast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
+    </div>
+  );
+}
+
+// Full view of one bank question: text, picture, every option/statement/pair
+// with the key marked, explanation and metadata.
+function QuestionDetailDialog({ q, onClose }: { q: QuestionBankEntry; onClose: () => void }) {
+  const type = (q.questionType ?? "pg") as QuestionType;
+  const raw = { question_type: type, options: q.options as unknown as Record<string, unknown>, correct_answer: q.correctAnswer, answer_key: q.answerKey };
+  const letters = (["A", "B", "C", "D", "E"] as const).filter(k => (q.options as Record<string, string | undefined>)[k]);
+  const complexKeys = Array.isArray(q.answerKey) ? (q.answerKey as string[]) : [];
+  const statements = ((q.options as unknown as { statements?: string[] }).statements) ?? [];
+  const tfKey = Array.isArray(q.answerKey) ? (q.answerKey as string[]) : [];
+  const match = q.options as unknown as { left?: string[]; right?: string[] };
+  const matchKey = Array.isArray(q.answerKey) ? (q.answerKey as number[]) : [];
+  const usedRight = new Set(matchKey.map(Number));
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
+      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={onClose} />
+      <div className="relative flex max-h-[90vh] w-full max-w-2xl flex-col rounded-card border border-border bg-surface shadow-xl">
+        <div className="flex items-start justify-between gap-3 border-b border-border px-5 py-4 shrink-0">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Badge tone="primary">{QUESTION_TYPE_LABEL[type]}</Badge>
+            <Badge tone="neutral">{q.topic}</Badge>
+            <Badge tone={q.difficulty === "Mudah" ? "success" : q.difficulty === "Sedang" ? "warning" : "danger"}>{q.difficulty}</Badge>
+            <Badge tone="neutral">{q.defaultPoints ?? 1} poin</Badge>
+          </div>
+          <button onClick={onClose} aria-label="Tutup" className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-background">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="flex-1 space-y-4 overflow-y-auto p-5">
+          <p className="whitespace-pre-line text-[15px] font-medium leading-relaxed text-ink">{q.question}</p>
+          {q.imageUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={q.imageUrl} alt="Gambar soal" className="max-h-80 rounded-[8px] border border-border object-contain" />
+          )}
+
+          {(type === "pg" || type === "pg_kompleks") && (
+            <div className="space-y-1.5">
+              {letters.map(k => {
+                const right = type === "pg" ? q.correctAnswer === k : complexKeys.includes(k);
+                return (
+                  <div key={k} className={cn("flex items-center gap-2 rounded-[8px] border px-3 py-2", right ? "border-success/30 bg-success-light" : "border-border bg-background")}>
+                    <span className={cn("flex h-6 w-6 shrink-0 items-center justify-center text-[11px] font-bold", type === "pg" ? "rounded-full" : "rounded-[5px]",
+                      right ? "bg-success text-white" : "bg-border text-ink-secondary")}>{k}</span>
+                    <span className="flex-1 text-[13px] text-ink">{(q.options as Record<string, string>)[k]}</span>
+                    {right && <span className="text-[11px] font-semibold text-success">Jawaban benar</span>}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
+          {type === "benar_salah" && (
+            <div className="overflow-hidden rounded-[8px] border border-border">
+              {statements.map((st, i) => (
+                <div key={i} className="flex items-center gap-3 border-b border-border px-3 py-2 last:border-0">
+                  <span className="text-[12px] font-semibold text-ink-secondary">{i + 1}.</span>
+                  <span className="flex-1 text-[13px] text-ink">{st}</span>
+                  <Badge tone={tfKey[i] === "B" ? "success" : "danger"}>{tfKey[i] === "B" ? "Benar" : "Salah"}</Badge>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {type === "menjodohkan" && (
+            <div className="space-y-1.5">
+              {(match.left ?? []).map((l, i) => (
+                <div key={i} className="flex items-center gap-2 rounded-[8px] border border-success/30 bg-success-light px-3 py-2 text-[13px] text-ink">
+                  <span className="flex-1 font-medium">{l}</span><span className="text-ink-tertiary">→</span>
+                  <span className="flex-1">{match.right?.[Number(matchKey[i])] ?? "-"}</span>
+                </div>
+              ))}
+              {(match.right ?? []).map((r, i) => usedRight.has(i) ? null : (
+                <div key={`x${i}`} className="flex items-center gap-2 rounded-[8px] border border-dashed border-border bg-background px-3 py-2 text-[13px] text-ink-secondary">
+                  <span className="flex-1 italic">Pengecoh</span><span />
+                  <span className="flex-1">{r}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {type === "esai" && (
+            <div className="rounded-[8px] border border-border bg-background p-3 text-[13px] text-ink">{describeKey(raw)}</div>
+          )}
+
+          {q.explanation && (
+            <div className="rounded-[8px] border border-border bg-background p-3">
+              <div className="mb-1 text-[11px] font-semibold text-ink-secondary">{type === "esai" ? "Contoh jawaban / pembahasan" : "Pembahasan"}</div>
+              <p className="whitespace-pre-line text-[13px] leading-relaxed text-ink">{q.explanation}</p>
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 gap-x-6 gap-y-2 text-[12px] sm:grid-cols-3">
+            <div><div className="text-[10px] font-bold uppercase tracking-wide text-ink-tertiary">Sumber</div><div className="text-ink">{q.sourceTitle ? `${q.sourceTitle}${q.sourcePage ? `, hal. ${q.sourcePage}` : ""}` : q.source}</div></div>
+            <div><div className="text-[10px] font-bold uppercase tracking-wide text-ink-tertiary">Dipakai</div><div className="text-ink">{q.usageCount}× di asesmen</div></div>
+            <div><div className="text-[10px] font-bold uppercase tracking-wide text-ink-tertiary">Tingkat sukses</div><div className="text-ink">{q.successRate}%</div></div>
+          </div>
+        </div>
+        <div className="flex justify-end border-t border-border px-5 py-3 shrink-0">
+          <Button variant="outline" size="sm" onClick={onClose}>Tutup</Button>
+        </div>
+      </div>
     </div>
   );
 }
