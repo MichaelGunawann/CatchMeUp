@@ -1715,8 +1715,8 @@ function ManualQuestionFields({ value, onChange, errorFor, attempted, topicOptio
             className={fieldClass(false)} />
         </FormField>
       </div>
-      <FormField label={type === "esai" ? "Contoh jawaban / pembahasan (opsional)" : "Pembahasan (opsional)"}>
-        <textarea rows={2} placeholder="Jelaskan jawaban benar..."
+      <FormField label={type === "esai" ? "Contoh jawaban benar (opsional, dipakai AI saat membantu menilai)" : "Pembahasan (opsional)"}>
+        <textarea rows={type === "esai" ? 4 : 2} placeholder={type === "esai" ? "Tulis jawaban yang dianggap benar. Kalau dikosongkan, AI menilai berdasarkan materi kelas." : "Jelaskan jawaban benar..."}
           value={value.explanation} onChange={e => set("explanation", e.target.value)}
           className={fieldClass(false, "resize-none")} />
       </FormField>
@@ -4948,7 +4948,7 @@ type ResultQuestionRow = {
 type ResultStudentRow = {
   studentId: string; name: string; score: number | null; answers: Record<string, string>;
   /** per assessment-question grading (essays: isCorrect null until graded) */
-  results: Record<string, { qaId: string; isCorrect: boolean | null; earned: number; feedback: string | null }>;
+  results: Record<string, { qaId: string; isCorrect: boolean | null; earned: number; feedback: string | null; aiPoints: number | null; aiReason: string | null }>;
 };
 type AssessmentResultDetail = { questions: ResultQuestionRow[]; distributions: Record<string, Record<string, number>>; studentRows: ResultStudentRow[] };
 
@@ -5019,9 +5019,10 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
       .from("question_attempts")
       .select("*")
       .in("assessment_attempt_id", attempts.map(a => a.id));
-    for (const row of (qaRows ?? []) as Array<{ id: string; assessment_attempt_id: string; assessment_question_id: string; student_answer: string | null; is_correct: boolean | null; points_earned: number | null; teacher_feedback?: string | null }>) {
+    for (const row of (qaRows ?? []) as Array<{ id: string; assessment_attempt_id: string; assessment_question_id: string; student_answer: string | null; is_correct: boolean | null; points_earned: number | null; teacher_feedback?: string | null; ai_suggested_points?: number | null; ai_reason?: string | null }>) {
       (resultsByAttempt[row.assessment_attempt_id] ??= {})[row.assessment_question_id] = {
         qaId: row.id, isCorrect: row.is_correct, earned: Number(row.points_earned) || 0, feedback: row.teacher_feedback ?? null,
+        aiPoints: row.ai_suggested_points == null ? null : Number(row.ai_suggested_points), aiReason: row.ai_reason ?? null,
       };
       if (!row.student_answer) continue;
       (answersByAttempt[row.assessment_attempt_id] ??= {})[row.assessment_question_id] = row.student_answer;
@@ -5058,50 +5059,143 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
   return { questions, distributions, studentRows };
 }
 
-// Teacher scores essay answers (0..points) with optional feedback.
+// Teacher scores essay answers (0..points) with optional feedback. The AI
+// can suggest a score for one answer or for a selection (it costs AI quota,
+// so it only runs when asked); a suggestion only counts once the teacher
+// accepts and saves it.
 function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetail; onGraded: () => void }) {
   const essays = detail.questions.filter(q => q.type === "esai");
   const [drafts, setDrafts] = useState<Record<string, { points: string; feedback: string }>>({});
   const [saving, setSaving] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [checking, setChecking] = useState<Set<string>>(new Set());
+  // Suggestions fetched in this session (stored ones come from detail.results).
+  const [fresh, setFresh] = useState<Record<string, { points: number; reason: string }>>({});
   const [msg, setMsg] = useState<{ text: string; tone: "success" | "danger" } | null>(null);
+
+  const suggestionOf = (r: ResultStudentRow["results"][string]) =>
+    fresh[r.qaId] ?? (r.aiPoints != null ? { points: r.aiPoints, reason: r.aiReason ?? "" } : null);
+
+  async function aiCheck(ids: string[]) {
+    if (ids.length === 0) return;
+    setMsg(null);
+    setChecking(prev => new Set([...prev, ...ids]));
+    // Server takes up to 20 per request.
+    let done = 0; let failed: string | null = null;
+    for (let i = 0; i < ids.length; i += 20) {
+      const res = await apiPost<{ suggestions?: Record<string, { points: number; reason: string }> }>("/api/teacher/essay-suggest", { questionAttemptIds: ids.slice(i, i + 20) });
+      if (res.error) { failed = res.error; break; }
+      setFresh(prev => ({ ...prev, ...(res.suggestions ?? {}) }));
+      done += Object.keys(res.suggestions ?? {}).length;
+    }
+    setChecking(prev => { const n = new Set(prev); ids.forEach(id => n.delete(id)); return n; });
+    setMsg(failed ? { text: `AI gagal mengecek: ${failed}`, tone: "danger" } : { text: `AI selesai mengecek ${done} jawaban. Periksa usulannya, lalu simpan.`, tone: "success" });
+  }
+
+  async function saveOne(qaId: string, max: number, points: string, feedback: string): Promise<boolean> {
+    const pts = Number(points);
+    if (points === "" || !Number.isFinite(pts) || pts < 0 || pts > max) {
+      setMsg({ text: `Isi nilai antara 0 dan ${max}.`, tone: "danger" }); return false;
+    }
+    const res = await apiPost<{ score?: number }>("/api/teacher/grade-essay", { questionAttemptId: qaId, points: pts, feedback });
+    if (res.error) { setMsg({ text: `Gagal menyimpan: ${res.error}`, tone: "danger" }); return false; }
+    return true;
+  }
 
   async function save(qaId: string, max: number) {
     const d = drafts[qaId];
-    const pts = Number(d?.points);
-    if (d?.points === undefined || d.points === "" || !Number.isFinite(pts) || pts < 0 || pts > max) {
-      setMsg({ text: `Isi nilai antara 0 dan ${max}.`, tone: "danger" }); return;
-    }
     setSaving(qaId); setMsg(null);
-    const res = await apiPost<{ score?: number }>("/api/teacher/grade-essay", { questionAttemptId: qaId, points: pts, feedback: d.feedback ?? "" });
+    const ok = await saveOne(qaId, max, d?.points ?? "", d?.feedback ?? "");
     setSaving(null);
-    if (res.error) { setMsg({ text: `Gagal menyimpan: ${res.error}`, tone: "danger" }); return; }
-    setMsg({ text: "Nilai tersimpan. Nilai akhir siswa sudah dihitung ulang.", tone: "success" });
+    if (ok) { setMsg({ text: "Nilai tersimpan. Nilai akhir siswa sudah dihitung ulang.", tone: "success" }); onGraded(); }
+  }
+
+  // Accept the AI suggestion for every selected answer that has one.
+  async function acceptSelected(q: ResultQuestionRow, rows: Array<{ r: ResultStudentRow["results"][string] }>) {
+    const targets = rows.filter(({ r }) => selected.has(r.qaId) && suggestionOf(r));
+    if (targets.length === 0) { setMsg({ text: "Belum ada usulan AI untuk jawaban yang dipilih. Klik \"AI cek\" dulu.", tone: "danger" }); return; }
+    setSaving("bulk"); setMsg(null);
+    let ok = 0;
+    for (const { r } of targets) {
+      const sug = suggestionOf(r)!;
+      if (await saveOne(r.qaId, q.points, String(sug.points), drafts[r.qaId]?.feedback ?? r.feedback ?? "")) ok++;
+    }
+    setSaving(null);
+    setMsg({ text: `${ok} nilai dari usulan AI tersimpan.`, tone: "success" });
     onGraded();
   }
 
   return (
     <div className="space-y-5">
+      <p className="text-[12px] text-ink-secondary">
+        AI hanya mengecek kalau diminta (hemat kuota). AI membandingkan jawaban dengan <span className="font-semibold text-ink">contoh jawaban / pedoman</span> di soal;
+        kalau keduanya kosong, AI memakai materi kelas. Usulan AI baru berlaku setelah kamu menyimpannya.
+      </p>
       {msg && <p className={cn("text-[12px] font-medium", msg.tone === "success" ? "text-success" : "text-danger")}>{msg.text}</p>}
       {essays.map((q) => {
         const idx = detail.questions.indexOf(q) + 1;
-        const answers = detail.studentRows.filter(st => st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]);
+        const rows = detail.studentRows
+          .filter(st => st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId])
+          .map(st => ({ st, r: st.results[q.assessmentQuestionId] }));
+        const ids = rows.map(x => x.r.qaId);
+        const selectedHere = ids.filter(id => selected.has(id));
+        const allSelected = ids.length > 0 && selectedHere.length === ids.length;
         return (
           <div key={q.assessmentQuestionId} className="rounded-[10px] border border-border bg-background p-4">
             <p className="text-[12px] font-bold text-ink">Soal {idx} · maks. {q.points} poin</p>
             <p className="mt-1 whitespace-pre-line text-[12px] text-ink">{q.question}</p>
             <p className="mt-1 text-[11px] text-ink-secondary">{describeKey(q.raw)}</p>
-            {answers.length === 0 && <p className="mt-3 text-[12px] text-ink-tertiary">Belum ada jawaban.</p>}
+            {rows.length === 0 && <p className="mt-3 text-[12px] text-ink-tertiary">Belum ada jawaban.</p>}
+            {rows.length > 0 && (
+              <div className="mt-3 flex flex-wrap items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-2">
+                <label className="flex items-center gap-2 text-[12px] font-semibold text-ink">
+                  <input type="checkbox" className="h-4 w-4 accent-primary" checked={allSelected}
+                    onChange={() => setSelected(prev => { const n = new Set(prev); ids.forEach(id => allSelected ? n.delete(id) : n.add(id)); return n; })} />
+                  Pilih semua ({ids.length})
+                </label>
+                <button type="button" className="text-[11px] font-semibold text-primary hover:underline"
+                  onClick={() => setSelected(prev => { const n = new Set(prev); rows.forEach(({ r }) => { if (r.isCorrect === null) n.add(r.qaId); else n.delete(r.qaId); }); return n; })}>
+                  Pilih yang belum dinilai
+                </button>
+                <div className="ml-auto flex flex-wrap gap-2">
+                  <Button variant="outline" size="sm" disabled={selectedHere.length === 0 || selectedHere.some(id => checking.has(id))}
+                    onClick={() => aiCheck(selectedHere)}>
+                    <Sparkles className="mr-1.5 h-3.5 w-3.5" />AI cek yang dipilih ({selectedHere.length})
+                  </Button>
+                  <Button variant="default" size="sm" disabled={selectedHere.length === 0 || saving === "bulk"}
+                    onClick={() => acceptSelected(q, rows)}>
+                    {saving === "bulk" ? "Menyimpan..." : "Pakai usulan AI (dipilih)"}
+                  </Button>
+                </div>
+              </div>
+            )}
             <div className="mt-3 space-y-3">
-              {answers.map(st => {
-                const r = st.results[q.assessmentQuestionId];
+              {rows.map(({ st, r }) => {
                 const d = drafts[r.qaId] ?? { points: r.isCorrect === null ? "" : String(r.earned), feedback: r.feedback ?? "" };
+                const sug = suggestionOf(r);
+                const isChecking = checking.has(r.qaId);
                 return (
-                  <div key={st.studentId} className="rounded-[8px] border border-border bg-surface p-3">
-                    <div className="mb-1 flex items-center gap-2">
+                  <div key={st.studentId} className={cn("rounded-[8px] border bg-surface p-3", selected.has(r.qaId) ? "border-primary/40" : "border-border")}>
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
+                      <input type="checkbox" className="h-4 w-4 accent-primary" checked={selected.has(r.qaId)} aria-label={`Pilih jawaban ${st.name}`}
+                        onChange={() => setSelected(prev => { const n = new Set(prev); if (n.has(r.qaId)) n.delete(r.qaId); else n.add(r.qaId); return n; })} />
                       <span className="text-[12px] font-semibold text-ink">{st.name}</span>
                       {r.isCorrect === null ? <Badge tone="warning">Belum dinilai</Badge> : <Badge tone="success">{r.earned}/{q.points} poin</Badge>}
+                      <Button variant="outline" size="sm" className="ml-auto" disabled={isChecking} onClick={() => aiCheck([r.qaId])}>
+                        <Sparkles className="mr-1.5 h-3.5 w-3.5" />{isChecking ? "AI mengecek..." : sug ? "AI cek ulang" : "AI cek"}
+                      </Button>
                     </div>
                     <p className="whitespace-pre-line rounded-[6px] bg-background p-2.5 text-[12px] text-ink">{st.answers[q.assessmentQuestionId]}</p>
+                    {sug && (
+                      <div className="mt-2 flex flex-wrap items-start gap-2 rounded-[6px] border border-primary/20 bg-primary-soft p-2.5">
+                        <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                        <p className="flex-1 text-[12px] text-ink"><span className="font-semibold">Usulan AI: {sug.points}/{q.points}</span>{sug.reason ? ` — ${sug.reason}` : ""}</p>
+                        <button type="button" className="text-[11px] font-semibold text-primary hover:underline"
+                          onClick={() => setDrafts(p => ({ ...p, [r.qaId]: { ...d, points: String(sug.points) } }))}>
+                          Pakai nilai ini
+                        </button>
+                      </div>
+                    )}
                     <div className="mt-2 flex flex-wrap items-center gap-2">
                       <label className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary">
                         Nilai
