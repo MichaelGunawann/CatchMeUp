@@ -398,54 +398,10 @@ function UploadMaterialModal({ onClose }: { onClose: () => void }) {
       setUploading(false);
       return;
     }
-    const matId = created.id;
-    const uploadedPath: string | null = created.path;
-
-    setToast({ message: "Mengunggah materi dan memulai analisis AI...", tone: "primary" });
-
-    // Extract questions from the file already sitting in Storage - the
-    // server fetches it directly, so this isn't subject to Vercel's
-    // serverless request body size cap the way resending the raw file
-    // through this function would be.
-    let rawQuestions: Array<{ question: string; options: Record<string, string>; correctAnswer: string; explanation: string; topic: string; difficulty: string }> = [];
-    if (uploadedPath) {
-      try {
-        const res = await fetch("/api/extract-and-generate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ storagePath: uploadedPath, fileName: title, count: 5, materialTitle: title, subject: activeSubjectName }),
-        });
-        const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
-        rawQuestions = data.questions ?? [];
-      } catch { /* will fall back to empty */ }
-    }
-
-    if (!rawQuestions.length) {
-      // Fallback: generate from metadata
-      try {
-        const res = await fetch("/api/generate-questions", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ materialTitle: title, topic: title, subject: activeSubjectName, count: 5, difficulty: "Sedang" }),
-        });
-        const data = await res.json() as { questions?: typeof rawQuestions };
-        rawQuestions = data.questions ?? [];
-      } catch { /* ignore */ }
-    }
-
-    if (rawQuestions.length > 0) {
-      // Push to the real review queue (status 'pending') so it shows up on
-      // Tinjau Soal AI, linked back to this real material.
-      await insertPendingQuestions(rawQuestions, teacher.schoolId, activeClassId, activeSubjectId, teacher.profileId, title, matId);
-      await markMaterialProcessed(matId);
-
-      setToast({ message: `${rawQuestions.length} soal berhasil diekstrak dari "${title}"`, tone: "success" });
-      setTimeout(() => onClose(), 1500);
-    } else {
-      setToast({ message: "Materi disimpan. Tidak ada soal yang diekstrak.", tone: "primary" });
-      setTimeout(() => onClose(), 1500);
-    }
-
+    // No AI here: questions are made only when the teacher asks for them
+    // (Proses AI in Pustaka Materi) - saves AI quota.
+    setToast({ message: `Materi "${title}" tersimpan. Buat soal lewat tombol "Proses AI" di Pustaka Materi.`, tone: "success" });
+    setTimeout(() => onClose(), 1800);
     setUploading(false);
   }
 
@@ -1331,6 +1287,12 @@ async function saveTeacherAiSettings(teacherId: string, settings: TeacherAiSetti
 // verifies the bearer token itself). Returns the parsed JSON body, or an
 // { error } object for network/HTTP failures, so callers can always show
 // the real reason instead of failing silently.
+/** JSON headers with the signed-in user's token (AI routes require login). */
+async function jsonAuthHeaders(): Promise<Record<string, string>> {
+  const { data: { session } } = await supabase.auth.getSession();
+  return { "Content-Type": "application/json", ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}) };
+}
+
 async function apiPost<T = Record<string, unknown>>(path: string, body: unknown): Promise<T & { error?: string }> {
   try {
     const { data: { session } } = await supabase.auth.getSession();
@@ -2547,7 +2509,7 @@ function TeacherMaterials() {
       try {
         const res = await fetch("/api/extract-and-generate", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await jsonAuthHeaders(),
           body: JSON.stringify({ storagePath, fileName: mat?.title ?? "Materi", count: 5, materialTitle: mat?.title ?? "Materi", subject: mat?.subject ?? activeSubjectName }),
         });
         const data = await res.json() as { questions?: typeof rawQuestions; error?: string };
@@ -2565,7 +2527,7 @@ function TeacherMaterials() {
       try {
         const res = await fetch("/api/generate-questions", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: await jsonAuthHeaders(),
           body: JSON.stringify({
             materialTitle: mat?.title ?? "Materi",
             topic: mat?.subject ?? mat?.title ?? "Umum",
@@ -2684,32 +2646,10 @@ function TeacherMaterials() {
     }
 
     closeUpload();
-    setToast({ message: "Mengunggah materi dan memulai analisis AI...", tone: "primary" });
-
-    try {
-      await fetch("/api/summarize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ materialTitle: title, topic: uploadForm.chapter.trim() || title, subject: subjectName }),
-      });
-    } catch { /* metadata summary is best-effort, doesn't block the flow */ }
     setUploadedMaterials(prev => (prev ?? []).map(mat => mat.id === matId ? { ...mat, status: "Aktif" as Material["status"] } : mat));
-
-    setProcessingIds(prev => new Set([...prev, matId]));
-    setToast({ message: "AI sedang membaca isi materi dan membuat soal...", tone: "primary" });
-    const count = await generateQuestionsFromMaterial(
-      matId, false,
-      uploadedPath ?? undefined,
-      { title, subject: subjectName },
-      { classId, subjectId },
-    );
-    setProcessingIds(prev => { const next = new Set(prev); next.delete(matId); return next; });
-    setProcessedIds(prev => new Set([...prev, matId]));
-    if (count > 0) {
-      await markMaterialProcessed(matId);
-      setUploadedMaterials(prev => (prev ?? []).map(mat => mat.id === matId ? { ...mat, aiProcessed: true, questionsGenerated: count } : mat));
-      setToast({ message: `${count} soal berhasil diekstrak dari materi "${title}"`, tone: "success" });
-    }
+    // No AI on upload (saves quota): the teacher clicks "Proses AI" on the
+    // material when they want questions from it.
+    setToast({ message: `Materi "${title}" tersimpan. Klik "Proses AI" di kartunya kalau mau dibuatkan soal.`, tone: "success" });
     setUploading(false);
   }
 
@@ -5263,30 +5203,43 @@ function TeacherResults() {
     ? resultDetail.studentRows.reduce((n, st) => n + resultDetail.questions.filter(q => q.type === "esai" && st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]?.isCorrect === null).length, 0)
     : 0;
 
-  async function loadAIAnalysis() {
-    if (!resultDetail?.questions.length) return;
-    setAiLoading(true);
-    const payload = resultDetail.questions.map(q => {
+  function analysisPayload() {
+    if (!resultDetail) return [];
+    const payload = resultDetail.questions.map((q, i) => {
       const dist = resultDetail.distributions[q.assessmentQuestionId] ?? { A: 0, B: 0, C: 0, D: 0 };
       const wrongOpts = (["A","B","C","D"] as const).filter(o => o !== q.correctAnswer);
       const majority = wrongOpts.reduce((a,b) => dist[a] > dist[b] ? a : b);
       return {
+        index: i + 1,
         question: q.question, topic: q.topic,
         correctAnswer: q.correctAnswer, correctOption: q.options[q.correctAnswer as "A"|"B"|"C"|"D"],
         majorityWrongAnswer: majority, majorityWrongOption: q.options[majority],
         majorityWrongPct: dist[majority],
+        isPg: q.type === "pg",
       };
-    }).filter(q => q.majorityWrongPct > 25);
+    }).filter(q => q.isPg && q.majorityWrongPct > 25).map(({ isPg: _pg, ...rest }) => rest);
+    return payload;
+  }
 
-    try {
-      const res = await fetch("/api/analyze-assessment", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ assessmentTitle: detail?.title ?? "", questions: payload }),
-      });
-      const data = await res.json() as typeof aiAnalysis & { error?: string };
-      if (!data?.error) setAiAnalysis(data);
-    } catch { /* ignore */ }
+  // Saved analysis (if any) shows when the results open - no AI call.
+  useEffect(() => {
+    if (!detailId || !resultDetail?.questions.length) return;
+    let cancelled = false;
+    apiPost<NonNullable<typeof aiAnalysis>>("/api/analyze-assessment", {
+      assessmentId: detailId, assessmentTitle: "", questions: analysisPayload(), cachedOnly: true,
+    }).then(data => { if (!cancelled && data && "overallAnalysis" in data && data.overallAnalysis) setAiAnalysis(data); });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [detailId, resultDetail]);
+
+  async function loadAIAnalysis() {
+    if (!resultDetail?.questions.length || !detailId) return;
+    setAiLoading(true);
+    const data = await apiPost<NonNullable<typeof aiAnalysis>>("/api/analyze-assessment", {
+      assessmentId: detailId, assessmentTitle: detail?.title ?? "", questions: analysisPayload(),
+    });
+    if (!data.error) setAiAnalysis(data);
+    else setResultsToast({ message: `Analisis AI gagal: ${data.error}`, tone: "danger" });
     setAiLoading(false);
   }
 
@@ -5410,9 +5363,10 @@ function TeacherResults() {
                 <div>
                   <div className="flex items-center justify-between mb-3">
                     <h3 className="text-[13px] font-bold text-ink">Soal & Distribusi Jawaban ({resultDetail.questions.length})</h3>
-                    {!aiAnalysis && !aiLoading && (
-                      <Button variant="outline" className="h-7 text-[11px]" onClick={() => loadAIAnalysis()}>
-                        <Sparkles className="mr-1 h-3 w-3" />Analisis AI
+                    {!aiLoading && (
+                      <Button variant="outline" className="h-7 text-[11px]" onClick={() => loadAIAnalysis()}
+                        title="Hasil disimpan; AI hanya dipanggil lagi kalau ada jawaban siswa baru">
+                        <Sparkles className="mr-1 h-3 w-3" />{aiAnalysis ? "Perbarui Analisis AI" : "Analisis AI"}
                       </Button>
                     )}
                     {aiLoading && (
@@ -5658,7 +5612,7 @@ function TeacherResults() {
 type ClassAnalytics = {
   trend: number[]; trendLabels: string[];
   distribution: number[]; distributionLabels: string[];
-  topics: { label: string; value: number }[];
+  topics: { label: string; value: number; count?: number }[];
   completedAssessments: number; classAvg: number | null; weakestTopic: { label: string; value: number } | null;
   approvedAiQuestions: number;
 };
@@ -5716,7 +5670,7 @@ async function fetchClassAnalytics(classId: string, subjectId: string): Promise<
     topicStats.set(topic, cur);
   }
   const topics = [...topicStats.entries()]
-    .map(([label, st]) => ({ label, value: Math.round((st.correct / st.total) * 100) }))
+    .map(([label, st]) => ({ label, value: Math.round((st.correct / st.total) * 100), count: st.total }))
     .sort((x, y) => x.value - y.value);
 
   return {
@@ -5972,36 +5926,33 @@ function TeacherRecommendations() {
     lsSet(REC_DONE_KEY, []);
   }
 
-  useEffect(() => {
-    if (bankQs.length === 0) return;
-
-    // bankQs is already subject-scoped (the active class's subject) via useQuestionBank
-    const topicMap = new Map<string, { total: number; sumRate: number }>();
-    for (const q of bankQs) {
-      const t = q.topic || "Umum";
-      const cur = topicMap.get(t) ?? { total: 0, sumRate: 0 };
-      topicMap.set(t, { total: cur.total + 1, sumRate: cur.sumRate + q.successRate });
-    }
-    const topicStats = [...topicMap.entries()].map(([topic, v]) => ({
-      topic, count: v.total, avgSuccessRate: Math.round(v.sumRate / v.total),
-    }));
-
+  // Recommendations come from REAL answers (assessment results per topic),
+  // and are stored server-side: opening this page reuses the saved result
+  // instead of asking the AI again. "Perbarui" regenerates on demand.
+  const [recMeta, setRecMeta] = useState<{ updatedAt?: string; stale?: boolean } | null>(null);
+  const [hasData, setHasData] = useState<boolean | null>(null);
+  async function loadRecs(refresh = false) {
+    if (!activeClass || !activeSubjectId) return;
     setLoading(true);
     setError("");
-    fetch("/api/recommendations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topicStats, className: activeClassName }),
-    })
-      .then(r => r.json())
-      .then((data: { summary?: string; recommendations?: typeof teachingRecommendations; error?: string }) => {
-        if (data.error) { setError(data.error); return; }
-        setSummary(data.summary ?? "");
-        setRecs(data.recommendations ?? []);
-      })
-      .catch(e => setError(e instanceof Error ? e.message : "Gagal memuat rekomendasi"))
-      .finally(() => setLoading(false));
-  }, [bankQs]);
+    try {
+      const analytics = await fetchClassAnalytics(activeClass, activeSubjectId);
+      const topicStats = analytics.topics.map(t => ({ topic: t.label, avgSuccessRate: t.value, count: t.count ?? 0 }));
+      setHasData(topicStats.length > 0);
+      if (topicStats.length === 0) { setRecs([]); setSummary(""); setRecMeta(null); return; }
+      const data = await apiPost<{ summary?: string; recommendations?: typeof teachingRecommendations; updatedAt?: string; stale?: boolean }>(
+        "/api/recommendations", { topicStats, className: activeClassName, classId: activeClass, subjectId: activeSubjectId, refresh });
+      if (data.error) { setError(data.error); return; }
+      setSummary(data.summary ?? "");
+      setRecs(data.recommendations ?? []);
+      setRecMeta({ updatedAt: data.updatedAt, stale: data.stale });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Gagal memuat rekomendasi");
+    } finally {
+      setLoading(false);
+    }
+  }
+  useEffect(() => { loadRecs(); }, [activeClass, activeSubjectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const pending = recs.filter(r => !doneMap.has(r.id));
   // Sort done by most recently done first
@@ -6012,13 +5963,23 @@ function TeacherRecommendations() {
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Rekomendasi AI" title={`Rekomendasi — ${activeClassName}`}
-        description="Berdasarkan analisis soal di bank soal, AI merekomendasikan intervensi pengajaran berikut." />
+        description="Berdasarkan hasil asesmen siswa per topik, AI merekomendasikan intervensi pengajaran berikut."
+        actions={hasData ? (
+          <Button variant="outline" className="h-8 text-[12px]" disabled={loading} onClick={() => loadRecs(true)}>
+            <Sparkles className="mr-1.5 h-3.5 w-3.5" />Perbarui dengan AI
+          </Button>
+        ) : undefined} />
 
-      {bankLoading && <SectionLoading message="Memuat data soal..." />}
+      {recMeta?.updatedAt && !loading && (
+        <p className="text-[11px] text-ink-tertiary">
+          Dibuat {new Date(recMeta.updatedAt).toLocaleString("id-ID", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" })}
+          {recMeta.stale && <span className="ml-1 font-semibold text-warning">· Ada hasil asesmen baru sejak itu - klik &quot;Perbarui dengan AI&quot; kalau mau rekomendasi terbaru.</span>}
+        </p>
+      )}
 
-      {!bankLoading && bankQs.length === 0 && !loading && (
-        <EmptyState icon={Sparkles} title="Belum ada data soal"
-          description="Tambahkan soal ke bank soal terlebih dahulu agar AI dapat menganalisis dan memberi rekomendasi pengajaran." />
+      {hasData === false && !loading && (
+        <EmptyState icon={Sparkles} title="Belum ada hasil asesmen"
+          description="Rekomendasi dibuat dari jawaban siswa. Setelah siswa mengerjakan asesmen di kelas & mapel ini, rekomendasi akan muncul di sini." />
       )}
 
       {loading && (
@@ -9025,12 +8986,9 @@ function ParentRecommendations() {
       .then((data) => {
         const topicStats = (data as { topicStats?: Array<{ topic: string; avgSuccessRate: number; count: number }> } | null)?.topicStats ?? [];
         if (topicStats.length === 0) { setLoading(false); return; }
-        return fetch("/api/recommendations", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topicStats, className: child.className }),
-        })
-          .then(r => r.json())
+        // Stored server-side per child; reopening the page doesn't call the AI again.
+        return apiPost<{ summary?: string; recommendations?: typeof teachingRecommendations }>(
+          "/api/recommendations", { topicStats, className: child.className, studentId: child.studentId })
           .then((res: { summary?: string; recommendations?: typeof teachingRecommendations; error?: string }) => {
             if (res.error) { setError(res.error); return; }
             setSummary(res.summary ?? "");

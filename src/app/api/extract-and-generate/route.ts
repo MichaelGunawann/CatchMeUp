@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
+import { requireTeacher } from "@/lib/auth/api-teacher";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { sampleTextForPrompt, documentSegment } from "@/lib/office-text";
@@ -23,6 +24,9 @@ function getGroq(): Groq {
  * Vercel's serverless request body size cap; the storagePath path is not.
  */
 export async function POST(req: Request) {
+  // Teachers only - this spends AI quota.
+  const teacherCheck = await requireTeacher(req);
+  if (teacherCheck instanceof Response) return teacherCheck;
   const contentType = req.headers.get("content-type") ?? "";
   let file: File | null = null;
   let fileName = "";
@@ -47,6 +51,11 @@ export async function POST(req: Request) {
     avoid = Array.isArray(body.avoid) ? body.avoid : [];
     storagePath = body.storagePath ?? "";
     if (!body.storagePath) return Response.json({ error: "storagePath tidak ditemukan.", questions: [] }, { status: 400 });
+    // Only files of a class+subject this teacher teaches.
+    const { data: owned } = await supabaseAdmin.from("materials").select("class_id, subject_id").eq("file_url", body.storagePath).maybeSingle();
+    if (!owned || !teacherCheck.assignments.some(a => a.class_id === owned.class_id && a.subject_id === owned.subject_id)) {
+      return Response.json({ error: "Materi ini bukan dari kelas/mapel yang kamu ajar.", questions: [] }, { status: 403 });
+    }
     // The format comes from the stored object's real extension - callers
     // pass the material TITLE as fileName (no extension), which used to make
     // every material fail with 'Format "<judul>" tidak didukung'.

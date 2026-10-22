@@ -287,7 +287,9 @@ export const incorrectQuestions: IncorrectQuestion[] = [];
 // ── Teaching Recommendations ───────────────────────────────────────────
 export type TeachingRecommendation = {
   id: string; topic: string; issue: string;
-  affectedStudents: number; wrongCount: number; priority: Priority;
+  affectedStudents?: number; wrongCount?: number; priority: Priority;
+  /** real topic accuracy / question count from the data (not from the AI) */
+  accuracy?: number | null; questionCount?: number | null;
   suggestion: string; estimatedTime: string;
 };
 

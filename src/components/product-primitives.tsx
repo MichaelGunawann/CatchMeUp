@@ -1269,10 +1269,12 @@ export function RecommendationCard({
           <p className="text-[12px] text-ink-secondary leading-snug">{rec.issue}</p>
         </div>
         <div className="flex items-start gap-3 shrink-0">
-          <div className="text-right">
-            <div className="text-[18px] font-bold text-ink">{rec.affectedStudents}</div>
-            <div className="text-[10px] text-ink-tertiary">siswa</div>
-          </div>
+          {rec.accuracy != null && (
+            <div className="text-right">
+              <div className="text-[18px] font-bold text-ink">{rec.accuracy}%</div>
+              <div className="text-[10px] text-ink-tertiary">akurasi</div>
+            </div>
+          )}
           <button
             onClick={onToggle}
             title={done ? "Tandai belum selesai" : "Tandai sudah dijelaskan"}

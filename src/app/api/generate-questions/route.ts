@@ -1,6 +1,7 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 import Groq from "groq-sdk";
+import { requireTeacher } from "@/lib/auth/api-teacher";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson } from "@/lib/ai-questions";
 
@@ -12,6 +13,9 @@ function getGroq(): Groq {
 }
 
 export async function POST(req: Request) {
+  // Teachers only - this spends AI quota.
+  const teacherCheck = await requireTeacher(req);
+  if (teacherCheck instanceof Response) return teacherCheck;
   const body = await req.json() as {
     materialTitle: string;
     topic: string;
