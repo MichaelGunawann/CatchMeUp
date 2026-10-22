@@ -6,7 +6,8 @@ import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve } from "@/lib/retrieval";
 
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+// AI generation can take a while (typed formats ~30-45s per batch).
+export const maxDuration = 300;
 
 let _groq: Groq | null = null;
 function getGroq(): Groq {

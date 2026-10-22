@@ -1368,46 +1368,16 @@ async function saveManualQToBank(
     return structureError ?? "Lengkapi semua kolom bertanda *.";
   }
   const type = q.type as QuestionType;
-  const letters = (["A", "B", "C", "D", "E"] as const).filter(k => manualOpt(q, k).trim());
-  const letterOptions = Object.fromEntries(letters.map(k => [k, manualOpt(q, k).trim()]));
-  let options: Record<string, unknown> = {};
-  let correct: string | null = null;
-  let answerKey: unknown = null;
-  if (type === "pg") { options = letterOptions; correct = q.correct; }
-  else if (type === "pg_kompleks") { options = letterOptions; answerKey = decodeComplex(q.complex); }
-  else if (type === "benar_salah") {
-    const st = parseDraft<TFDraftRow>(q.statements).filter(s => s.text.trim());
-    options = { statements: st.map(s => s.text.trim()) };
-    answerKey = st.map(s => s.answer);
-  } else if (type === "menjodohkan") {
-    const rows = parseDraft<PairDraftRow>(q.pairs);
-    const pairs = rows.filter(p => !p.distractor && p.left.trim() && p.right.trim());
-    const extras = rows.filter(p => p.distractor).map(p => p.right.trim()).filter(Boolean);
-    options = { left: pairs.map(p => p.left.trim()), right: [...pairs.map(p => p.right.trim()), ...extras] };
-    answerKey = pairs.map((_, i) => i);
-  } else if (type === "esai") {
-    answerKey = q.rubric.trim() ? { rubric: q.rubric.trim() } : null;
-  }
   const row = {
     school_id: schoolId,
     class_id: classId,
     subject_id: subjectId,
     creator_id: creatorId,
     source: "bank",
-    topic: q.topic.trim(),
-    subtopic: q.topic.trim(),
-    difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as Difficulty,
     bloom_level: "Menerapkan",
-    question: q.text.trim(),
-    options,
-    correct_answer: correct,
-    explanation: q.explanation.trim(),
     status: "active",
     source_title: "Manual Guru",
-    question_type: type,
-    answer_key: answerKey,
-    image_url: q.imageUrl || null,
-    default_points: Math.round(Number(q.points) || 1),
+    ...draftToQuestionFields(q),
   };
   let { error } = await supabase.from("questions").insert(row as never);
   if (isMissingColumnError(error)) {
@@ -1424,6 +1394,133 @@ async function saveManualQToBank(
   if (error) return error.message;
   await refreshBankAndReview(classId, subjectId);
   return null;
+}
+
+/** Form draft -> the content columns of a questions row (any type). */
+function draftToQuestionFields(q: typeof EMPTY_MANUAL_Q) {
+  const type = q.type as QuestionType;
+  const letters = (["A", "B", "C", "D", "E"] as const).filter(k => manualOpt(q, k).trim());
+  const letterOptions = Object.fromEntries(letters.map(k => [k, manualOpt(q, k).trim()]));
+  let options: Record<string, unknown> = {};
+  let correct: string | null = null;
+  let answerKey: unknown = null;
+  if (type === "pg") { options = letterOptions; correct = q.correct; }
+  else if (type === "pg_kompleks") { options = letterOptions; answerKey = decodeComplex(q.complex).filter(k => letters.includes(k as "A")); }
+  else if (type === "benar_salah") {
+    const st = parseDraft<TFDraftRow>(q.statements).filter(x => x.text.trim());
+    options = { statements: st.map(x => x.text.trim()) };
+    answerKey = st.map(x => x.answer);
+  } else if (type === "menjodohkan") {
+    const rows = parseDraft<PairDraftRow>(q.pairs);
+    const pairs = rows.filter(p => !p.distractor && p.left.trim() && p.right.trim());
+    const extras = rows.filter(p => p.distractor).map(p => p.right.trim()).filter(Boolean);
+    options = { left: pairs.map(p => p.left.trim()), right: [...pairs.map(p => p.right.trim()), ...extras] };
+    answerKey = pairs.map((_, i) => i);
+  } else if (type === "esai") {
+    answerKey = q.rubric.trim() ? { rubric: q.rubric.trim() } : null;
+  }
+  return {
+    question_type: type,
+    question: q.text.trim(),
+    options,
+    correct_answer: correct,
+    answer_key: answerKey,
+    topic: q.topic.trim(),
+    subtopic: q.topic.trim(),
+    difficulty: (["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang") as Difficulty,
+    explanation: q.explanation.trim(),
+    image_url: q.imageUrl || null,
+    default_points: Math.round(Number(q.points) || 1),
+  };
+}
+
+/** A stored question (any type) -> form draft, for editing. */
+function questionToDraft(q: {
+  question: string; options: Record<string, unknown> | null; correct_answer?: string | null; answer_key?: unknown;
+  question_type?: string | null; topic?: string | null; difficulty?: string | null; explanation?: string | null;
+  image_url?: string | null; default_points?: number | null;
+}): typeof EMPTY_MANUAL_Q {
+  const type = questionTypeOf(q);
+  const o = (q.options ?? {}) as Record<string, unknown>;
+  const draft = {
+    ...EMPTY_MANUAL_Q, type, text: q.question ?? "", topic: q.topic ?? "", difficulty: q.difficulty ?? "Sedang",
+    explanation: q.explanation ?? "", imageUrl: q.image_url ?? "", points: String(q.default_points ?? 1),
+  };
+  if (type === "pg" || type === "pg_kompleks") {
+    for (const k of ["A", "B", "C", "D", "E"] as const) draft[`opt${k}` as "optA"] = typeof o[k] === "string" ? (o[k] as string) : "";
+    if (type === "pg") draft.correct = q.correct_answer ?? "";
+    else draft.complex = encodeComplex(Array.isArray(q.answer_key) ? (q.answer_key as string[]) : []);
+  } else if (type === "benar_salah") {
+    const st = Array.isArray(o.statements) ? (o.statements as string[]) : [];
+    const key = Array.isArray(q.answer_key) ? (q.answer_key as string[]) : [];
+    draft.statements = JSON.stringify(st.map((text, i) => ({ text, answer: key[i] === "B" || key[i] === "S" ? key[i] : "" })));
+  } else if (type === "menjodohkan") {
+    const left = Array.isArray(o.left) ? (o.left as string[]) : [];
+    const right = Array.isArray(o.right) ? (o.right as string[]) : [];
+    const key = Array.isArray(q.answer_key) ? (q.answer_key as number[]).map(Number) : [];
+    const used = new Set(key);
+    draft.pairs = JSON.stringify([
+      ...left.map((l, i) => ({ left: l, right: right[key[i]] ?? "" })),
+      ...right.filter((_, i) => !used.has(i)).map(r => ({ left: "", right: r, distractor: true })),
+    ]);
+  } else if (type === "esai") {
+    draft.rubric = (q.answer_key as { rubric?: string } | null)?.rubric ?? "";
+  }
+  return draft;
+}
+
+/** Saves edits to an existing question (RLS: only its creator may update). */
+async function updateQuestionFromDraft(id: string, q: typeof EMPTY_MANUAL_Q, classId?: string, subjectId?: string): Promise<string | null> {
+  const structureError = manualStructureError(q);
+  if (!q.text.trim() || !q.topic.trim() || structureError) return structureError ?? "Lengkapi semua kolom bertanda *.";
+  const { data, error } = await supabase.from("questions")
+    .update({ ...draftToQuestionFields(q), updated_at: new Date().toISOString() } as never)
+    .eq("id", id).select("id");
+  if (error) return error.message;
+  if (!data?.length) return "Soal ini dibuat oleh guru lain, jadi hanya pembuatnya yang bisa mengubahnya.";
+  if (classId && subjectId) await refreshBankAndReview(classId, subjectId);
+  return null;
+}
+
+// Edit any question (all TKA types) in the same form used to create one.
+function QuestionEditDialog({ initial, title = "Edit Soal", topicOptions, onSave, onClose }: {
+  initial: typeof EMPTY_MANUAL_Q;
+  title?: string;
+  topicOptions?: string[];
+  onSave: (draft: typeof EMPTY_MANUAL_Q) => Promise<string | null>;
+  onClose: () => void;
+}) {
+  const [draft, setDraft] = useState(initial);
+  const [error, setError] = useState("");
+  const [saving, setSaving] = useState(false);
+  const validation = useRequiredFields(draft, manualRequired(draft));
+  return (
+    <div className="fixed inset-0 z-[60] flex items-end justify-center p-4 sm:items-center">
+      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => !saving && onClose()} />
+      <div className="relative flex max-h-[90vh] w-full max-w-2xl flex-col rounded-card border border-border bg-surface shadow-xl">
+        <div className="flex items-center justify-between border-b border-border px-5 py-3.5 shrink-0">
+          <h2 className="text-[14px] font-bold text-ink">{title}</h2>
+          <button onClick={onClose} disabled={saving} aria-label="Tutup" className="flex h-7 w-7 items-center justify-center rounded-full text-ink-secondary hover:bg-background">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-4 overflow-y-auto p-5">
+          <ManualQuestionFields value={draft} onChange={setDraft} errorFor={validation.errorFor} attempted={validation.attempted} topicOptions={topicOptions} />
+          {error && <p className="text-[12px] text-danger">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
+          <Button variant="outline" size="sm" disabled={saving} onClick={onClose}>Batal</Button>
+          <Button variant="default" size="sm" disabled={saving} onClick={async () => {
+            if (!validation.validate() || manualStructureError(draft)) { setError(manualStructureError(draft) ?? "Tolong lengkapi kolom bertanda *."); return; }
+            setSaving(true);
+            const err = await onSave(draft);
+            setSaving(false);
+            if (err) setError(err); else onClose();
+          }}>{saving ? "Menyimpan..." : "Simpan Perubahan"}</Button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 type TFDraftRow = { text: string; answer: "B" | "S" | "" };
@@ -2226,6 +2323,7 @@ async function createAssessment(params: {
       source_title: q.source,
       question_type: q.questionType ?? "pg",
       answer_key: q.answerKey ?? null,
+      image_url: q.imageUrl ?? null,
     }));
     const { data: inserted, error: qError } = await supabase.from("questions").insert(rows).select("id");
     if (qError) return { error: `Asesmen tersimpan, tetapi soal gagal disimpan: ${qError.message}` };
@@ -3474,6 +3572,7 @@ function TeacherQuestionBank() {
   const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
   const [selectedTypes, setSelectedTypes] = useState<Set<QuestionType>>(new Set());
   const [detailQ, setDetailQ] = useState<QuestionBankEntry | null>(null);
+  const [editQ, setEditQ] = useState<QuestionBankEntry | null>(null);
   const [selectedDifficulty, setSelectedDifficulty] = useState<string | null>(null);
 
   // Bank/review are scoped by subject (real schema has no per-class column on
@@ -3625,7 +3724,17 @@ function TeacherQuestionBank() {
         </div>
       )}
 
-      {detailQ && <QuestionDetailDialog q={detailQ} onClose={() => setDetailQ(null)} />}
+      {detailQ && !editQ && <QuestionDetailDialog q={detailQ} onClose={() => setDetailQ(null)} onEdit={() => setEditQ(detailQ)} />}
+      {editQ && (
+        <QuestionEditDialog initial={questionToDraft({ question: editQ.question, options: editQ.options as unknown as Record<string, unknown>, correct_answer: editQ.correctAnswer, answer_key: editQ.answerKey, question_type: editQ.questionType, topic: editQ.topic, difficulty: editQ.difficulty, explanation: editQ.explanation, image_url: editQ.imageUrl ?? null, default_points: editQ.defaultPoints ?? 1 })}
+          topicOptions={topicOptions}
+          onClose={() => setEditQ(null)}
+          onSave={async draft => {
+            const err = await updateQuestionFromDraft(editQ.id, draft, activeClass, activeSubjectId);
+            if (!err) { setDetailQ(null); setToast({ message: "Perubahan soal tersimpan", tone: "success" }); }
+            return err;
+          }} />
+      )}
 
       {toast && <AppToast message={toast.message} tone={toast.tone} onDismiss={() => setToast(null)} />}
     </div>
@@ -3634,7 +3743,7 @@ function TeacherQuestionBank() {
 
 // Full view of one bank question: text, picture, every option/statement/pair
 // with the key marked, explanation and metadata.
-function QuestionDetailDialog({ q, onClose }: { q: QuestionBankEntry; onClose: () => void }) {
+function QuestionDetailDialog({ q, onClose, onEdit }: { q: QuestionBankEntry; onClose: () => void; onEdit?: () => void }) {
   const type = (q.questionType ?? "pg") as QuestionType;
   const raw = { question_type: type, options: q.options as unknown as Record<string, unknown>, correct_answer: q.correctAnswer, answer_key: q.answerKey };
   const letters = (["A", "B", "C", "D", "E"] as const).filter(k => (q.options as Record<string, string | undefined>)[k]);
@@ -3728,8 +3837,9 @@ function QuestionDetailDialog({ q, onClose }: { q: QuestionBankEntry; onClose: (
             <div><div className="text-[10px] font-bold uppercase tracking-wide text-ink-tertiary">Tingkat sukses</div><div className="text-ink">{q.successRate}%</div></div>
           </div>
         </div>
-        <div className="flex justify-end border-t border-border px-5 py-3 shrink-0">
-          <Button variant="outline" size="sm" onClick={onClose}>Tutup</Button>
+        <div className="flex justify-end gap-2 border-t border-border px-5 py-3 shrink-0">
+          {onEdit && <Button variant="outline" size="sm" onClick={onEdit}><Pencil className="mr-1.5 h-3.5 w-3.5" />Edit Soal</Button>}
+          <Button variant="default" size="sm" onClick={onClose}>Tutup</Button>
         </div>
       </div>
     </div>
@@ -3746,6 +3856,7 @@ function TeacherQuestionReview() {
   const activeSubjectId = activeAssignment?.subjectId;
   const { pending: pendingQs, loading: bankLoading } = useQuestionBank(activeClass, activeSubjectId);
   const [editingId, setEditingId] = useState<string | null>(null);
+  const [typedEdit, setTypedEdit] = useState<PendingQuestion | null>(null);
   const [confirmApproveAll, setConfirmApproveAll] = useState(false);
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" | "danger" } | null>(null);
   const [edits, setEdits] = useState<Record<string, Partial<PendingQuestion>>>({});
@@ -3860,6 +3971,7 @@ function TeacherQuestionReview() {
                     {q.explanation && <p className="mt-2 text-[12px] text-ink-secondary">{q.explanation}</p>}
                     <div className="mt-3 flex justify-end gap-2">
                       <Button variant="outline" size="sm" onClick={() => rejectQuestion(q.id)}>Tolak</Button>
+                      <Button variant="outline" size="sm" onClick={() => setTypedEdit(q)}><Pencil className="mr-1.5 h-3.5 w-3.5" />Edit</Button>
                       <Button variant="success" size="sm" onClick={() => approveQuestion(q)}>Setujui</Button>
                     </div>
                   </div>
@@ -3881,6 +3993,13 @@ function TeacherQuestionReview() {
               <Upload className="mr-2 h-4 w-4" />Unggah Materi
             </Button>
           } />
+      )}
+
+      {typedEdit && (
+        <QuestionEditDialog title="Edit Soal AI"
+          initial={questionToDraft({ question: typedEdit.question, options: typedEdit.rawOptions ?? {}, correct_answer: null, answer_key: typedEdit.answerKey, question_type: typedEdit.questionType, topic: typedEdit.topic, difficulty: typedEdit.difficulty, explanation: typedEdit.explanation })}
+          onClose={() => setTypedEdit(null)}
+          onSave={draft => updateQuestionFromDraft(typedEdit.id, draft, activeClass, activeSubjectId)} />
       )}
 
       {/* Edit question dialog */}
@@ -4025,6 +4144,8 @@ function TeacherAssessmentBuilder() {
   const [aiTypeCounts, setAiTypeCounts] = useState<Record<Exclude<QuestionType, "pg">, number>>({ pg_kompleks: 0, benar_salah: 0, menjodohkan: 0, esai: 0 });
   const aiOtherCount = Object.values(aiTypeCounts).reduce((a, b) => a + b, 0);
   const aiPgCount = Math.max(0, formQuestionCount - aiOtherCount);
+  // Editing an AI-made TKA question (not saved yet - edits the list in memory).
+  const [aiTypedEdit, setAiTypedEdit] = useState<(typeof questionBank)[number] | null>(null);
   const [aiGenerated, setAiGenerated] = useState(false);
   const [aiGeneratedQuestions, setAiGeneratedQuestions] = useState<typeof questionBank>([]);
   const [aiProgress, setAiProgress] = useState<{ done: number; total: number } | null>(null);
@@ -4210,7 +4331,7 @@ function TeacherAssessmentBuilder() {
     ];
     for (const [type, total] of wanted) {
       if (total <= 0) continue;
-      const BATCH = type === "pg" ? 8 : 3;
+      const BATCH = type === "pg" ? 8 : 5;
       matList.forEach((mat, i) => {
         // Spread each type evenly across materials (first ones take the remainder).
         const share = Math.floor(total / matList.length) + (i < total % matList.length ? 1 : 0);
@@ -4619,9 +4740,10 @@ function TeacherAssessmentBuilder() {
 
                           {/* Actions */}
                           <div className="flex items-center gap-1 shrink-0">
-                            {(q.questionType ?? "pg") === "pg" && <button
+                            {<button
                               title="Edit soal"
                               onClick={() => {
+                                if ((q.questionType ?? "pg") !== "pg") { setAiTypedEdit(q); return; }
                                 if (isEditing) { setEditingId(null); setEditDraft(null); }
                                 else { setEditingId(q.id); setEditDraft({ ...q }); setExpandedId(q.id); }
                               }}
@@ -4859,6 +4981,23 @@ function TeacherAssessmentBuilder() {
                 </div>
               </div>
             </div>
+          )}
+
+          {aiTypedEdit && (
+            <QuestionEditDialog title="Edit Soal AI"
+              initial={questionToDraft({ question: aiTypedEdit.question, options: aiTypedEdit.options as unknown as Record<string, unknown>, correct_answer: null, answer_key: aiTypedEdit.answerKey, question_type: aiTypedEdit.questionType, topic: aiTypedEdit.topic, difficulty: aiTypedEdit.difficulty, explanation: aiTypedEdit.explanation, image_url: aiTypedEdit.imageUrl ?? null })}
+              topicOptions={bankQs.map(b => b.topic)}
+              onClose={() => setAiTypedEdit(null)}
+              onSave={async draft => {
+                const f = draftToQuestionFields(draft);
+                setAiGeneratedQuestions(prev => prev.map(x => x.id !== aiTypedEdit.id ? x : {
+                  ...x, question: f.question, topic: f.topic, subtopic: f.topic, difficulty: f.difficulty, explanation: f.explanation,
+                  questionType: f.question_type, answerKey: f.answer_key, imageUrl: f.image_url,
+                  options: f.options as unknown as typeof x.options,
+                  correctAnswer: ((f.correct_answer ?? "A") as typeof x.correctAnswer),
+                }));
+                return null;
+              }} />
           )}
 
           <ConfirmDialog
