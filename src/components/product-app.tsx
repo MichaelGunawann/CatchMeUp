@@ -7916,7 +7916,7 @@ function StudentReview() {
               ) : reviewQs.map((q, idx) => {
                 const studentAns = q.yourAnswer ?? undefined;
                 const isWrong = studentAns !== undefined && !q.isCorrect && !q.pending;
-                const partial = q.type === "menjodohkan" && !q.isCorrect && (q.earned ?? 0) > 0;
+                const partial = q.type !== "pg" && q.type !== "esai" && !q.isCorrect && (q.earned ?? 0) > 0;
                 const opts = q.options;
                 return (
                   <div key={idx} className={cn("rounded-card border p-4", isWrong ? "border-danger/20 bg-danger-light/30" : "border-border bg-surface")}>

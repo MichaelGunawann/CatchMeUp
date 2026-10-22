@@ -26,9 +26,9 @@ export const QUESTION_TYPE_LABEL: Record<QuestionType, string> = {
 
 export const QUESTION_TYPE_HINT: Record<QuestionType, string> = {
   pg: "Satu jawaban benar.",
-  pg_kompleks: "Jawaban benar bisa lebih dari satu - siswa mencentang semua yang benar.",
-  benar_salah: "Beberapa pernyataan; siswa menentukan Benar atau Salah untuk tiap pernyataan.",
-  menjodohkan: "Siswa memasangkan setiap item kiri dengan pasangan yang tepat di kanan.",
+  pg_kompleks: "Jawaban benar bisa lebih dari satu. Nilai parsial; centang yang salah mengurangi nilai.",
+  benar_salah: "Beberapa pernyataan, siswa menentukan Benar/Salah. Nilai parsial per pernyataan.",
+  menjodohkan: "Siswa memasangkan item kiri dengan kanan. Nilai parsial per pasangan.",
   esai: "Jawaban uraian, dinilai guru setelah dikumpulkan.",
 };
 
@@ -111,9 +111,11 @@ export type GradeResult = {
 /**
  * Grades one answer. Scoring rules:
  * - pg: exact letter
- * - pg_kompleks, benar_salah: full points only when every part is right
- *   (partial-credit policy for these is still to be decided - change it here)
- * - menjodohkan: points in proportion to correctly matched pairs
+ * - pg_kompleks: partial - (correct options ticked - wrong options ticked)
+ *   / number of correct options, never below 0. Wrong ticks cost points so
+ *   ticking every option doesn't earn full marks.
+ * - benar_salah: partial - share of statements judged correctly
+ * - menjodohkan: partial - share of correctly matched pairs
  * - esai: waits for the teacher (0 points until graded); empty = 0
  */
 export function gradeAnswer(q: QuestionLike, answer: string | null | undefined, points: number): GradeResult {
@@ -122,21 +124,26 @@ export function gradeAnswer(q: QuestionLike, answer: string | null | undefined, 
   switch (type) {
     case "pg_kompleks": {
       const key = complexKey(q.answer_key);
-      const ok = key.length > 0 && encodeComplex(decodeComplex(ans)) === encodeComplex(key);
-      return { isCorrect: ok, earned: ok ? points : 0, pending: false };
+      const picked = decodeComplex(ans);
+      const right = picked.filter(p => key.includes(p)).length;
+      const wrong = picked.length - right;
+      const ok = key.length > 0 && right === key.length && wrong === 0;
+      const share = key.length ? Math.max(0, right - wrong) / key.length : 0;
+      return { isCorrect: ok, earned: roundPoints(points * share), pending: false };
     }
     case "benar_salah": {
       const key = Array.isArray(q.answer_key) ? q.answer_key.map(String) : [];
       const given = parseArray(ans).map(v => (v == null ? "" : String(v)));
-      const ok = key.length > 0 && key.every((k, i) => given[i] === k);
-      return { isCorrect: ok, earned: ok ? points : 0, pending: false };
+      const right = key.filter((k, i) => given[i] === k).length;
+      const ok = key.length > 0 && right === key.length;
+      return { isCorrect: ok, earned: key.length ? roundPoints(points * right / key.length) : 0, pending: false };
     }
     case "menjodohkan": {
       const key = Array.isArray(q.answer_key) ? q.answer_key.map(Number) : [];
       const given = parseArray(ans).map(v => (v == null || v === "" ? -1 : Number(v)));
       const right = key.filter((k, i) => given[i] === k).length;
       const ok = key.length > 0 && right === key.length;
-      const earned = key.length ? Math.round((points * right / key.length) * 100) / 100 : 0;
+      const earned = key.length ? roundPoints(points * right / key.length) : 0;
       return { isCorrect: ok, earned, pending: false };
     }
     case "esai": {
@@ -148,6 +155,10 @@ export function gradeAnswer(q: QuestionLike, answer: string | null | undefined, 
       return { isCorrect: ok, earned: ok ? points : 0, pending: false };
     }
   }
+}
+
+function roundPoints(n: number): number {
+  return Math.round(n * 100) / 100;
 }
 
 /** Human-readable student answer ("A, C", "1. Benar · 2. Salah", "Paris → Prancis"). */
