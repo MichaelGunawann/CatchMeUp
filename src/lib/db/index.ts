@@ -224,6 +224,8 @@ export type QuestionBankEntry = {
   classId?: string;
   /** TKA question type (migration 026); absent = plain multiple choice */
   questionType?: string; answerKey?: unknown; imageUrl?: string | null;
+  /** score suggested by the question's author (migration 028) */
+  defaultPoints?: number;
 };
 
 export const questionBank: QuestionBankEntry[] = [];

@@ -1051,6 +1051,7 @@ export function QuestionBankRow({
           <div className="flex flex-wrap items-center gap-2 mt-2.5">
             <Badge tone="primary">{entry.topic}</Badge>
             <Badge tone="neutral">{QUESTION_TYPE_LABEL[(entry.questionType ?? "pg") as keyof typeof QUESTION_TYPE_LABEL] ?? "Pilihan Ganda"}</Badge>
+            {(entry.defaultPoints ?? 1) > 1 && <Badge tone="neutral">{entry.defaultPoints} poin</Badge>}
             <DifficultyBadge difficulty={entry.difficulty} />
             <BloomBadge level={entry.bloom} />
             <Badge tone={entry.status === "Disetujui" ? "success" : entry.status === "Perlu Ditinjau" ? "warning" : "danger"}>

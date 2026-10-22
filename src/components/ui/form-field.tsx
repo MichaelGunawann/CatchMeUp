@@ -55,6 +55,7 @@ export type SelectOption = { value: string; label: string; description?: string;
 
 export function SelectField({
   value, onChange, options, placeholder = "Pilih...", invalid, disabled, loading, emptyText = "Tidak ada pilihan", className,
+  searchable, creatable,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -65,8 +66,17 @@ export function SelectField({
   loading?: boolean;
   emptyText?: string;
   className?: string;
+  /** Search box at the top of the list (default: on when there are more than 7 options). */
+  searchable?: boolean;
+  /** Lets the user add the typed text as a new value ("+ Tambah ..."). Implies searchable. */
+  creatable?: boolean;
 }) {
   const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState("");
+  const showSearch = creatable || (searchable ?? options.length > 7);
+  const q = query.trim().toLowerCase();
+  const shown = q ? options.filter(o => o.label.toLowerCase().includes(q) || o.description?.toLowerCase().includes(q)) : options;
+  const canCreate = creatable && !!query.trim() && !options.some(o => o.label.toLowerCase() === q);
   const [rect, setRect] = React.useState<DOMRect | null>(null);
   const buttonRef = React.useRef<HTMLButtonElement>(null);
   const panelRef = React.useRef<HTMLDivElement>(null);
@@ -96,12 +106,14 @@ export function SelectField({
   function toggle() {
     if (disabled) return;
     if (!open && buttonRef.current) setRect(buttonRef.current.getBoundingClientRect());
+    setQuery("");
     setOpen(o => !o);
   }
+  function pick(v: string) { onChange(v); setOpen(false); setQuery(""); }
 
   // Rendered in a portal so it is never clipped by a scrolling dialog body.
   const spaceBelow = rect ? window.innerHeight - rect.bottom : 0;
-  const openUp = rect ? spaceBelow < 260 && rect.top > spaceBelow : false;
+  const openUp = rect ? spaceBelow < 300 && rect.top > spaceBelow : false;
   const panel = open && rect ? createPortal(
     <div
       ref={panelRef}
@@ -112,22 +124,41 @@ export function SelectField({
         width: rect.width,
         ...(openUp ? { bottom: window.innerHeight - rect.top + 4 } : { top: rect.bottom + 4 }),
       }}
-      className="z-[100] max-h-64 overflow-y-auto rounded-[8px] border border-border bg-surface p-1 shadow-xl"
+      className="z-[100] max-h-72 overflow-y-auto rounded-[8px] border border-border bg-surface p-1 shadow-xl"
     >
+      {showSearch && (
+        <div className="sticky top-0 z-10 bg-surface p-1 pb-1.5">
+          <input autoFocus value={query} onChange={e => setQuery(e.target.value)}
+            onKeyDown={e => {
+              if (e.key !== "Enter") return;
+              e.preventDefault();
+              if (canCreate) pick(query.trim());
+              else if (shown.length === 1 && !shown[0].disabled) pick(shown[0].value);
+            }}
+            placeholder={creatable ? "Cari atau ketik baru..." : "Cari..."}
+            className="w-full rounded-[6px] border border-border bg-background px-2.5 py-1.5 text-[13px] text-ink focus:border-primary focus:outline-none" />
+        </div>
+      )}
+      {canCreate && (
+        <button type="button" onClick={() => pick(query.trim())}
+          className="flex w-full items-center gap-2 rounded-[6px] px-3 py-2 text-left text-[13px] font-semibold text-primary hover:bg-background">
+          + Tambah &quot;{query.trim()}&quot;
+        </button>
+      )}
       {loading ? (
         <div className="flex items-center gap-2 px-3 py-2 text-[12px] text-ink-secondary">
           <span className="h-3 w-3 rounded-full border-2 border-primary border-t-transparent animate-spin" />Memuat...
         </div>
-      ) : options.length === 0 ? (
-        <div className="px-3 py-2 text-[12px] text-ink-tertiary">{emptyText}</div>
-      ) : options.map(o => (
+      ) : shown.length === 0 ? (
+        canCreate ? null : <div className="px-3 py-2 text-[12px] text-ink-tertiary">{q ? "Tidak ditemukan" : emptyText}</div>
+      ) : shown.map(o => (
         <button
           key={o.value}
           type="button"
           role="option"
           aria-selected={o.value === value}
           disabled={o.disabled}
-          onClick={() => { onChange(o.value); setOpen(false); }}
+          onClick={() => pick(o.value)}
           className={cn(
             "flex w-full items-start gap-2 rounded-[6px] px-3 py-2 text-left text-[13px] transition-colors",
             o.disabled ? "cursor-not-allowed opacity-40" : "hover:bg-background",
@@ -162,7 +193,7 @@ export function SelectField({
         )}
       >
         <span className={cn("truncate", !selected && "text-ink-tertiary")}>
-          {loading && !selected ? "Memuat..." : selected?.label ?? placeholder}
+          {loading && !selected ? "Memuat..." : selected?.label ?? (creatable && value ? value : placeholder)}
         </span>
         <ChevronDown className={cn("h-4 w-4 shrink-0 text-ink-tertiary transition-transform", open && "rotate-180")} />
       </button>

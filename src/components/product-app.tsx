@@ -147,14 +147,18 @@ function PointsInput({ value, onChange }: { value: number; onChange: (v: number)
 
 // Multi-select topic filter: a dropdown of checkboxes with "Pilih semua"
 // and "Kosongkan". An empty selection means every topic.
-function TopicMultiSelect({ topics, selected, onChange, counts, className }: {
+function TopicMultiSelect({ topics, selected, onChange, counts, className, allLabel = "Semua topik", unit = "topik" }: {
   topics: string[];
   selected: Set<string>;
   onChange: (next: Set<string>) => void;
   counts?: Record<string, number>;
   className?: string;
+  allLabel?: string;
+  unit?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const shown = query.trim() ? topics.filter(t => t.toLowerCase().includes(query.trim().toLowerCase())) : topics;
   const ref = React.useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (!open) return;
@@ -162,9 +166,9 @@ function TopicMultiSelect({ topics, selected, onChange, counts, className }: {
     document.addEventListener("mousedown", close);
     return () => document.removeEventListener("mousedown", close);
   }, [open]);
-  const label = selected.size === 0 ? "Semua topik"
+  const label = selected.size === 0 ? allLabel
     : selected.size === 1 ? [...selected][0]
-    : `${selected.size} topik dipilih`;
+    : `${selected.size} ${unit} dipilih`;
   const toggle = (t: string) => { const n = new Set(selected); if (n.has(t)) n.delete(t); else n.add(t); onChange(n); };
   return (
     <div ref={ref} className={cn("relative", className)}>
@@ -175,13 +179,16 @@ function TopicMultiSelect({ topics, selected, onChange, counts, className }: {
       </button>
       {open && (
         <div className="absolute left-0 z-40 mt-1 w-72 max-w-[85vw] rounded-[10px] border border-border bg-surface p-2 shadow-lg">
+          <input autoFocus value={query} onChange={e => setQuery(e.target.value)} placeholder="Cari..."
+            className="mb-2 w-full rounded-[6px] border border-border bg-background px-2.5 py-1.5 text-[13px] text-ink focus:border-primary focus:outline-none" />
           <div className="flex items-center justify-between gap-2 border-b border-border px-1 pb-2">
-            <button type="button" className="text-[12px] font-semibold text-primary hover:underline" onClick={() => onChange(new Set(topics))}>Pilih semua</button>
+            <button type="button" className="text-[12px] font-semibold text-primary hover:underline"
+              onClick={() => onChange(new Set([...selected, ...shown]))}>{query.trim() ? "Pilih semua hasil" : "Pilih semua"}</button>
             <button type="button" className="text-[12px] font-semibold text-ink-secondary hover:underline" onClick={() => onChange(new Set())}>Kosongkan</button>
           </div>
           <div className="max-h-64 overflow-y-auto pt-1">
-            {topics.length === 0 && <p className="px-2 py-3 text-[12px] text-ink-tertiary">Belum ada topik.</p>}
-            {topics.map(t => (
+            {shown.length === 0 && <p className="px-2 py-3 text-[12px] text-ink-tertiary">{topics.length === 0 ? "Belum ada pilihan." : "Tidak ditemukan."}</p>}
+            {shown.map(t => (
               <label key={t} className="flex cursor-pointer items-center gap-2 rounded-[6px] px-2 py-1.5 text-[13px] text-ink hover:bg-background">
                 <input type="checkbox" checked={selected.has(t)} onChange={() => toggle(t)} className="h-4 w-4 accent-primary" />
                 <span className="flex-1 truncate">{t}</span>
@@ -1165,6 +1172,7 @@ type BankRow = {
   status: string; usage_count: number; success_rate: number | null;
   // migration 026 - absent before it runs
   question_type?: string | null; answer_key?: unknown; image_url?: string | null;
+  default_points?: number | null;
 };
 
 function bankRowToEntry(row: BankRow): QuestionBankEntry {
@@ -1189,6 +1197,7 @@ function bankRowToEntry(row: BankRow): QuestionBankEntry {
     questionType: row.question_type ?? "pg",
     answerKey: row.answer_key ?? null,
     imageUrl: row.image_url ?? null,
+    defaultPoints: Number(row.default_points) > 0 ? Number(row.default_points) : 1,
   };
 }
 
@@ -1394,8 +1403,9 @@ async function saveManualQToBank(
     options = { statements: st.map(s => s.text.trim()) };
     answerKey = st.map(s => s.answer);
   } else if (type === "menjodohkan") {
-    const pairs = parseDraft<PairDraftRow>(q.pairs).filter(p => p.left.trim() && p.right.trim());
-    const extras = parseDraft<string>(q.extras).map(e => e.trim()).filter(Boolean);
+    const rows = parseDraft<PairDraftRow>(q.pairs);
+    const pairs = rows.filter(p => !p.distractor && p.left.trim() && p.right.trim());
+    const extras = rows.filter(p => p.distractor).map(p => p.right.trim()).filter(Boolean);
     options = { left: pairs.map(p => p.left.trim()), right: [...pairs.map(p => p.right.trim()), ...extras] };
     answerKey = pairs.map((_, i) => i);
   } else if (type === "esai") {
@@ -1420,12 +1430,18 @@ async function saveManualQToBank(
     question_type: type,
     answer_key: answerKey,
     image_url: q.imageUrl || null,
+    default_points: Math.round(Number(q.points) || 1),
   };
   let { error } = await supabase.from("questions").insert(row as never);
   if (isMissingColumnError(error)) {
+    // Before migration 028 (default_points): save without the score.
+    const { default_points: _dp, ...withoutPoints } = row;
+    ({ error } = await supabase.from("questions").insert(withoutPoints as never));
+  }
+  if (isMissingColumnError(error)) {
     // Before migration 026: plain PG without a picture still saves.
-    if (type !== "pg" || row.image_url) return "Database belum mendukung tipe soal & gambar. Jalankan migrasi 026 terlebih dahulu.";
-    const { question_type: _t, answer_key: _k, image_url: _i, ...legacy } = row;
+    if (type !== "pg" || row.image_url) return "Database belum mendukung tipe soal, gambar & skor. Jalankan migrasi 026 dan 028 terlebih dahulu.";
+    const { question_type: _t, answer_key: _k, image_url: _i, default_points: _p, ...legacy } = row;
     ({ error } = await supabase.from("questions").insert(legacy as never));
   }
   if (error) return error.message;
@@ -1434,7 +1450,8 @@ async function saveManualQToBank(
 }
 
 type TFDraftRow = { text: string; answer: "B" | "S" | "" };
-type PairDraftRow = { left: string; right: string };
+/** A matching row; distractor rows have only a right side (pengecoh). */
+type PairDraftRow = { left: string; right: string; distractor?: boolean };
 function parseDraft<T>(json: string): T[] {
   try { const v = JSON.parse(json || "[]"); return Array.isArray(v) ? v : []; } catch { return []; }
 }
@@ -1451,6 +1468,8 @@ function manualRequired(q: typeof EMPTY_MANUAL_Q): (keyof typeof EMPTY_MANUAL_Q)
 
 /** What is still missing in a type's structure (key, statements, pairs), or null. */
 function manualStructureError(q: typeof EMPTY_MANUAL_Q): string | null {
+  const pts = Number(q.points);
+  if (!Number.isFinite(pts) || pts < 1 || pts > 100) return "Skor soal harus antara 1 dan 100.";
   switch (q.type) {
     case "pg":
       return ["A", "B", "C", "D", "E"].includes(q.correct) ? null : "Kunci jawaban wajib diisi.";
@@ -1464,10 +1483,13 @@ function manualStructureError(q: typeof EMPTY_MANUAL_Q): string | null {
       return st.every(s => s.answer === "B" || s.answer === "S") ? null : "Tentukan Benar/Salah untuk setiap pernyataan.";
     }
     case "menjodohkan": {
-      const pairs = parseDraft<PairDraftRow>(q.pairs);
+      const rows = parseDraft<PairDraftRow>(q.pairs);
+      const pairs = rows.filter(p => !p.distractor);
       const filled = pairs.filter(p => p.left.trim() && p.right.trim());
       if (filled.length < 2) return "Isi minimal 2 pasangan.";
-      return pairs.some(p => !!p.left.trim() !== !!p.right.trim()) ? "Setiap pasangan harus diisi kiri dan kanan." : null;
+      if (pairs.some(p => !!p.left.trim() !== !!p.right.trim())) return "Setiap pasangan harus diisi kiri dan kanan.";
+      const rights = rows.map(p => p.right.trim().toLowerCase()).filter(Boolean);
+      return new Set(rights).size !== rights.length ? "Ada jawaban kanan yang sama persis - setiap jawaban kanan harus berbeda." : null;
     }
     default:
       return null;
@@ -1525,18 +1547,23 @@ const QUESTION_TYPE_OPTIONS: SelectOption[] = QUESTION_TYPES.map(t => ({ value: 
 // builder's "Tambah Soal Baru" dialog - every * field turns red with a
 // message if submit is attempted while it's empty. The type selector
 // switches the answer section (PG, PG kompleks, Benar/Salah, menjodohkan, esai).
-function ManualQuestionFields({ value, onChange, errorFor, attempted }: {
+function ManualQuestionFields({ value, onChange, errorFor, attempted, topicOptions = [], subject }: {
   value: typeof EMPTY_MANUAL_Q;
   onChange: (next: typeof EMPTY_MANUAL_Q) => void;
   errorFor: (k: keyof typeof EMPTY_MANUAL_Q) => string | null;
   attempted?: boolean;
+  /** existing bab/topik names to pick from (a new one can still be typed) */
+  topicOptions?: string[];
+  /** mapel the question is saved to; omit onChange to show it read-only */
+  subject?: { value: string; options: SelectOption[]; onChange?: (v: string) => void };
 }) {
   const set = (k: keyof typeof EMPTY_MANUAL_Q, v: string) => onChange({ ...value, [k]: v });
   const type = value.type as QuestionType;
   const structureError = attempted ? manualStructureError(value) : null;
   const statements = parseDraft<TFDraftRow>(value.statements);
-  const pairs = parseDraft<PairDraftRow>(value.pairs);
-  const extras = parseDraft<string>(value.extras);
+  const pairRows = parseDraft<PairDraftRow>(value.pairs);
+  const pairs = pairRows.length ? pairRows : [{ left: "", right: "" }, { left: "", right: "" }];
+  const setPairs = (rows: PairDraftRow[]) => set("pairs", JSON.stringify(rows));
   const complexKeys = decodeComplex(value.complex);
 
   const letterInputs = (letters: readonly ("A" | "B" | "C" | "D" | "E")[], complex: boolean) => letters.map(opt => {
@@ -1562,9 +1589,17 @@ function ManualQuestionFields({ value, onChange, errorFor, attempted }: {
 
   return (
     <>
-      <FormField label="Tipe Soal" required>
-        <SelectField value={value.type} options={QUESTION_TYPE_OPTIONS} onChange={v => set("type", v)} />
-      </FormField>
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        {subject && (
+          <FormField label="Mata Pelajaran" required>
+            <SelectField value={subject.value} options={subject.options} disabled={!subject.onChange}
+              onChange={v => subject.onChange?.(v)} placeholder="Pilih mapel..." />
+          </FormField>
+        )}
+        <FormField label="Tipe Soal" required>
+          <SelectField value={value.type} options={QUESTION_TYPE_OPTIONS} onChange={v => set("type", v)} />
+        </FormField>
+      </div>
       <FormField label="Pertanyaan" required error={errorFor("text")}>
         <textarea rows={3} placeholder="Tuliskan pertanyaan di sini..."
           value={value.text} onChange={e => set("text", e.target.value)}
@@ -1608,35 +1643,42 @@ function ManualQuestionFields({ value, onChange, errorFor, attempted }: {
       )}
 
       {type === "menjodohkan" && (
-        <FormField label="Pasangan yang benar" required>
+        <FormField label="Pasangan" required>
           <div className="space-y-2">
-            {(pairs.length ? pairs : [{ left: "", right: "" }, { left: "", right: "" }]).map((p, i, arr) => (
-              <div key={i} className="flex items-center gap-2">
-                <input type="text" value={p.left} placeholder={`Item kiri ${i + 1}`}
-                  onChange={e => set("pairs", JSON.stringify(arr.map((x, j) => j === i ? { ...x, left: e.target.value } : x)))}
-                  className={fieldClass(false)} />
-                <span className="shrink-0 text-ink-tertiary">→</span>
-                <input type="text" value={p.right} placeholder="Pasangannya"
-                  onChange={e => set("pairs", JSON.stringify(arr.map((x, j) => j === i ? { ...x, right: e.target.value } : x)))}
-                  className={fieldClass(false)} />
-                {arr.length > 2 && (
-                  <button type="button" aria-label="Hapus pasangan" onClick={() => set("pairs", JSON.stringify(arr.filter((_, j) => j !== i)))}>
+            <div className="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-ink-tertiary">
+              <span>Item kiri (soal)</span><span /><span>Item kanan (jawaban)</span><span />
+            </div>
+            {pairs.map((p, i) => (
+              <div key={i} className="grid grid-cols-[1fr_auto_1fr_auto] items-center gap-2">
+                {p.distractor ? (
+                  <div className="rounded-[8px] border border-dashed border-border bg-background px-3 py-2 text-[12px] italic text-ink-tertiary">
+                    (kosong - pengecoh)
+                  </div>
+                ) : (
+                  <input type="text" value={p.left} placeholder={`Item kiri ${pairs.slice(0, i + 1).filter(x => !x.distractor).length}`}
+                    onChange={e => setPairs(pairs.map((x, j) => j === i ? { ...x, left: e.target.value } : x))}
+                    className={fieldClass(false)} />
+                )}
+                <span className="text-ink-tertiary">{p.distractor ? "" : "→"}</span>
+                <input type="text" value={p.right} placeholder={p.distractor ? "Jawaban pengecoh" : "Pasangannya"}
+                  onChange={e => setPairs(pairs.map((x, j) => j === i ? { ...x, right: e.target.value } : x))}
+                  className={fieldClass(false, p.distractor ? "border-dashed" : "")} />
+                {pairs.length > 2 ? (
+                  <button type="button" aria-label="Hapus baris" onClick={() => setPairs(pairs.filter((_, j) => j !== i))}>
                     <X className="h-4 w-4 text-ink-tertiary" />
                   </button>
-                )}
+                ) : <span className="w-4" />}
               </div>
             ))}
-            <Button type="button" variant="outline" size="sm"
-              onClick={() => set("pairs", JSON.stringify([...(pairs.length ? pairs : [{ left: "", right: "" }, { left: "", right: "" }]), { left: "", right: "" }]))}>
-              <Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Pasangan
-            </Button>
-            <div>
-              <p className="mt-2 mb-1 text-[11px] text-ink-secondary">Pengecoh di kolom kanan (opsional, pisahkan dengan baris baru):</p>
-              <textarea rows={2} value={extras.join("\n")} placeholder="Jawaban tambahan yang tidak punya pasangan"
-                onChange={e => set("extras", JSON.stringify(e.target.value.split("\n")))}
-                className={fieldClass(false, "resize-none")} />
+            <div className="flex flex-wrap gap-2 pt-1">
+              <Button type="button" variant="outline" size="sm" onClick={() => setPairs([...pairs.filter(x => !x.distractor), { left: "", right: "" }, ...pairs.filter(x => x.distractor)])}>
+                <Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Pasangan
+              </Button>
+              <Button type="button" variant="outline" size="sm" onClick={() => setPairs([...pairs, { left: "", right: "", distractor: true }])}>
+                <Plus className="mr-1.5 h-3.5 w-3.5" />Tambah Pengecoh
+              </Button>
             </div>
-            <p className="text-[11px] text-ink-tertiary">Urutan kolom kanan diacak otomatis untuk setiap siswa.</p>
+            <p className="text-[11px] text-ink-tertiary">Pengecoh = jawaban kanan tanpa pasangan di kiri. Urutan kolom kanan diacak otomatis untuk setiap siswa.</p>
           </div>
         </FormField>
       )}
@@ -1651,7 +1693,7 @@ function ManualQuestionFields({ value, onChange, errorFor, attempted }: {
 
       {structureError && <p role="alert" className="text-[12px] font-medium text-danger">{structureError}</p>}
 
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
         {type === "pg" && (
           <FormField label="Kunci Jawaban" required error={errorFor("correct") ? "Kunci jawaban wajib diisi" : null}>
             <SelectField value={value.correct} options={ANSWER_OPTIONS.concat(manualOpt(value, "E").trim() ? [{ value: "E", label: "E" }] : [])} placeholder="Pilih kunci..."
@@ -1661,10 +1703,16 @@ function ManualQuestionFields({ value, onChange, errorFor, attempted }: {
         <FormField label="Kesulitan" required>
           <SelectField value={value.difficulty} options={DIFFICULTY_OPTIONS} onChange={v => set("difficulty", v)} />
         </FormField>
-        <FormField label="Topik" required error={errorFor("topic")}>
-          <input type="text" placeholder="Contoh: Bab 3 - Perkalian"
-            value={value.topic} onChange={e => set("topic", e.target.value)}
-            className={fieldClass(!!errorFor("topic"))} />
+        <FormField label="Bab / Topik" required error={errorFor("topic")}>
+          <SelectField value={value.topic} creatable invalid={!!errorFor("topic")}
+            placeholder="Pilih atau ketik bab/topik..."
+            options={[...new Set(topicOptions.filter(Boolean))].sort((x, y) => x.localeCompare(y, "id")).map(t => ({ value: t, label: t }))}
+            onChange={v => set("topic", v)} />
+        </FormField>
+        <FormField label="Skor (poin)" required>
+          <input type="number" min={1} max={100} step={1} value={value.points}
+            onChange={e => set("points", e.target.value)}
+            className={fieldClass(false)} />
         </FormField>
       </div>
       <FormField label={type === "esai" ? "Contoh jawaban / pembahasan (opsional)" : "Pembahasan (opsional)"}>
@@ -3436,8 +3484,8 @@ const ANSWER_OPTIONS: SelectOption[] = ["A", "B", "C", "D"].map(o => ({ value: o
 const EMPTY_MANUAL_Q = {
   type: "pg", text: "", optA: "", optB: "", optC: "", optD: "", optE: "", correct: "", complex: "",
   // JSON-encoded drafts for Benar/Salah and Menjodohkan (keeps the form flat for useRequiredFields)
-  statements: "", pairs: "", extras: "", rubric: "",
-  difficulty: "Sedang", topic: "", explanation: "", imageUrl: "",
+  statements: "", pairs: "", rubric: "",
+  difficulty: "Sedang", topic: "", explanation: "", imageUrl: "", points: "1",
 };
 
 function TeacherQuestionBank() {
@@ -3454,8 +3502,14 @@ function TeacherQuestionBank() {
   const reviewCount = reviewQs.length;
   const manualValidation = useRequiredFields(manualQ, manualRequired(manualQ));
   const [savingManual, setSavingManual] = useState(false);
+  // Mapel for a new question - defaults to the active one, can be changed in the form.
+  const [manualSubjectId, setManualSubjectId] = useState("");
+  const manualSubject = manualSubjectId || activeSubjectId || "";
+  const manualSubjectOptions: SelectOption[] = (teacher?.assignments ?? [])
+    .filter(a => a.classId === activeClass)
+    .map(a => ({ value: a.subjectId, label: a.subjectName }));
   const [selectedTopics, setSelectedTopics] = useState<Set<string>>(new Set());
-  const [selectedStyles, setSelectedStyles] = useState<Set<string>>(new Set());
+  const [selectedTypes, setSelectedTypes] = useState<Set<QuestionType>>(new Set());
   const [selectedDifficulty, setSelectedDifficulty] = useState<string | null>(null);
 
   // Bank/review are scoped by subject (real schema has no per-class column on
@@ -3463,23 +3517,17 @@ function TeacherQuestionBank() {
   const classFilteredQs = bankQs;
 
   const topicOptions = [...new Set(classFilteredQs.map(q => q.topic))].filter(Boolean).sort();
-  const styleOptions = [...new Set(classFilteredQs.map(q => q.styleType))].filter(Boolean).sort();
-  const hasActiveFilters = selectedTopics.size > 0 || selectedStyles.size > 0 || selectedDifficulty !== null;
+  const typeOptions = QUESTION_TYPES.filter(t => classFilteredQs.some(q => (q.questionType ?? "pg") === t));
+  const hasActiveFilters = selectedTopics.size > 0 || selectedTypes.size > 0 || selectedDifficulty !== null;
 
-  function toggleTopic(t: string) {
-    setSelectedTopics(prev => { const n = new Set(prev); n.has(t) ? n.delete(t) : n.add(t); return n; });
-  }
-  function toggleStyle(s: string) {
-    setSelectedStyles(prev => { const n = new Set(prev); n.has(s) ? n.delete(s) : n.add(s); return n; });
-  }
   function clearFilters() {
-    setSelectedTopics(new Set()); setSelectedStyles(new Set()); setSelectedDifficulty(null); setSearch("");
+    setSelectedTopics(new Set()); setSelectedTypes(new Set()); setSelectedDifficulty(null); setSearch("");
   }
 
   const filtered = classFilteredQs.filter(q => {
     if (search && !q.question.toLowerCase().includes(search.toLowerCase()) && !q.topic.toLowerCase().includes(search.toLowerCase())) return false;
     if (selectedTopics.size > 0 && !selectedTopics.has(q.topic)) return false;
-    if (selectedStyles.size > 0 && !selectedStyles.has(q.styleType)) return false;
+    if (selectedTypes.size > 0 && !selectedTypes.has((q.questionType ?? "pg") as QuestionType)) return false;
     if (selectedDifficulty && q.difficulty !== selectedDifficulty) return false;
     return true;
   });
@@ -3531,67 +3579,23 @@ function TeacherQuestionBank() {
             )}
           </div>
 
-          {/* Topic filter */}
-          {topicOptions.length > 0 && (
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <div>
-              <div className="mb-1.5 flex items-center gap-3">
-                <span className="text-[10px] font-semibold text-ink-tertiary">BAB / TOPIK</span>
-                <button type="button" className="text-[11px] font-semibold text-primary hover:underline" onClick={() => setSelectedTopics(new Set(topicOptions))}>Pilih semua</button>
-                {selectedTopics.size > 0 && <button type="button" className="text-[11px] font-semibold text-ink-secondary hover:underline" onClick={() => setSelectedTopics(new Set())}>Kosongkan</button>}
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {topicOptions.map(t => (
-                  <button key={t} onClick={() => toggleTopic(t)}
-                    className={cn(
-                      "px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all",
-                      selectedTopics.has(t)
-                        ? "bg-primary text-white border-primary shadow-sm"
-                        : "bg-background text-ink-secondary border-border hover:border-primary/40 hover:text-ink"
-                    )}>
-                    {t}
-                  </button>
-                ))}
-              </div>
+              <div className="text-[10px] font-semibold text-ink-tertiary mb-1.5">BAB / TOPIK</div>
+              <TopicMultiSelect topics={topicOptions} selected={selectedTopics} onChange={setSelectedTopics}
+                counts={Object.fromEntries(topicOptions.map(t => [t, classFilteredQs.filter(q => q.topic === t).length]))} />
             </div>
-          )}
-
-          {/* Style filter */}
-          {styleOptions.length > 0 && (
             <div>
-              <div className="text-[10px] font-semibold text-ink-tertiary mb-1.5">GAYA SOAL</div>
-              <div className="flex flex-wrap gap-1.5">
-                {styleOptions.map(s => (
-                  <button key={s} onClick={() => toggleStyle(s)}
-                    className={cn(
-                      "px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all",
-                      selectedStyles.has(s)
-                        ? "bg-ink text-white border-ink shadow-sm"
-                        : "bg-background text-ink-secondary border-border hover:border-ink/30 hover:text-ink"
-                    )}>
-                    {s}
-                  </button>
-                ))}
-              </div>
+              <div className="text-[10px] font-semibold text-ink-tertiary mb-1.5">TIPE SOAL</div>
+              <TopicMultiSelect topics={typeOptions.map(t => QUESTION_TYPE_LABEL[t])} allLabel="Semua tipe" unit="tipe"
+                selected={new Set([...selectedTypes].map(t => QUESTION_TYPE_LABEL[t]))}
+                onChange={next => setSelectedTypes(new Set(typeOptions.filter(t => next.has(QUESTION_TYPE_LABEL[t]))))}
+                counts={Object.fromEntries(typeOptions.map(t => [QUESTION_TYPE_LABEL[t], classFilteredQs.filter(q => (q.questionType ?? "pg") === t).length]))} />
             </div>
-          )}
-
-          {/* Difficulty filter */}
-          <div>
-            <div className="text-[10px] font-semibold text-ink-tertiary mb-1.5">TINGKAT KESULITAN</div>
-            <div className="flex gap-1.5">
-              {(["Mudah", "Sedang", "Sulit"] as const).map(d => (
-                <button key={d} onClick={() => setSelectedDifficulty(prev => prev === d ? null : d)}
-                  className={cn(
-                    "px-2.5 py-1 rounded-full text-[11px] font-medium border transition-all",
-                    selectedDifficulty === d
-                      ? d === "Mudah" ? "bg-success text-white border-success shadow-sm"
-                        : d === "Sedang" ? "bg-warning text-white border-warning shadow-sm"
-                        : "bg-danger text-white border-danger shadow-sm"
-                      : "bg-background text-ink-secondary border-border hover:border-ink/30 hover:text-ink"
-                  )}>
-                  {d}
-                </button>
-              ))}
+            <div>
+              <div className="text-[10px] font-semibold text-ink-tertiary mb-1.5">TINGKAT KESULITAN</div>
+              <SelectField value={selectedDifficulty ?? ""} onChange={v => setSelectedDifficulty(v || null)}
+                options={[{ value: "", label: "Semua tingkat" }, ...(["Mudah", "Sedang", "Sulit"] as const).map(d => ({ value: d, label: d, description: `${classFilteredQs.filter(q => q.difficulty === d).length} soal` }))]} />
             </div>
           </div>
 
@@ -3630,16 +3634,20 @@ function TeacherQuestionBank() {
               </button>
             </div>
             <div className="overflow-y-auto p-5 space-y-4">
-              <ManualQuestionFields value={manualQ} onChange={setManualQ} errorFor={manualValidation.errorFor} attempted={manualValidation.attempted} />
+              <ManualQuestionFields value={manualQ} onChange={setManualQ} errorFor={manualValidation.errorFor} attempted={manualValidation.attempted}
+                topicOptions={manualSubject === activeSubjectId ? topicOptions : []}
+                subject={{ value: manualSubject, options: manualSubjectOptions, onChange: setManualSubjectId }} />
               {manualError && <p className="text-[12px] text-danger">{manualError}</p>}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
               <Button variant="outline" size="sm" onClick={() => { setShowManualAdd(false); setManualQ({ ...EMPTY_MANUAL_Q }); setManualError(""); manualValidation.reset(); }}>Batal</Button>
               <Button variant="default" size="sm" disabled={savingManual} onClick={async () => {
                 if (!manualValidation.validate() || manualStructureError(manualQ)) { setManualError(manualStructureError(manualQ) ?? "Tolong lengkapi kolom bertanda *."); return; }
-                if (!teacher || !activeClass || !activeSubjectId) { setManualError("Pilih kelas aktif terlebih dahulu."); return; }
+                if (!teacher || !activeClass || !manualSubject) { setManualError("Pilih kelas aktif dan mata pelajaran terlebih dahulu."); return; }
                 setSavingManual(true);
-                const err = await saveManualQToBank(manualQ, teacher.schoolId, activeClass, activeSubjectId, teacher.profileId);
+                const err = await saveManualQToBank(manualQ, teacher.schoolId, activeClass, manualSubject, teacher.profileId);
+                // Saved to another mapel: reload the list for the mapel on screen.
+                if (!err && activeSubjectId && manualSubject !== activeSubjectId) await refreshBankAndReview(activeClass, activeSubjectId);
                 setSavingManual(false);
                 if (err) { setManualError(`Gagal menyimpan: ${err}`); return; }
                 setShowManualAdd(false);
@@ -3963,6 +3971,7 @@ function TeacherAssessmentBuilder() {
   const [questionPoints, setQuestionPoints] = useState<Record<string, number>>({});
   const [bankSearch, setBankSearch] = useState("");
   const [bankTopics, setBankTopics] = useState<Set<string>>(new Set());
+  const [bankTypes, setBankTypes] = useState<Set<QuestionType>>(new Set());
   const [bankDifficulty, setBankDifficulty] = useState<"" | "Mudah" | "Sedang" | "Sulit">("");
   const [assessmentType, setAssessmentType] = useState<"uniform" | "adaptive">("uniform");
   const [questionSource, setQuestionSource] = useState<"ai" | "bank">("ai");
@@ -4038,7 +4047,11 @@ function TeacherAssessmentBuilder() {
       distributionMode: assessmentType, questionCount: formQuestionCount,
       ...styleFlags,
       questionSource, aiQuestions: chosenAi, bankQuestionIds: chosenBankIds,
-      points: questionPoints,
+      // the question's own score unless changed here
+      points: Object.fromEntries([
+        ...chosenAi.map(q => [q.id, questionPoints[q.id] ?? 1]),
+        ...chosenBankIds.map(id => [id, questionPoints[id] ?? bankQs.find(b => b.id === id)?.defaultPoints ?? 1]),
+      ]),
     });
     setSaving(false);
     if ("error" in result) {
@@ -4557,10 +4570,12 @@ function TeacherAssessmentBuilder() {
 
           {questionSource === "bank" && (() => {
             const topics = [...new Set(bankQs.map(q => q.topic).filter(Boolean))].sort((x, y) => x.localeCompare(y, "id"));
+            const bankTypeOptions = QUESTION_TYPES.filter(t => bankQs.some(q => (q.questionType ?? "pg") === t));
             const q = bankSearch.trim().toLowerCase();
             const visible = bankQs.filter(item =>
               (bankTopics.size === 0 || bankTopics.has(item.topic)) &&
               (bankDifficulty === "" || item.difficulty === bankDifficulty) &&
+              (bankTypes.size === 0 || bankTypes.has((item.questionType ?? "pg") as QuestionType)) &&
               (!q || item.question.toLowerCase().includes(q) || item.topic.toLowerCase().includes(q)));
             const allVisibleSelected = visible.length > 0 && visible.every(item => selectedQuestions.has(item.id));
             const subjectName = subjectOptions.find(o => o.value === formSubjectId)?.label ?? "";
@@ -4593,14 +4608,14 @@ function TeacherAssessmentBuilder() {
                     <TopicMultiSelect topics={topics} selected={bankTopics} onChange={setBankTopics}
                       counts={Object.fromEntries(topics.map(t => [t, bankQs.filter(x => x.topic === t).length]))} />
                   </div>
-                  <div className="flex gap-1">
-                    {(["", "Mudah", "Sedang", "Sulit"] as const).map(d => (
-                      <button key={d || "all"} type="button" onClick={() => setBankDifficulty(d)} aria-pressed={bankDifficulty === d}
-                        className={cn("rounded-full border px-3 py-1 text-[12px] font-semibold transition-colors",
-                          bankDifficulty === d ? "border-ink bg-ink text-white" : "border-border bg-surface text-ink-secondary hover:text-ink")}>
-                        {d || "Semua"}
-                      </button>
-                    ))}
+                  <div className="w-44">
+                    <TopicMultiSelect topics={bankTypeOptions.map(t => QUESTION_TYPE_LABEL[t])} allLabel="Semua tipe" unit="tipe"
+                      selected={new Set([...bankTypes].map(t => QUESTION_TYPE_LABEL[t]))}
+                      onChange={next => setBankTypes(new Set(bankTypeOptions.filter(t => next.has(QUESTION_TYPE_LABEL[t]))))} />
+                  </div>
+                  <div className="w-40">
+                    <SelectField value={bankDifficulty} onChange={v => setBankDifficulty(v as typeof bankDifficulty)}
+                      options={[{ value: "", label: "Semua tingkat" }, { value: "Mudah", label: "Mudah" }, { value: "Sedang", label: "Sedang" }, { value: "Sulit", label: "Sulit" }]} />
                   </div>
                 </div>
               )}
@@ -4633,7 +4648,7 @@ function TeacherAssessmentBuilder() {
                         {item.questionType && item.questionType !== "pg" && <Badge tone="primary">{QUESTION_TYPE_LABEL[item.questionType as QuestionType] ?? item.questionType}</Badge>}
                         {item.imageUrl && <Badge tone="neutral">🖼 Gambar</Badge>}
                         {selectedQuestions.has(item.id) && (
-                          <PointsInput value={questionPoints[item.id] ?? 1} onChange={v => setQuestionPoints(p => ({ ...p, [item.id]: v }))} />
+                          <PointsInput value={questionPoints[item.id] ?? item.defaultPoints ?? 1} onChange={v => setQuestionPoints(p => ({ ...p, [item.id]: v }))} />
                         )}
                       </div>
                     </div>
@@ -4673,7 +4688,9 @@ function TeacherAssessmentBuilder() {
                   <h2 className="text-[16px] font-bold text-ink">Tambah Soal ke Bank Soal</h2>
                   <button onClick={() => setShowAddQuestion(false)} className="text-ink-secondary hover:text-ink"><X className="h-4 w-4" /></button>
                 </div>
-                <ManualQuestionFields value={newQ} onChange={setNewQ} errorFor={newQValidation.errorFor} attempted={newQValidation.attempted} />
+                <ManualQuestionFields value={newQ} onChange={setNewQ} errorFor={newQValidation.errorFor} attempted={newQValidation.attempted}
+                  topicOptions={bankQs.map(q => q.topic)}
+                  subject={{ value: formSubjectId, options: subjectOptions }} />
                 <div className="flex justify-end gap-2 pt-2">
                   <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowAddQuestion(false); setNewQ({ ...EMPTY_MANUAL_Q }); newQValidation.reset(); }}>Batal</Button>
                   <Button variant="default" className="h-8 text-[12px]" onClick={() => { if (!newQValidation.validate() || manualStructureError(newQ)) return; setShowAddQuestion(false); setConfirmAddToBank(true); }}>
