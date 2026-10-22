@@ -192,7 +192,7 @@ export function SelectField({
           className,
         )}
       >
-        <span className={cn("truncate", !selected && "text-ink-tertiary")}>
+        <span className={cn("truncate", !selected && !(creatable && value) && "text-ink-tertiary")}>
           {loading && !selected ? "Memuat..." : selected?.label ?? (creatable && value ? value : placeholder)}
         </span>
         <ChevronDown className={cn("h-4 w-4 shrink-0 text-ink-tertiary transition-transform", open && "rotate-180")} />
