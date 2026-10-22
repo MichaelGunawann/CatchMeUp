@@ -35,6 +35,9 @@ Pastikan kunci jawaban benar-benar sesuai isi materi; periksa ulang setiap kunci
     messages: [{ role: "user", content: prompt }],
     max_tokens: Math.min(8192, count * 450 + 600),
     temperature: 0.3,
+    // Typed formats ran 35-45s for 2 questions at default effort - close to
+    // the 60s function limit; low effort keeps a batch well inside it.
+    reasoning_effort: "low",
   });
   return parseTypedQuestions(completion.choices[0].message.content ?? "", type);
 }

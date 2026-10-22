@@ -4210,7 +4210,7 @@ function TeacherAssessmentBuilder() {
     ];
     for (const [type, total] of wanted) {
       if (total <= 0) continue;
-      const BATCH = type === "pg" ? 8 : 5;
+      const BATCH = type === "pg" ? 8 : 3;
       matList.forEach((mat, i) => {
         // Spread each type evenly across materials (first ones take the remainder).
         const share = Math.floor(total / matList.length) + (i < total % matList.length ? 1 : 0);
