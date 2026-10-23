@@ -1605,38 +1605,88 @@ async function uploadQuestionImage(file: File): Promise<{ url: string } | { erro
   return { url: ticket.publicUrl };
 }
 
+// Phone photos are often 3-10 MB: shrink to max 1600px and re-encode as
+// JPEG before uploading (keeps exams fast on school internet). Returns the
+// original file when it can't be decoded (e.g. HEIC on Chrome).
+async function compressImage(file: File): Promise<File> {
+  if (file.type === "image/gif") return file; // keep animation
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 1600 / Math.max(bitmap.width, bitmap.height));
+    if (scale === 1 && file.size <= 1_000_000 && file.type !== "image/heic") return file;
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.round(bitmap.width * scale);
+    canvas.height = Math.round(bitmap.height * scale);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return file;
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    const blob = await new Promise<Blob | null>(r => canvas.toBlob(r, "image/jpeg", 0.85));
+    return blob ? new File([blob], file.name.replace(/\.[^.]+$/, "") + ".jpg", { type: "image/jpeg" }) : file;
+  } catch {
+    return file;
+  }
+}
+
+// Picture for a question: click to choose, drag & drop a file, or paste
+// (Ctrl+V) a screenshot.
 function QuestionImagePicker({ value, onChange }: { value: string; onChange: (url: string) => void }) {
   const inputRef = React.useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  async function pick(file: File | undefined) {
+  const [over, setOver] = useState(false);
+  async function pick(file: File | undefined | null) {
     if (!file) return;
-    if (!file.type.startsWith("image/")) { setErr("File harus berupa gambar (PNG, JPG, WEBP, GIF)."); return; }
-    if (file.size > 3 * 1024 * 1024) { setErr("Ukuran gambar maksimal 3 MB."); return; }
+    if (!file.type.startsWith("image/")) { setErr(`"${file.name}" bukan gambar. Gunakan PNG, JPG, WEBP, atau GIF.`); return; }
     setErr(null); setBusy(true);
-    const res = await uploadQuestionImage(file);
+    const ready = await compressImage(file);
+    if (!/^image\/(png|jpe?g|webp|gif)$/.test(ready.type)) {
+      setBusy(false);
+      setErr(`Format ${file.type.replace("image/", "").toUpperCase()} belum didukung browser ini. Simpan ulang gambarnya sebagai JPG atau PNG.`);
+      return;
+    }
+    if (ready.size > 3 * 1024 * 1024) { setBusy(false); setErr("Gambar masih lebih dari 3 MB setelah dikecilkan. Coba gambar lain."); return; }
+    const res = await uploadQuestionImage(ready);
     setBusy(false);
     if ("error" in res) setErr(res.error); else onChange(res.url);
   }
   return (
-    <div>
-      <input ref={inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" className="hidden"
+    <div
+      tabIndex={0}
+      onPaste={e => { const f = [...e.clipboardData.files].find(x => x.type.startsWith("image/")); if (f) { e.preventDefault(); pick(f); } }}
+      onDragOver={e => { e.preventDefault(); setOver(true); }}
+      onDragLeave={() => setOver(false)}
+      onDrop={e => { e.preventDefault(); setOver(false); pick(e.dataTransfer.files[0]); }}
+      className={cn("rounded-[10px] border-2 border-dashed p-3 outline-none transition-colors focus:border-primary/60",
+        over ? "border-primary bg-primary-soft" : "border-border bg-background")}>
+      <input ref={inputRef} type="file" accept="image/*" className="hidden"
         onChange={e => { pick(e.target.files?.[0]); e.target.value = ""; }} />
       {value ? (
         <div className="flex items-start gap-3">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img src={value} alt="Gambar soal" className="max-h-40 rounded-[8px] border border-border object-contain" />
           <div className="flex flex-col gap-1.5">
-            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => inputRef.current?.click()}>Ganti</Button>
+            <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => inputRef.current?.click()}>{busy ? "Mengunggah..." : "Ganti"}</Button>
             <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => onChange("")}>Hapus</Button>
           </div>
         </div>
       ) : (
-        <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => inputRef.current?.click()}>
-          <Plus className="mr-1.5 h-3.5 w-3.5" />{busy ? "Mengunggah..." : "Tambah Gambar"}
-        </Button>
+        <button type="button" disabled={busy} onClick={() => inputRef.current?.click()}
+          className="flex w-full flex-col items-center gap-1 py-3 text-center">
+          {busy ? (
+            <span className="flex items-center gap-2 text-[13px] font-semibold text-primary">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />Mengunggah gambar...
+            </span>
+          ) : (
+            <>
+              <span className="flex items-center gap-1.5 text-[13px] font-semibold text-primary"><Plus className="h-4 w-4" />Tambah Gambar</span>
+              <span className="text-[11px] text-ink-tertiary">Klik, tarik file ke sini, atau tempel (Ctrl+V) · PNG/JPG/WEBP/GIF · foto besar dikecilkan otomatis</span>
+            </>
+          )}
+        </button>
       )}
-      {err && <p className="mt-1 text-[11px] font-medium text-danger">{err}</p>}
+      {err && <p role="alert" className="mt-2 rounded-[6px] bg-danger-light px-2.5 py-1.5 text-[12px] font-medium text-danger">{err}</p>}
     </div>
   );
 }
@@ -7202,6 +7252,125 @@ function parseJsonArray(ans: string | undefined, n: number): (string | number | 
   return Array.from({ length: n }, (_, i) => (arr[i] ?? null) as string | number | null);
 }
 
+const MATCH_COLORS = ["#2563eb", "#16a34a", "#d97706", "#db2777", "#7c3aed", "#0891b2", "#dc2626", "#65a30d"];
+
+/**
+ * Matching answered by drawing lines: drag from an item on the left to its
+ * pair on the right (or tap left, then tap right). Tapping a connected left
+ * item again removes its line. Each right item belongs to one left item.
+ * The value is the right item's ORIGINAL index per left item (or null).
+ */
+function MatchingLines({ left, right, value, onChange }: {
+  left: string[];
+  right: { index: number; text: string }[];
+  value: (string | number | null)[];
+  onChange: (v: (number | null)[]) => void;
+}) {
+  const boxRef = React.useRef<HTMLDivElement>(null);
+  const leftRefs = React.useRef<(HTMLButtonElement | null)[]>([]);
+  const rightRefs = React.useRef<Map<number, HTMLButtonElement | null>>(new Map());
+  const [active, setActive] = useState<number | null>(null);
+  const [drag, setDrag] = useState<{ from: number; x: number; y: number } | null>(null);
+  const [, relayout] = useState(0);
+  const conn = value.map(v => (v === null || v === undefined || v === "" ? null : Number(v)));
+
+  useEffect(() => {
+    const ro = new ResizeObserver(() => relayout(n => n + 1));
+    if (boxRef.current) ro.observe(boxRef.current);
+    return () => ro.disconnect();
+  }, []);
+
+  function connect(l: number, r: number) {
+    const next = conn.map(v => (v === r ? null : v)); // a right item has one partner
+    next[l] = r;
+    onChange(next);
+    setActive(null);
+  }
+  function anchor(el: HTMLElement | null | undefined, side: "right" | "left") {
+    const box = boxRef.current?.getBoundingClientRect();
+    const r = el?.getBoundingClientRect();
+    if (!box || !r) return null;
+    return { x: (side === "right" ? r.right : r.left) - box.left, y: r.top + r.height / 2 - box.top };
+  }
+  function rightAt(x: number, y: number): number | null {
+    const el = document.elementFromPoint(x, y)?.closest("[data-match-right]") as HTMLElement | null;
+    return el ? Number(el.dataset.matchRight) : null;
+  }
+
+  const lines = conn.map((r, l) => {
+    if (r === null) return null;
+    const a = anchor(leftRefs.current[l], "right");
+    const b = anchor(rightRefs.current.get(r), "left");
+    return a && b ? { l, a, b } : null;
+  }).filter((x): x is NonNullable<typeof x> => !!x);
+  const dragFrom = drag ? anchor(leftRefs.current[drag.from], "right") : null;
+  const colorOf = (l: number) => MATCH_COLORS[l % MATCH_COLORS.length];
+  const leftOfRight = (r: number) => conn.findIndex(v => v === r);
+
+  return (
+    <div>
+      <p className="mb-2 text-[12px] font-semibold text-primary">Tarik garis dari kotak kiri ke pasangannya di kanan (atau ketuk kiri, lalu ketuk kanan).</p>
+      <div ref={boxRef} className="relative grid grid-cols-[1fr_minmax(2.5rem,6rem)_1fr] items-start select-none" style={{ touchAction: "none" }}
+        onPointerMove={e => { if (drag) { const box = boxRef.current!.getBoundingClientRect(); setDrag({ ...drag, x: e.clientX - box.left, y: e.clientY - box.top }); } }}
+        onPointerUp={e => {
+          if (!drag) return;
+          const r = rightAt(e.clientX, e.clientY);
+          if (r !== null) connect(drag.from, r);
+          setDrag(null);
+        }}
+        onPointerLeave={() => setDrag(null)}>
+        <div className="space-y-2.5">
+          {left.map((text, l) => (
+            <button key={l} type="button" ref={el => { leftRefs.current[l] = el; }}
+              onPointerDown={e => {
+                (e.target as HTMLElement).releasePointerCapture?.(e.pointerId);
+                const box = boxRef.current!.getBoundingClientRect();
+                setDrag({ from: l, x: e.clientX - box.left, y: e.clientY - box.top });
+              }}
+              onClick={() => {
+                if (conn[l] !== null && active !== l) { const next = [...conn]; next[l] = null; onChange(next); setActive(null); return; }
+                setActive(active === l ? null : l);
+              }}
+              style={conn[l] !== null ? { borderColor: colorOf(l) } : undefined}
+              className={cn("relative flex w-full items-center rounded-[10px] border-2 bg-surface px-3 py-2.5 pr-5 text-left text-[13px] font-medium text-ink transition-colors",
+                active === l ? "border-primary bg-primary-soft" : conn[l] === null ? "border-border hover:border-primary/40" : "")}>
+              {text}
+              <span className="absolute -right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 rounded-full border-2 border-white"
+                style={{ background: conn[l] !== null ? colorOf(l) : "#94a3b8" }} />
+            </button>
+          ))}
+        </div>
+        <div />
+        <div className="space-y-2.5">
+          {right.map(r => {
+            const owner = leftOfRight(r.index);
+            return (
+              <button key={r.index} type="button" data-match-right={r.index} ref={el => { rightRefs.current.set(r.index, el); }}
+                onClick={() => { if (active !== null) connect(active, r.index); }}
+                style={owner >= 0 ? { borderColor: colorOf(owner) } : undefined}
+                className={cn("relative flex w-full items-center rounded-[10px] border-2 bg-surface px-3 py-2.5 pl-5 text-left text-[13px] text-ink transition-colors",
+                  owner < 0 && (active !== null ? "border-primary/40 hover:bg-primary-soft" : "border-border"))}>
+                <span className="absolute -left-1.5 top-1/2 h-3 w-3 -translate-y-1/2 rounded-full border-2 border-white"
+                  style={{ background: owner >= 0 ? colorOf(owner) : "#94a3b8" }} />
+                {r.text}
+              </button>
+            );
+          })}
+        </div>
+        <svg className="pointer-events-none absolute inset-0 h-full w-full overflow-visible">
+          {lines.map(({ l, a, b }) => (
+            <line key={l} x1={a.x} y1={a.y} x2={b.x} y2={b.y} stroke={colorOf(l)} strokeWidth={3} strokeLinecap="round" />
+          ))}
+          {drag && dragFrom && (
+            <line x1={dragFrom.x} y1={dragFrom.y} x2={drag.x} y2={drag.y} stroke={colorOf(drag.from)} strokeWidth={3} strokeDasharray="6 5" strokeLinecap="round" />
+          )}
+        </svg>
+      </div>
+      <p className="mt-2 text-[11px] text-ink-tertiary">Ketuk kotak kiri yang sudah tersambung untuk menghapus garisnya.</p>
+    </div>
+  );
+}
+
 /** Answer area for one exam question, per question type. */
 function ExamAnswerInput({ q, value, onChange }: { q: ExamQuestion; value: string | undefined; onChange: (v: string) => void }) {
   const type = q.type ?? "pg";
@@ -7239,23 +7408,8 @@ function ExamAnswerInput({ q, value, onChange }: { q: ExamQuestion; value: strin
   }
   if (type === "menjodohkan") {
     const left = q.matchLeft ?? [];
-    const right = q.matchRight ?? [];
-    const vals = parseJsonArray(value, left.length);
-    return (
-      <div className="space-y-2.5">
-        {left.map((text, i) => (
-          <div key={i} className="flex flex-col gap-2 rounded-[10px] border border-border bg-surface p-3.5 sm:flex-row sm:items-center">
-            <p className="flex-1 text-[13px] font-medium text-ink">{text}</p>
-            <select value={vals[i] == null ? "" : String(vals[i])}
-              onChange={e => onChange(JSON.stringify(vals.map((x, j) => j === i ? (e.target.value === "" ? null : Number(e.target.value)) : x)))}
-              className="w-full rounded-[8px] border border-border bg-background px-3 py-2 text-[13px] text-ink focus:border-primary focus:outline-none sm:w-64">
-              <option value="">Pilih pasangan...</option>
-              {right.map(r => <option key={r.index} value={r.index}>{r.text}</option>)}
-            </select>
-          </div>
-        ))}
-      </div>
-    );
+    return <MatchingLines left={left} right={q.matchRight ?? []} value={parseJsonArray(value, left.length)}
+      onChange={vals => onChange(JSON.stringify(vals))} />;
   }
   const complex = type === "pg_kompleks";
   const picked = complex ? decodeComplex(value) : [];
