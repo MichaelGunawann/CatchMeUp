@@ -144,16 +144,36 @@ export async function POST(req: Request) {
         return { q, score: score + Math.random() * 0.5 };
       })
       .sort((x, y) => y.score - x.score);
+    // Format focus for this batch: weighted toward the student's weakest
+    // (or not yet tried) format; plain PG stays the most common. When the
+    // focus isn't PG, about half the batch is that format - taken from the
+    // bank, or made by the AI if the bank has too few.
+    const weights = PRACTICE_TYPES.map(t => {
+      const ta = typeAcc(t);
+      return { t, w: (t === "pg" ? 0.8 : 0) + (ta === null ? 0.5 : 1 - ta) };
+    });
+    let roll = Math.random() * weights.reduce((a, b) => a + b.w, 0);
+    const genType: QuestionType = (weights.find(x => (roll -= x.w) < 0) ?? weights[0]).t;
+    const focusWanted = genType === "pg" ? 0 : Math.ceil(wantCount / 2);
+
     // Spread over topics: at most 3 from one topic before moving on.
     const perTopic = new Map<string, number>();
     const found: NonNullable<typeof candidates> = [];
-    for (const { q } of ranked) {
-      if (found.length >= wantCount) break;
-      const n = perTopic.get(q.topic) ?? 0;
-      if (n >= 3 && ranked.length > wantCount * 2) continue;
-      perTopic.set(q.topic, n + 1);
-      found.push(q);
-    }
+    const take = (list: typeof ranked, limit: number) => {
+      for (const { q } of list) {
+        if (found.length >= limit) break;
+        if (found.includes(q)) continue;
+        const n = perTopic.get(q.topic) ?? 0;
+        if (n >= 3 && ranked.length > wantCount * 2) continue;
+        perTopic.set(q.topic, n + 1);
+        found.push(q);
+      }
+    };
+    if (focusWanted) take(ranked.filter(({ q }) => questionTypeOf(q) === genType), focusWanted);
+    const focusFound = found.length;
+    // Leave room for AI-made focus questions when the bank had too few.
+    const reserve = focusWanted ? focusWanted - focusFound : 0;
+    take(ranked.filter(({ q }) => !focusWanted || questionTypeOf(q) !== genType), wantCount - reserve);
 
     let generated: typeof found = [];
     let generationNote: string | null = null;
@@ -175,15 +195,6 @@ export async function POST(req: Request) {
           ? `\n\nBuat soal BERDASARKAN kutipan materi dari guru berikut (jangan keluar dari isinya). Isi "sourceTitle" dan "sourcePage" sesuai tanda <<Judul, hal. N>> (hanya di kolom itu, jangan di teks soal/penjelasan):\n${excerpts.map(c => `<<${c.materialTitle}${c.page ? `, hal. ${c.page}` : ""}>>\n${c.text}`).join("\n\n")}`
           : "";
         const grounding = groundingFor(retrieve(chunks, topic ?? subjectRow?.name ?? "", 7000));
-
-        // Format to generate: weighted toward the student's weakest (or not
-        // yet tried) format; plain PG stays the most common.
-        const weights = PRACTICE_TYPES.map(t => {
-          const ta = typeAcc(t);
-          return { t, w: (t === "pg" ? 0.6 : 0) + (ta === null ? 0.5 : 1 - ta) };
-        });
-        let roll = Math.random() * weights.reduce((a, b) => a + b.w, 0);
-        const genType = (weights.find(x => (roll -= x.w) < 0) ?? weights[0]).t;
 
         const buildPrompt = (groundingText: string) => `Buat ${shortfall} soal latihan pilihan ganda (A-D) bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
           topic ? ` topik "${topic}"` : ""
