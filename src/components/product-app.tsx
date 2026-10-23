@@ -84,7 +84,7 @@ import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentTeacher, getCurrentStudent, getCurrentParent } from "@/lib/auth/authorization";
 import { parseDbTime } from "@/lib/auth/assessment-availability";
 import { useScheduleClock, formatCountdown } from "@/lib/hooks/use-schedule-clock";
-import { useExamLockdown, requestExamFullscreen, exitExamFullscreen } from "@/lib/hooks/use-exam-lockdown";
+import { useExamLockdown, requestExamFullscreen, exitExamFullscreen, setExamOverlayCloser } from "@/lib/hooks/use-exam-lockdown";
 import { useSubjectFilter } from "@/lib/hooks/use-subject-filter";
 import {
   QUESTION_TYPES, QUESTION_TYPE_LABEL, QUESTION_TYPE_HINT, type QuestionType,
@@ -7423,44 +7423,48 @@ function MatchingLines({ left, right, value, onChange }: {
 // Question picture that can be enlarged: tap to open a zoom view on top of
 // the page (same tab, so exam lockdown is unaffected). Zoom with the
 // buttons, mouse wheel or pinch; drag to move around when zoomed in.
+// Close with the big button, by tapping the dark area, or with Back.
 function ZoomableImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
   const [open, setOpen] = useState(false);
   const [scale, setScale] = useState(1);
   const [pos, setPos] = useState({ x: 0, y: 0 });
-  const dragRef = React.useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+  const dragRef = React.useRef<{ x: number; y: number; px: number; py: number; moved: boolean } | null>(null);
   const pinchRef = React.useRef<{ d: number; s: number } | null>(null);
   const pointers = React.useRef(new Map<number, { x: number; y: number }>());
   const zoomTo = (v: number) => { const n = Math.min(5, Math.max(1, Math.round(v * 100) / 100)); setScale(n); if (n === 1) setPos({ x: 0, y: 0 }); };
-  const close = () => { setOpen(false); setScale(1); setPos({ x: 0, y: 0 }); };
+  const close = React.useCallback(() => { setOpen(false); setScale(1); setPos({ x: 0, y: 0 }); }, []);
+  // In an exam, Back closes the picture instead of trying to leave.
+  useEffect(() => {
+    if (!open) return;
+    setExamOverlayCloser(close);
+    return () => setExamOverlayCloser(null);
+  }, [open, close]);
   return (
     <>
       <button type="button" onClick={() => setOpen(true)} className="group relative mt-4 block max-w-full" aria-label={`Perbesar ${alt}`}>
         {/* eslint-disable-next-line @next/next/no-img-element */}
         <img src={src} alt={alt} draggable={false} className={className} />
-        <span className="absolute bottom-2 right-2 flex items-center gap-1 rounded-full bg-ink/70 px-2.5 py-1 text-[11px] font-semibold text-white">
+        <span className="absolute bottom-2 right-2 flex items-center gap-1 rounded-full bg-ink/75 px-2.5 py-1 text-[11px] font-semibold text-white">
           <Search className="h-3 w-3" />Perbesar
         </span>
       </button>
       {open && createPortal(
-        <div className="fixed inset-0 z-[200] flex flex-col bg-ink/90" role="dialog" aria-label="Gambar diperbesar">
-          <div className="flex items-center justify-end gap-2 p-3">
-            <button type="button" onClick={() => zoomTo(scale - 0.5)} className="h-9 w-9 rounded-full bg-white/15 text-[18px] font-bold text-white hover:bg-white/25" aria-label="Perkecil">−</button>
+        <div className="fixed inset-0 z-[200] flex flex-col bg-ink/95" role="dialog" aria-label="Gambar diperbesar">
+          <div className="flex items-center justify-center gap-2 border-b border-white/10 bg-ink px-3 py-2.5">
+            <button type="button" onClick={() => zoomTo(scale - 0.5)} className="h-10 w-10 rounded-full bg-white/15 text-[20px] font-bold text-white hover:bg-white/25" aria-label="Perkecil">−</button>
             <span className="w-14 text-center text-[13px] font-semibold text-white">{Math.round(scale * 100)}%</span>
-            <button type="button" onClick={() => zoomTo(scale + 0.5)} className="h-9 w-9 rounded-full bg-white/15 text-[18px] font-bold text-white hover:bg-white/25" aria-label="Perbesar">+</button>
-            <button type="button" onClick={() => zoomTo(1)} className="h-9 rounded-full bg-white/15 px-3 text-[12px] font-semibold text-white hover:bg-white/25">Ukuran awal</button>
-            <button type="button" onClick={close} className="ml-2 flex h-9 items-center gap-1 rounded-full bg-white px-3 text-[12px] font-bold text-ink" aria-label="Tutup">
-              <X className="h-4 w-4" />Tutup
-            </button>
+            <button type="button" onClick={() => zoomTo(scale + 0.5)} className="h-10 w-10 rounded-full bg-white/15 text-[20px] font-bold text-white hover:bg-white/25" aria-label="Perbesar">+</button>
+            <button type="button" onClick={() => zoomTo(1)} className="h-10 rounded-full bg-white/15 px-3 text-[12px] font-semibold text-white hover:bg-white/25">Ukuran awal</button>
           </div>
           <div className="relative flex-1 overflow-hidden" style={{ touchAction: "none" }}
-            onClick={e => { if (e.target === e.currentTarget && scale === 1) close(); }}
+            onClick={e => { if (e.target === e.currentTarget && !dragRef.current?.moved) close(); }}
             onWheel={e => zoomTo(scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15))}
             onPointerDown={e => {
               pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
               if (pointers.current.size === 2) {
                 const [a, b] = [...pointers.current.values()];
                 pinchRef.current = { d: Math.hypot(a.x - b.x, a.y - b.y), s: scale };
-              } else dragRef.current = { x: e.clientX, y: e.clientY, px: pos.x, py: pos.y };
+              } else dragRef.current = { x: e.clientX, y: e.clientY, px: pos.x, py: pos.y, moved: false };
             }}
             onPointerMove={e => {
               if (!pointers.current.has(e.pointerId)) return;
@@ -7469,17 +7473,25 @@ function ZoomableImage({ src, alt, className }: { src: string; alt: string; clas
                 const [a, b] = [...pointers.current.values()];
                 zoomTo(pinchRef.current.s * Math.hypot(a.x - b.x, a.y - b.y) / pinchRef.current.d);
               } else if (dragRef.current && scale > 1) {
-                setPos({ x: dragRef.current.px + e.clientX - dragRef.current.x, y: dragRef.current.py + e.clientY - dragRef.current.y });
+                const dx = e.clientX - dragRef.current.x, dy = e.clientY - dragRef.current.y;
+                if (Math.abs(dx) + Math.abs(dy) > 4) dragRef.current.moved = true;
+                setPos({ x: dragRef.current.px + dx, y: dragRef.current.py + dy });
               }
             }}
-            onPointerUp={e => { pointers.current.delete(e.pointerId); if (pointers.current.size < 2) pinchRef.current = null; dragRef.current = null; }}
+            onPointerUp={e => { pointers.current.delete(e.pointerId); if (pointers.current.size < 2) pinchRef.current = null; setTimeout(() => { dragRef.current = null; }, 0); }}
             onPointerCancel={e => { pointers.current.delete(e.pointerId); pinchRef.current = null; dragRef.current = null; }}>
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img src={src} alt={alt} draggable={false}
-              className="pointer-events-none absolute left-1/2 top-1/2 max-h-[85%] max-w-[92%] select-none object-contain"
+              className="pointer-events-none absolute left-1/2 top-1/2 max-h-[90%] max-w-[94%] select-none object-contain"
               style={{ transform: `translate(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px)) scale(${scale})`, transition: dragRef.current || pinchRef.current ? "none" : "transform 120ms" }} />
           </div>
-          <p className="pb-3 text-center text-[11px] text-white/70">Geser untuk melihat bagian lain saat diperbesar · ketuk Tutup untuk kembali ke soal</p>
+          <div className="flex flex-col items-center gap-1.5 bg-ink px-4 pb-5 pt-3">
+            <button type="button" onClick={close}
+              className="flex h-12 w-full max-w-sm items-center justify-center gap-2 rounded-full bg-white text-[15px] font-bold text-ink shadow-lg hover:bg-white/90">
+              <X className="h-5 w-5" />Tutup gambar &amp; kembali ke soal
+            </button>
+            <p className="text-[11px] text-white/60">Atau ketuk area gelap / tombol kembali · cubit atau tombol +/− untuk zoom</p>
+          </div>
         </div>,
         document.body,
       )}
@@ -7788,7 +7800,13 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     setKioskReason(reason);
     triggerKioskWarning();
     autoSubmit(); // submit right away - not when the dialog is dismissed
-  });
+  }, () => setBackNotice(true));
+  const [backNotice, setBackNotice] = useState(false);
+  useEffect(() => {
+    if (!backNotice) return;
+    const t = setTimeout(() => setBackNotice(false), 4000);
+    return () => clearTimeout(t);
+  }, [backNotice]);
 
   // Online / offline detection
   React.useEffect(() => {
@@ -7938,6 +7956,12 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
         <div className="flex items-center justify-center gap-2 bg-warning px-4 py-2 text-[12px] font-semibold text-white">
           <WifiOff className="h-3.5 w-3.5" />
           Koneksi internet terputus — jawaban tersimpan lokal, akan tersinkron saat online kembali
+        </div>
+      )}
+
+      {backNotice && (
+        <div role="alert" className="fixed left-1/2 top-16 z-[120] -translate-x-1/2 rounded-full bg-ink px-4 py-2 text-[13px] font-semibold text-white shadow-lg">
+          Tombol kembali tidak bisa dipakai saat ujian. Kumpulkan lewat &quot;Selesaikan Ujian&quot;.
         </div>
       )}
 
@@ -8204,7 +8228,13 @@ function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId
   useExamLockdown(!done && !loadError, reason => {
     setLockReason(reason);
     finish(results);
-  });
+  }, () => setBackNotice(true));
+  const [backNotice, setBackNotice] = useState(false);
+  useEffect(() => {
+    if (!backNotice) return;
+    const t = setTimeout(() => setBackNotice(false), 4000);
+    return () => clearTimeout(t);
+  }, [backNotice]);
 
   function finish(all: AdaptiveResult[]) {
     const wrong = all.filter(r => !r.isCorrect);
@@ -8307,6 +8337,11 @@ function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId
       <div className="h-1.5 rounded-full bg-border overflow-hidden">
         <div className="h-full bg-primary transition-all" style={{ width: `${(results.length / ADAPTIVE_SESSION_LENGTH) * 100}%` }} />
       </div>
+      {backNotice && (
+        <p role="alert" className="rounded-[8px] bg-ink px-3 py-2 text-[12px] font-semibold text-white">
+          Tombol kembali tidak bisa dipakai saat latihan. Pakai tombol &quot;Keluar&quot; di atas.
+        </p>
+      )}
       <p className="text-[12px] text-ink-secondary">Jawab benar {ADAPTIVE_STREAK}× berturut-turut → soal jadi lebih sulit. Salah {ADAPTIVE_STREAK}× berturut-turut → soal jadi lebih mudah.</p>
 
       {loadingQ && <SectionLoading message={`Menyiapkan soal tingkat ${level}...`} />}

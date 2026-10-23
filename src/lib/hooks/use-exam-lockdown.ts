@@ -12,6 +12,7 @@ import { useEffect, useRef } from "react";
  *  - copy/cut/paste, right-click, text selection, printing and common
  *    shortcuts (Ctrl/Cmd + C, V, X, A, P, S, U, F, Esc, F11, F12) are blocked
  *  - closing/reloading the tab asks for confirmation
+ *  - the Back button/gesture can't leave the exam (`onBackBlocked` is told)
  *
  * A browser can never fully stop a determined student (another device is
  * always possible) - this removes the easy ways and makes every attempt to
@@ -34,10 +35,20 @@ export function exitExamFullscreen() {
 
 const BLOCKED_COMBOS = new Set(["c", "v", "x", "a", "p", "s", "u", "f"]);
 
-export function useExamLockdown(active: boolean, onViolation: (reason: string) => void) {
+// An overlay inside the exam (e.g. an enlarged picture) registers how to
+// close itself, so the phone's Back gesture closes it instead of being
+// treated as trying to leave the exam.
+let overlayCloser: (() => void) | null = null;
+export function setExamOverlayCloser(fn: (() => void) | null) {
+  overlayCloser = fn;
+}
+
+export function useExamLockdown(active: boolean, onViolation: (reason: string) => void, onBackBlocked?: () => void) {
   const fired = useRef(false);
   const cb = useRef(onViolation);
   cb.current = onViolation;
+  const backCb = useRef(onBackBlocked);
+  backCb.current = onBackBlocked;
 
   useEffect(() => {
     if (!active) { fired.current = false; return; }
@@ -76,6 +87,19 @@ export function useExamLockdown(active: boolean, onViolation: (reason: string) =
     const onBeforeUnload = (e: BeforeUnloadEvent) => { e.preventDefault(); e.returnValue = ""; };
     const onBeforePrint = () => violate("Mencetak halaman tidak diizinkan saat ujian.");
 
+    // Back button / back gesture: the exam is one page inside the app, so
+    // "back" used to leave it silently (and the attempt could be resumed
+    // later). Keep an extra history entry and put it back on every "back".
+    // history.state is copied so Next.js treats it as the same page.
+    const lockState = { ...(window.history.state ?? {}), __examLock: true };
+    window.history.pushState(lockState, "", window.location.href);
+    const onPopState = () => {
+      window.history.pushState(lockState, "", window.location.href);
+      if (overlayCloser) { overlayCloser(); return; } // back = close the picture
+      backCb.current?.();
+    };
+    window.addEventListener("popstate", onPopState);
+
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("blur", onBlur);
     document.addEventListener("fullscreenchange", onFullscreen);
@@ -94,6 +118,7 @@ export function useExamLockdown(active: boolean, onViolation: (reason: string) =
       for (const ev of ["copy", "cut", "paste", "contextmenu", "selectstart", "dragstart"]) document.removeEventListener(ev, block, true);
       window.removeEventListener("beforeunload", onBeforeUnload);
       window.removeEventListener("beforeprint", onBeforePrint);
+      window.removeEventListener("popstate", onPopState);
       document.body.style.userSelect = prevSelect;
     };
   }, [active]);
