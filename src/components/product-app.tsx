@@ -3860,8 +3860,7 @@ function QuestionDetailDialog({ q, onClose, onEdit }: { q: QuestionBankEntry; on
         <div className="flex-1 space-y-4 overflow-y-auto p-5">
           <p className="whitespace-pre-line text-[15px] font-medium leading-relaxed text-ink">{q.question}</p>
           {q.imageUrl && (
-            // eslint-disable-next-line @next/next/no-img-element
-            <img src={q.imageUrl} alt="Gambar soal" className="max-h-80 rounded-[8px] border border-border object-contain" />
+            <ZoomableImage src={q.imageUrl} alt="Gambar soal" className="max-h-80 rounded-[8px] border border-border object-contain" />
           )}
 
           {(type === "pg" || type === "pg_kompleks") && (
@@ -4400,6 +4399,9 @@ function TeacherAssessmentBuilder() {
       return next;
     });
     setAiGenerated(false);
+    // The AI list is cleared, so drop its questions from the selection too.
+    const oldAi = new Set(aiGeneratedQuestions.map(q => q.id));
+    setSelectedQuestions(prev => new Set([...prev].filter(x => !oldAi.has(x))));
     setAiGeneratedQuestions([]);
   }
 
@@ -4416,7 +4418,12 @@ function TeacherAssessmentBuilder() {
     if (target === 0) return;
 
     setAiGenerating(true);
-    if (!append) { setAiGeneratedQuestions([]); setSelectedQuestions(new Set()); }
+    // Regenerating replaces the AI questions only - bank picks stay selected.
+    if (!append) {
+      const oldAi = new Set(aiGeneratedQuestions.map(q => q.id));
+      setAiGeneratedQuestions([]);
+      setSelectedQuestions(prev => new Set([...prev].filter(id => !oldAi.has(id))));
+    }
 
     type Job = { mat: MaterialWithFile; count: number; segment: number; segments: number; type: QuestionType };
     const jobs: Job[] = [];
@@ -4517,7 +4524,7 @@ function TeacherAssessmentBuilder() {
 
     const finalList = generated.slice(0, formQuestionCount);
     setAiGeneratedQuestions(finalList);
-    setSelectedQuestions(new Set(finalList.map(q => q.id)));
+    setSelectedQuestions(prev => new Set([...prev, ...finalList.map(q => q.id)]));
     setAiProgress(null);
     setAiGenerating(false);
     setAiGenerated(true);
@@ -4671,6 +4678,19 @@ function TeacherAssessmentBuilder() {
 
       {step === 2 && (
         <div className="space-y-5">
+          {/* What is selected - counts BOTH tabs, all of it is saved */}
+          {selectedQuestions.size > 0 && (() => {
+            const fromAi = aiGeneratedQuestions.filter(q => selectedQuestions.has(q.id)).length;
+            const fromBank = bankQs.filter(q => selectedQuestions.has(q.id)).length;
+            return (
+              <div className="flex flex-wrap items-center gap-2 rounded-[10px] border border-primary/30 bg-primary-soft px-4 py-2.5 text-[12px] text-ink">
+                <CheckCircle2 className="h-4 w-4 text-primary" />
+                <span className="font-semibold">{selectedQuestions.size} soal dipilih</span>
+                <span className="text-ink-secondary">({[fromBank ? `${fromBank} dari Bank Soal` : "", fromAi ? `${fromAi} dari AI` : ""].filter(Boolean).join(" + ")}) · semua ikut tersimpan</span>
+                <button type="button" className="ml-auto text-[12px] font-semibold text-danger hover:underline" onClick={() => setSelectedQuestions(new Set())}>Kosongkan pilihan</button>
+              </div>
+            );
+          })()}
           {/* Source tabs */}
           <div className="flex gap-2">
             {([
@@ -7400,6 +7420,73 @@ function MatchingLines({ left, right, value, onChange }: {
   );
 }
 
+// Question picture that can be enlarged: tap to open a zoom view on top of
+// the page (same tab, so exam lockdown is unaffected). Zoom with the
+// buttons, mouse wheel or pinch; drag to move around when zoomed in.
+function ZoomableImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
+  const [open, setOpen] = useState(false);
+  const [scale, setScale] = useState(1);
+  const [pos, setPos] = useState({ x: 0, y: 0 });
+  const dragRef = React.useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+  const pinchRef = React.useRef<{ d: number; s: number } | null>(null);
+  const pointers = React.useRef(new Map<number, { x: number; y: number }>());
+  const zoomTo = (v: number) => { const n = Math.min(5, Math.max(1, Math.round(v * 100) / 100)); setScale(n); if (n === 1) setPos({ x: 0, y: 0 }); };
+  const close = () => { setOpen(false); setScale(1); setPos({ x: 0, y: 0 }); };
+  return (
+    <>
+      <button type="button" onClick={() => setOpen(true)} className="group relative mt-4 block max-w-full" aria-label={`Perbesar ${alt}`}>
+        {/* eslint-disable-next-line @next/next/no-img-element */}
+        <img src={src} alt={alt} draggable={false} className={className} />
+        <span className="absolute bottom-2 right-2 flex items-center gap-1 rounded-full bg-ink/70 px-2.5 py-1 text-[11px] font-semibold text-white">
+          <Search className="h-3 w-3" />Perbesar
+        </span>
+      </button>
+      {open && createPortal(
+        <div className="fixed inset-0 z-[200] flex flex-col bg-ink/90" role="dialog" aria-label="Gambar diperbesar">
+          <div className="flex items-center justify-end gap-2 p-3">
+            <button type="button" onClick={() => zoomTo(scale - 0.5)} className="h-9 w-9 rounded-full bg-white/15 text-[18px] font-bold text-white hover:bg-white/25" aria-label="Perkecil">−</button>
+            <span className="w-14 text-center text-[13px] font-semibold text-white">{Math.round(scale * 100)}%</span>
+            <button type="button" onClick={() => zoomTo(scale + 0.5)} className="h-9 w-9 rounded-full bg-white/15 text-[18px] font-bold text-white hover:bg-white/25" aria-label="Perbesar">+</button>
+            <button type="button" onClick={() => zoomTo(1)} className="h-9 rounded-full bg-white/15 px-3 text-[12px] font-semibold text-white hover:bg-white/25">Ukuran awal</button>
+            <button type="button" onClick={close} className="ml-2 flex h-9 items-center gap-1 rounded-full bg-white px-3 text-[12px] font-bold text-ink" aria-label="Tutup">
+              <X className="h-4 w-4" />Tutup
+            </button>
+          </div>
+          <div className="relative flex-1 overflow-hidden" style={{ touchAction: "none" }}
+            onClick={e => { if (e.target === e.currentTarget && scale === 1) close(); }}
+            onWheel={e => zoomTo(scale * (e.deltaY < 0 ? 1.15 : 1 / 1.15))}
+            onPointerDown={e => {
+              pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+              if (pointers.current.size === 2) {
+                const [a, b] = [...pointers.current.values()];
+                pinchRef.current = { d: Math.hypot(a.x - b.x, a.y - b.y), s: scale };
+              } else dragRef.current = { x: e.clientX, y: e.clientY, px: pos.x, py: pos.y };
+            }}
+            onPointerMove={e => {
+              if (!pointers.current.has(e.pointerId)) return;
+              pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+              if (pointers.current.size === 2 && pinchRef.current) {
+                const [a, b] = [...pointers.current.values()];
+                zoomTo(pinchRef.current.s * Math.hypot(a.x - b.x, a.y - b.y) / pinchRef.current.d);
+              } else if (dragRef.current && scale > 1) {
+                setPos({ x: dragRef.current.px + e.clientX - dragRef.current.x, y: dragRef.current.py + e.clientY - dragRef.current.y });
+              }
+            }}
+            onPointerUp={e => { pointers.current.delete(e.pointerId); if (pointers.current.size < 2) pinchRef.current = null; dragRef.current = null; }}
+            onPointerCancel={e => { pointers.current.delete(e.pointerId); pinchRef.current = null; dragRef.current = null; }}>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img src={src} alt={alt} draggable={false}
+              className="pointer-events-none absolute left-1/2 top-1/2 max-h-[85%] max-w-[92%] select-none object-contain"
+              style={{ transform: `translate(calc(-50% + ${pos.x}px), calc(-50% + ${pos.y}px)) scale(${scale})`, transition: dragRef.current || pinchRef.current ? "none" : "transform 120ms" }} />
+          </div>
+          <p className="pb-3 text-center text-[11px] text-white/70">Geser untuk melihat bagian lain saat diperbesar · ketuk Tutup untuk kembali ke soal</p>
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
 /** Answer area for one exam question, per question type. */
 function ExamAnswerInput({ q, value, onChange }: { q: ExamQuestion; value: string | undefined; onChange: (v: string) => void }) {
   const type = q.type ?? "pg";
@@ -7898,9 +7985,8 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
             </div>
             <p className="whitespace-pre-line text-[15px] sm:text-[16px] font-medium text-ink leading-relaxed">{currentQ.question}</p>
             {currentQ.imageUrl && (
-              // eslint-disable-next-line @next/next/no-img-element
-              <img src={currentQ.imageUrl} alt={`Gambar soal ${current + 1}`} draggable={false}
-                className="mt-4 max-h-80 w-auto max-w-full rounded-[8px] border border-border object-contain" />
+              <ZoomableImage src={currentQ.imageUrl} alt={`Gambar soal ${current + 1}`}
+                className="max-h-80 w-auto max-w-full rounded-[8px] border border-border object-contain" />
             )}
           </div>
 
@@ -8568,8 +8654,7 @@ function StudentReview() {
                     </div>
                     <p className="whitespace-pre-line text-[13px] font-medium text-ink mb-3">{q.question}</p>
                     {q.imageUrl && (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img src={q.imageUrl} alt="" className="mb-3 max-h-60 rounded-[8px] border border-border object-contain" />
+                      <div className="mb-3"><ZoomableImage src={q.imageUrl} alt={`Gambar soal ${idx + 1}`} className="max-h-60 rounded-[8px] border border-border object-contain" /></div>
                     )}
                     {q.type !== "pg" ? (
                       <div className="mb-3 grid grid-cols-1 gap-2 sm:grid-cols-2">
