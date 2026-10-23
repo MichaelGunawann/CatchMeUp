@@ -2345,6 +2345,11 @@ async function createAssessment(params: {
   /** Points per question, keyed by the id shown in the builder (default 1). */
   points?: Record<string, number>;
 }): Promise<{ id: string } | { error: string }> {
+  // An assessment without questions is useless to students ("tidak ada
+  // soal") - refuse before creating anything.
+  if (params.aiQuestions.length + params.bankQuestionIds.length === 0) {
+    return { error: "Belum ada soal yang dipilih untuk asesmen ini." };
+  }
   const base = {
     school_id: params.schoolId,
     class_id: params.classId,
@@ -2379,7 +2384,9 @@ async function createAssessment(params: {
     const v = params.points?.[id];
     return typeof v === "number" && v > 0 ? v : 1;
   };
-  if (params.questionSource === "ai" && params.aiQuestions.length > 0) {
+  // Both sources count: questions picked from the bank AND chosen AI ones
+  // (switching tabs in step 2 must not silently drop a selection).
+  if (params.aiQuestions.length > 0) {
     pointsList = params.aiQuestions.map(q => pointsOf(q.id));
     const rows = params.aiQuestions.map(q => ({
       school_id: params.schoolId,
@@ -2402,13 +2409,15 @@ async function createAssessment(params: {
       image_url: q.imageUrl ?? null,
     }));
     const { data: inserted, error: qError } = await supabase.from("questions").insert(rows).select("id");
-    if (qError) return { error: `Asesmen tersimpan, tetapi soal gagal disimpan: ${qError.message}` };
+    if (qError) {
+      await supabase.from("assessments").delete().eq("id", assessmentRow.id);
+      return { error: `Soal AI gagal disimpan: ${qError.message}` };
+    }
     questionIds = (inserted ?? []).map(r => r.id);
     await refreshBankAndReview(params.classId, params.subjectId);
-  } else {
-    questionIds = params.bankQuestionIds;
-    pointsList = params.bankQuestionIds.map(pointsOf);
   }
+  questionIds = [...questionIds, ...params.bankQuestionIds];
+  pointsList = [...pointsList, ...params.bankQuestionIds.map(pointsOf)];
 
   if (questionIds.length > 0) {
     const aqRows = questionIds.map((qid, i) => ({
@@ -2419,7 +2428,11 @@ async function createAssessment(params: {
       status: "approved" as const,
     }));
     const { error: linkError } = await supabase.from("assessment_questions").insert(aqRows);
-    if (linkError) return { error: `Asesmen tersimpan, tetapi soal gagal ditautkan: ${linkError.message}` };
+    if (linkError) {
+      // Don't leave a published assessment without questions behind.
+      await supabase.from("assessments").delete().eq("id", assessmentRow.id);
+      return { error: `Soal gagal ditautkan ke asesmen: ${linkError.message}` };
+    }
   }
 
   return { id: assessmentRow.id as string };
@@ -4343,8 +4356,15 @@ function TeacherAssessmentBuilder() {
     if (!teacher || saving) return;
     if (!step1Valid || !step2Valid || !step3Valid) return;
     setSaving(true);
-    const chosenAi = questionSource === "ai" ? aiGeneratedQuestions.filter(q => selectedQuestions.has(q.id)) : [];
-    const chosenBankIds = questionSource === "bank" ? bankQs.filter(q => selectedQuestions.has(q.id)).map(q => q.id) : [];
+    // Everything ticked counts, whichever tab is open now.
+    const chosenAi = aiGeneratedQuestions.filter(q => selectedQuestions.has(q.id));
+    const chosenBankIds = bankQs.filter(q => selectedQuestions.has(q.id)).map(q => q.id);
+    if (chosenAi.length + chosenBankIds.length !== selectedQuestions.size) {
+      setSaving(false);
+      setToast({ message: "Sebagian soal yang dipilih tidak ditemukan lagi (mungkin mapel di langkah 1 diganti). Pilih ulang soalnya di langkah 2.", tone: "danger" });
+      setStep(2);
+      return;
+    }
     const title = formTitle.trim();
     const result = await createAssessment({
       schoolId: teacher.schoolId, classId: formClassId, subjectId: formSubjectId, creatorId: teacher.profileId,
@@ -5257,7 +5277,11 @@ async function attachAssessmentStats(rows: SavedAssessment[]): Promise<SavedAsse
       ...r,
       participants: stat?.count ?? 0,
       avgScore: stat && stat.scored > 0 ? Math.round(stat.sum / stat.scored) : undefined,
-      status: (stat?.count ?? 0) > 0 ? "Selesai" : "Terjadwal",
+      // From the schedule (an open assessment nobody has submitted yet used
+      // to show "Terjadwal / belum dimulai").
+      status: r.openAt && Date.now() < parseDbTime(r.openAt) ? "Terjadwal"
+        : r.closeAt && Date.now() >= parseDbTime(r.closeAt) ? "Selesai"
+        : "Berlangsung",
     } as SavedAssessment;
   });
 }
@@ -5676,6 +5700,11 @@ function TeacherResults() {
               {detail.status === "Terjadwal" && (
                 <AlertPanel tone="primary" title="Asesmen belum dimulai">
                   Asesmen akan tersedia sesuai jadwal pada {detail.scheduledFor}.
+                </AlertPanel>
+              )}
+              {resultDetail && resultDetail.questions.length === 0 && (
+                <AlertPanel tone="danger" title="Asesmen ini tidak punya soal">
+                  Siswa akan melihat &quot;Tidak ada soal&quot;. Hapus asesmen ini lalu buat ulang dan pilih soalnya di langkah 2.
                 </AlertPanel>
               )}
 
