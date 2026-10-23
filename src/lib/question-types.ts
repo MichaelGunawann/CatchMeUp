@@ -220,3 +220,25 @@ export function seededOrder(n: number, seed: string): number[] {
   }
   return idx;
 }
+
+/** Types used in self-paced practice (auto-graded; essays need a teacher). */
+export const PRACTICE_TYPES: QuestionType[] = ["pg", "pg_kompleks", "benar_salah", "menjodohkan"];
+
+/**
+ * What a student sees for a question (no answer key). Matching's right
+ * column is shuffled with `seed` (answers keep the ORIGINAL indices).
+ */
+export function displayPayload(q: QuestionLike & { question: string }, seed: string, optionOrder?: (keys: string[]) => string[]) {
+  const type = questionTypeOf(q);
+  if (type === "benar_salah") return { type, displayOptions: [] as { key: string; text: string }[], statements: statementsOf(q.options) };
+  if (type === "menjodohkan") {
+    const { left, right } = matchingOf(q.options);
+    const order = seededOrder(right.length, seed);
+    return { type, displayOptions: [] as { key: string; text: string }[], matchLeft: left, matchRight: order.map(i => ({ index: i, text: right[i] })) };
+  }
+  if (type === "esai") return { type, displayOptions: [] as { key: string; text: string }[] };
+  const opts = letterOptions(q.options);
+  const keys = optionOrder ? optionOrder(opts.map(o => o.key)) : opts.map(o => o.key);
+  const textOf = Object.fromEntries(opts.map(o => [o.key, o.text]));
+  return { type, displayOptions: keys.map(k => ({ key: k, text: textOf[k] })) };
+}

@@ -1,3 +1,4 @@
+import { describeKey, gradeAnswer } from "@/lib/question-types";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { awardXpAndStreak, checkAndAwardAchievements } from "@/lib/gamification/award";
 
@@ -52,14 +53,25 @@ export async function POST(req: Request) {
 
     const { data: question } = await supabaseAdmin
       .from("questions")
-      .select("correct_answer, explanation")
+      .select("*")
       .eq("id", questionId)
       .single();
     if (!question) {
       return Response.json({ error: "Soal tidak ditemukan" }, { status: 404 });
     }
 
-    const isCorrect = answer === question.correct_answer;
+    // Any auto-graded format (PG, PG kompleks, Benar/Salah, menjodohkan);
+    // partial credit counts as "not yet correct" for streaks/XP.
+    const graded = gradeAnswer(question, answer.slice(0, 5000), 1);
+    const isCorrect = graded.isCorrect === true;
+    const feedback = {
+      isCorrect,
+      partial: !isCorrect && graded.earned > 0,
+      score: graded.earned, // 0..1
+      correctAnswer: question.correct_answer,
+      keyText: describeKey(question),
+      explanation: question.explanation,
+    };
 
     // Same question answered again within a few seconds = a repeated click
     // or network retry, not a new attempt: return the result without
@@ -72,7 +84,7 @@ export async function POST(req: Request) {
       .gte("submitted_at", new Date(Date.now() - 15_000).toISOString())
       .limit(1);
     if (recent && recent.length > 0) {
-      return Response.json({ isCorrect, correctAnswer: question.correct_answer, explanation: question.explanation, duplicate: true });
+      return Response.json({ ...feedback, duplicate: true });
     }
 
     const row = { student_id: student.id, question_id: questionId, is_correct: isCorrect };
@@ -86,11 +98,7 @@ export async function POST(req: Request) {
     await awardXpAndStreak(student.id, isCorrect ? XP_PER_CORRECT_PRACTICE : 0);
     await checkAndAwardAchievements(student.id, {});
 
-    return Response.json({
-      isCorrect,
-      correctAnswer: question.correct_answer,
-      explanation: question.explanation,
-    });
+    return Response.json(feedback);
   } catch (error) {
     console.error("Error submitting practice attempt:", error);
     return Response.json({ error: "Terjadi kesalahan pada server" }, { status: 500 });

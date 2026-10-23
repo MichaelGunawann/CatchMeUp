@@ -2,8 +2,9 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import Groq from "groq-sdk";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve } from "@/lib/retrieval";
-import { QUESTION_QUALITY_RULES, isSelfContained, parseQuestionsJson } from "@/lib/ai-questions";
-import { questionTypeOf } from "@/lib/question-types";
+import { QUESTION_QUALITY_RULES, isSelfContained, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type TypedQuestion } from "@/lib/ai-questions";
+import { PRACTICE_TYPES, displayPayload, questionTypeOf, type QuestionType } from "@/lib/question-types";
+import { loadTypeStats } from "@/lib/learning/type-stats";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -121,14 +122,22 @@ export async function POST(req: Request) {
       const st = topicStats.get(t.toLowerCase());
       return st && st.total > 0 ? st.correct / st.total : 0.5;
     };
+    // Which question FORMATS this student struggles with (PG kompleks,
+    // Benar/Salah, menjodohkan...) - practice leans toward the weak ones.
+    const typeStats = await loadTypeStats(student.id, subjectId);
+    const typeAcc = (t: QuestionType) => {
+      const st = typeStats.find(x => x.type === t);
+      return st && st.total >= 2 ? st.correct / st.total : null;
+    };
     const ranked = (candidates ?? [])
       // Older bank questions may still say "menurut slide 3..." - skip them.
-      // Practice is auto-graded single-answer only (PG kompleks, menjodohkan,
-      // esai etc. are for assessments).
-      .filter(q => !excluded.has(q.id) && isSelfContained(q) && questionTypeOf(q) === "pg")
+      // Practice is auto-graded: every format except essays.
+      .filter(q => !excluded.has(q.id) && isSelfContained(q) && PRACTICE_TYPES.includes(questionTypeOf(q)))
       .map(q => {
         const last = lastResult.get(q.id);
         let score = (1 - accuracy(q.topic)) * 2;          // weak topic -> higher
+        const ta = typeAcc(questionTypeOf(q));
+        score += ta === null ? 0.4 : (1 - ta) * 1.5;      // weak / untried format -> higher
         if (last === undefined) score += 0.6;            // never tried
         else if (last === true) score -= 0.8;            // already mastered
         else score += 0.3;                               // got it wrong before
@@ -167,6 +176,15 @@ export async function POST(req: Request) {
           : "";
         const grounding = groundingFor(retrieve(chunks, topic ?? subjectRow?.name ?? "", 7000));
 
+        // Format to generate: weighted toward the student's weakest (or not
+        // yet tried) format; plain PG stays the most common.
+        const weights = PRACTICE_TYPES.map(t => {
+          const ta = typeAcc(t);
+          return { t, w: (t === "pg" ? 0.6 : 0) + (ta === null ? 0.5 : 1 - ta) };
+        });
+        let roll = Math.random() * weights.reduce((a, b) => a + b.w, 0);
+        const genType = (weights.find(x => (roll -= x.w) < 0) ?? weights[0]).t;
+
         const buildPrompt = (groundingText: string) => `Buat ${shortfall} soal latihan pilihan ganda (A-D) bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
           topic ? ` topik "${topic}"` : ""
         } tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana dan jelas, sesuai tingkat materi.${groundingText}
@@ -189,18 +207,30 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
           // model's JSON is wrapped, slightly malformed or cut off.
           return parseQuestionsJson(completion.choices[0].message.content ?? "");
         };
-        let rawList = await ask(grounding);
+        // Non-PG formats use the typed prompt (same grounding + rules).
+        const askTyped = async (groundingText: string) => {
+          const completion = await getGroq().chat.completions.create({
+            model: "openai/gpt-oss-120b",
+            messages: [{ role: "user", content: `Buat soal latihan bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${topic ? ` topik "${topic}"` : ""}, tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana, sesuai tingkat materi.${groundingText}
+
+${typedFormatPrompt(genType, shortfall)}
+${QUESTION_QUALITY_RULES}
+Periksa ulang setiap kunci jawaban sebelum menulis.` }],
+            max_tokens: Math.min(8192, shortfall * 450 + 600),
+            temperature: 0.3,
+          });
+          return parseTypedQuestions(completion.choices[0].message.content ?? "", genType);
+        };
         const groundedOk = !!grounding;
-        if (rawList.length === 0 && grounding) rawList = await ask(groundingFor(retrieve(chunks, subjectRow?.name ?? "", 9000)));
-        const raw = rawList as Array<{
-          question: string;
-          options: Record<string, string>;
-          correctAnswer: string;
-          explanation: string;
-          topic: string;
-          sourceTitle?: string;
-          sourcePage?: number;
-        }>;
+        let raw: TypedQuestion[];
+        if (genType === "pg") {
+          let rawList = await ask(grounding);
+          if (rawList.length === 0 && grounding) rawList = await ask(groundingFor(retrieve(chunks, subjectRow?.name ?? "", 9000)));
+          raw = rawList.map(q => ({ questionType: "pg" as const, question: q.question, options: q.options, correctAnswer: q.correctAnswer, answerKey: null, explanation: q.explanation ?? "", topic: q.topic, sourceTitle: q.sourceTitle, sourcePage: q.sourcePage }));
+        } else {
+          raw = await askTyped(grounding);
+          if (raw.length === 0 && grounding) raw = await askTyped(groundingFor(retrieve(chunks, subjectRow?.name ?? "", 9000)));
+        }
 
         if (raw.length > 0) {
           const rows = raw.map((q) => ({
@@ -213,12 +243,9 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
             difficulty: (difficulty ?? "Sedang") as "Mudah" | "Sedang" | "Sulit",
             question: q.question,
             options: q.options,
-            correct_answer: (["A", "B", "C", "D", "E"].includes(q.correctAnswer) ? q.correctAnswer : "A") as
-              | "A"
-              | "B"
-              | "C"
-              | "D"
-              | "E",
+            correct_answer: q.questionType === "pg" ? (["A", "B", "C", "D", "E"].includes(q.correctAnswer ?? "") ? q.correctAnswer : "A") : null,
+            question_type: q.questionType,
+            answer_key: q.answerKey ?? null,
             explanation: q.explanation,
             status: "active" as const,
             // Only trust a cited source when the model was actually given the
@@ -226,9 +253,7 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
             source_title: (groundedOk && q.sourceTitle) || "Latihan AI",
             source_page: groundedOk && Number.isInteger(q.sourcePage) ? q.sourcePage : null,
           }));
-          const { data: inserted, error: insertError } = await supabaseAdmin.from("questions").insert(rows).select(
-            "id, question, options, topic, difficulty, correct_answer, explanation"
-          );
+          const { data: inserted, error: insertError } = await supabaseAdmin.from("questions").insert(rows).select("*");
           if (insertError) generationNote = `insert: ${insertError.message}`;
           generated = inserted ?? [];
         } else {
@@ -245,10 +270,13 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
       questions: all.map((q) => ({
         id: q.id,
         question: q.question,
-        options: q.options,
+        options: questionTypeOf(q) === "pg" ? q.options : {},
         topic: q.topic,
         difficulty: q.difficulty,
+        imageUrl: (q as { image_url?: string | null }).image_url ?? null,
+        ...displayPayload(q, `${student.id}:${q.id}`),
       })),
+      typeStats,
       // Why fewer questions than requested came back (shown to no one by
       // default; useful for diagnosing generation problems).
       ...(all.length < wantCount && generationNote ? { note: generationNote } : {}),

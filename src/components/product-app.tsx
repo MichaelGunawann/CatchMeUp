@@ -8139,7 +8139,22 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
 
 // ── Student Adaptive ──────────────────────────────────────────────────────────
 
-type PracticeQuestion = { id: string; question: string; options: { A: string; B: string; C: string; D: string; E?: string }; topic: string; difficulty: string };
+type PracticeQuestion = {
+  id: string; question: string; options: { A: string; B: string; C: string; D: string; E?: string }; topic: string; difficulty: string;
+  // any auto-graded TKA format (server sends the display payload, never the key)
+  type?: QuestionType; imageUrl?: string | null;
+  displayOptions?: { key: string; text: string }[]; statements?: string[];
+  matchLeft?: string[]; matchRight?: { index: number; text: string }[];
+};
+
+function practiceAsExamQuestion(q: PracticeQuestion): ExamQuestion {
+  return {
+    assessmentQuestionId: q.id, topic: q.topic, difficulty: q.difficulty, question: q.question, points: 1,
+    type: q.type ?? "pg", imageUrl: q.imageUrl ?? null,
+    displayOptions: q.displayOptions ?? (["A", "B", "C", "D", "E"] as const).filter(k => q.options?.[k]).map(k => ({ key: k, text: q.options[k] as string })),
+    statements: q.statements, matchLeft: q.matchLeft, matchRight: q.matchRight,
+  };
+}
 
 async function authedFetch(path: string, body: unknown) {
   const { data: { session } } = await supabase.auth.getSession();
@@ -8160,7 +8175,7 @@ type Level = typeof LEVELS[number];
 const ADAPTIVE_SESSION_LENGTH = 10;
 const ADAPTIVE_STREAK = 2;
 
-type AdaptiveResult = { q: PracticeQuestion; level: Level; answer: string; isCorrect: boolean; correctAnswer: string; explanation: string };
+type AdaptiveResult = { q: PracticeQuestion; level: Level; answer: string; isCorrect: boolean; partial?: boolean; correctAnswer: string; keyText?: string; explanation: string };
 
 function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId: string; startLevel: Level; topic?: string; onFinish: () => void }) {
   const [level, setLevel] = useState<Level>(startLevel);
@@ -8258,10 +8273,10 @@ function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId
     if (!currentQ || !selected || checking) return;
     setChecking(true);
     const r = await authedFetch("/api/student/practice/submit", { questionId: currentQ.id, answer: selected }) as
-      { isCorrect?: boolean; correctAnswer?: string; explanation?: string; error?: string } | null;
+      { isCorrect?: boolean; partial?: boolean; correctAnswer?: string | null; keyText?: string; explanation?: string; error?: string } | null;
     setChecking(false);
     if (!r || r.error || typeof r.isCorrect !== "boolean") { setLoadError(r?.error ?? "Jawaban gagal dikirim. Periksa internetmu lalu coba lagi."); return; }
-    const result: AdaptiveResult = { q: currentQ, level, answer: selected, isCorrect: r.isCorrect, correctAnswer: r.correctAnswer ?? "", explanation: r.explanation ?? "" };
+    const result: AdaptiveResult = { q: currentQ, level, answer: selected, isCorrect: r.isCorrect, partial: !!r.partial, correctAnswer: r.correctAnswer ?? "", keyText: r.keyText, explanation: r.explanation ?? "" };
     const all = [...results, result];
     setResults(all);
     setFeedback(result);
@@ -8311,6 +8326,17 @@ function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId
             </span>
           ))}
         </div>
+        {(() => {
+          const byType = new Map<QuestionType, { ok: number; n: number }>();
+          for (const r of results) { const t = r.q.type ?? "pg"; const c = byType.get(t) ?? { ok: 0, n: 0 }; c.n++; if (r.isCorrect) c.ok++; byType.set(t, c); }
+          return byType.size > 1 ? (
+            <div className="flex flex-wrap justify-center gap-2 text-[12px]">
+              {[...byType.entries()].map(([t, c]) => (
+                <span key={t} className="rounded-full border border-border bg-surface px-3 py-1 text-ink">{QUESTION_TYPE_LABEL[t]}: <b>{c.ok}/{c.n}</b></span>
+              ))}
+            </div>
+          ) : null;
+        })()}
         <Button variant="default" onClick={exitPractice}>Selesai</Button>
       </div>
     );
@@ -8361,9 +8387,18 @@ function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId
             <div className="flex items-center gap-2 mb-3">
               <Badge tone={currentQ.difficulty === "Mudah" ? "success" : currentQ.difficulty === "Sedang" ? "warning" : "danger"}>{currentQ.difficulty}</Badge>
               {currentQ.topic && <Badge tone="neutral">{currentQ.topic}</Badge>}
+              {currentQ.type && currentQ.type !== "pg" && <Badge tone="primary">{QUESTION_TYPE_LABEL[currentQ.type]}</Badge>}
             </div>
-            <p className="text-[15px] font-medium text-ink leading-relaxed">{currentQ.question}</p>
+            <p className="whitespace-pre-line text-[15px] font-medium text-ink leading-relaxed">{currentQ.question}</p>
+            {currentQ.imageUrl && (
+              <ZoomableImage src={currentQ.imageUrl} alt="Gambar soal" className="max-h-72 w-auto max-w-full rounded-[8px] border border-border object-contain" />
+            )}
           </div>
+          {(currentQ.type ?? "pg") !== "pg" ? (
+            <div className={cn(feedback && "pointer-events-none opacity-80")}>
+              <ExamAnswerInput q={practiceAsExamQuestion(currentQ)} value={selected ?? undefined} onChange={v => setSelected(v)} />
+            </div>
+          ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             {["A", "B", "C", "D", "E"].map((opt, i) => {
               if (!opts[i]) return null;
@@ -8384,12 +8419,18 @@ function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId
               );
             })}
           </div>
+          )}
 
           {feedback && (
-            <div className={cn("rounded-card border p-4", feedback.isCorrect ? "border-success/30 bg-success-light" : "border-danger/30 bg-danger-light")}>
-              <p className={cn("text-[14px] font-bold", feedback.isCorrect ? "text-success" : "text-danger")}>
-                {feedback.isCorrect ? "Benar! 🎉" : `Belum tepat. Jawaban yang benar: ${feedback.correctAnswer}`}
+            <div className={cn("rounded-card border p-4", feedback.isCorrect ? "border-success/30 bg-success-light" : feedback.partial ? "border-warning/30 bg-warning-light" : "border-danger/30 bg-danger-light")}>
+              <p className={cn("text-[14px] font-bold", feedback.isCorrect ? "text-success" : feedback.partial ? "text-warning" : "text-danger")}>
+                {feedback.isCorrect ? "Benar! 🎉"
+                  : (feedback.q.type ?? "pg") === "pg" ? `Belum tepat. Jawaban yang benar: ${feedback.correctAnswer}`
+                  : feedback.partial ? "Sebagian benar, hampir!" : "Belum tepat."}
               </p>
+              {(feedback.q.type ?? "pg") !== "pg" && !feedback.isCorrect && feedback.keyText && (
+                <p className="mt-1 whitespace-pre-line text-[13px] text-ink"><span className="font-semibold">Jawaban benar:</span> {feedback.keyText}</p>
+              )}
               {feedback.explanation && <p className="mt-1 text-[13px] leading-relaxed text-ink">{feedback.explanation}</p>}
               {levelChange === "up" && <p className="mt-2 text-[13px] font-semibold text-primary">Hebat, {ADAPTIVE_STREAK} benar berturut-turut! Soal berikutnya lebih sulit 💪</p>}
               {levelChange === "down" && (
@@ -8402,7 +8443,8 @@ function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId
 
           <div className="flex justify-end">
             {!feedback ? (
-              <Button variant="default" className="h-10 px-6" disabled={!selected || checking} onClick={check}>
+              <Button variant="default" className="h-10 px-6"
+                disabled={!currentQ || !examAnswered(practiceAsExamQuestion(currentQ), selected ?? undefined) || checking} onClick={check}>
                 {checking ? "Memeriksa..." : "Periksa Jawaban"}
               </Button>
             ) : (
@@ -8416,6 +8458,46 @@ function AdaptiveSession({ subjectId, startLevel, topic, onFinish }: { subjectId
     </div>
     </div>,
     document.body,
+  );
+}
+
+// How well the student does per question FORMAT (PG, PG kompleks, ...).
+// Practice already leans toward the weakest one; this shows it.
+function TypeStatsCard({ subjectId }: { subjectId: string }) {
+  const [stats, setStats] = useState<Array<{ type: QuestionType; label: string; correct: number; total: number; accuracy: number | null }> | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    supabase.auth.getSession().then(async ({ data }) => {
+      if (!data.session) return;
+      try {
+        const res = await fetch(`/api/student/practice/type-stats${subjectId ? `?subjectId=${subjectId}` : ""}`, { headers: { Authorization: `Bearer ${data.session.access_token}` } });
+        const body = await res.json() as { stats?: typeof stats };
+        if (!cancelled) setStats(body.stats ?? []);
+      } catch { if (!cancelled) setStats([]); }
+    });
+    return () => { cancelled = true; };
+  }, [subjectId]);
+  const shown = (stats ?? []).filter(s => s.type !== "esai" && s.total > 0);
+  if (!stats || shown.length === 0) return null;
+  const weakest = [...shown].filter(s => s.total >= 2).sort((a, b) => (a.accuracy ?? 0) - (b.accuracy ?? 0))[0];
+  return (
+    <div className="rounded-card border border-border bg-surface p-5 shadow-sm">
+      <h3 className="text-[14px] font-bold text-ink">Kemampuanmu per jenis soal</h3>
+      {weakest && (weakest.accuracy ?? 100) < 70 && (
+        <p className="mt-1 text-[12px] text-ink-secondary">Paling perlu dilatih: <span className="font-semibold text-warning">{weakest.label}</span> - latihan akan lebih sering memberi soal jenis ini.</p>
+      )}
+      <div className="mt-3 space-y-2">
+        {shown.map(s => (
+          <div key={s.type} className="flex items-center gap-3">
+            <span className="w-28 shrink-0 text-[12px] font-medium text-ink">{s.label}</span>
+            <div className="h-2 flex-1 overflow-hidden rounded-full bg-border/60">
+              <div className={cn("h-full rounded-full", (s.accuracy ?? 0) >= 70 ? "bg-success" : (s.accuracy ?? 0) >= 50 ? "bg-warning" : "bg-danger")} style={{ width: `${s.accuracy ?? 0}%` }} />
+            </div>
+            <span className="w-24 shrink-0 text-right text-[11px] text-ink-secondary">{s.accuracy}% · {s.correct}/{s.total}</span>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -8500,6 +8582,7 @@ function StudentAdaptive() {
     <div className="space-y-6">
       <PageHeader eyebrow="Latihan" title="Latihan Soal"
         description="Pilih mata pelajaran, lalu mulai latihan. Boleh diulang sepuasnya!" />
+      <TypeStatsCard subjectId={selectedSubjectId} />
 
       {subjects === null && <SectionLoading message="Memuat mata pelajaran..." />}
       {subjects !== null && subjects.length === 0 && (
