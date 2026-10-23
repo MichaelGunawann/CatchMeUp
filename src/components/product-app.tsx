@@ -133,14 +133,40 @@ import {
 // SHARED LOCAL UTILITIES
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// Whole-number field that can be typed freely (the box may be empty or out
+// of range while typing); the value is clamped to [min, max] on blur.
+function NumberInput({ value, onChange, min, max, className, ariaLabel }: {
+  value: number; onChange: (v: number) => void; min: number; max: number; className?: string; ariaLabel?: string;
+}) {
+  const [text, setText] = useState(String(value));
+  const focused = React.useRef(false);
+  useEffect(() => { if (!focused.current) setText(String(value)); }, [value]);
+  return (
+    <input type="text" inputMode="numeric" aria-label={ariaLabel} value={text}
+      onFocus={e => { focused.current = true; e.target.select(); }}
+      onChange={e => {
+        const t = e.target.value.replace(/[^0-9]/g, "").slice(0, 4);
+        setText(t);
+        const n = Number(t);
+        if (t !== "" && n >= min && n <= max) onChange(n);
+      }}
+      onBlur={() => {
+        focused.current = false;
+        const n = Math.min(max, Math.max(min, Number(text) || min));
+        setText(String(n));
+        onChange(n);
+      }}
+      className={className} />
+  );
+}
+
 // Points for one question in the assessment builder (clicks don't toggle the row).
 function PointsInput({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   return (
     <label onClick={e => e.stopPropagation()} className="inline-flex items-center gap-1 rounded-full border border-primary/30 bg-surface px-2 py-0.5 text-[11px] font-semibold text-primary">
       Poin
-      <input type="number" min={1} max={100} step={1} value={value}
-        onChange={e => onChange(Math.min(100, Math.max(1, Math.round(Number(e.target.value) || 1))))}
-        className="w-12 bg-transparent text-right text-[12px] text-ink focus:outline-none" />
+      <NumberInput value={value} onChange={onChange} min={1} max={100} ariaLabel="Poin soal"
+        className="w-10 bg-transparent text-right text-[12px] text-ink focus:outline-none" />
     </label>
   );
 }
@@ -3169,8 +3195,8 @@ function TeacherMaterials() {
               {QUESTION_TYPES.map(t => (
                 <label key={t} className="flex items-center justify-between gap-3 rounded-[8px] border border-border bg-background px-3 py-2">
                   <span className="text-[13px] font-medium text-ink">{QUESTION_TYPE_LABEL[t]}</span>
-                  <input type="number" min={0} max={10} value={processCounts[t] ?? 0}
-                    onChange={e => setProcessCounts(p => ({ ...p, [t]: Math.min(10, Math.max(0, Math.round(Number(e.target.value) || 0))) }))}
+                  <NumberInput value={processCounts[t] ?? 0} min={0} max={10} ariaLabel={`Jumlah soal ${QUESTION_TYPE_LABEL[t]}`}
+                    onChange={v => setProcessCounts(p => ({ ...p, [t]: v }))}
                     className="w-16 rounded-[6px] border border-border bg-surface px-2 py-1 text-right text-[13px] text-ink focus:border-primary focus:outline-none" />
                 </label>
               ))}
@@ -4144,6 +4170,7 @@ function TeacherAssessmentBuilder() {
   const [aiTypeCounts, setAiTypeCounts] = useState<Record<Exclude<QuestionType, "pg">, number>>({ pg_kompleks: 0, benar_salah: 0, menjodohkan: 0, esai: 0 });
   const aiOtherCount = Object.values(aiTypeCounts).reduce((a, b) => a + b, 0);
   const aiPgCount = Math.max(0, formQuestionCount - aiOtherCount);
+  const [showAiTypes, setShowAiTypes] = useState(false);
   // Editing an AI-made TKA question (not saved yet - edits the list in memory).
   const [aiTypedEdit, setAiTypedEdit] = useState<(typeof questionBank)[number] | null>(null);
   const [aiGenerated, setAiGenerated] = useState(false);
@@ -4643,34 +4670,11 @@ function TeacherAssessmentBuilder() {
                   );
                 })}
               </div>
-              <div className="border-t border-border px-5 py-3.5">
-                <p className="mb-2 text-[11px] font-bold uppercase tracking-wide text-ink-tertiary">Jenis soal yang dibuat AI</p>
-                <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-                  <div className="rounded-[8px] border border-border bg-background px-3 py-2">
-                    <div className="text-[11px] font-semibold text-ink-secondary">Pilihan Ganda</div>
-                    <div className="text-[16px] font-bold text-ink">{aiPgCount}</div>
-                    <div className="text-[10px] text-ink-tertiary">sisa dari {formQuestionCount}</div>
-                  </div>
-                  {(Object.keys(aiTypeCounts) as Array<keyof typeof aiTypeCounts>).map(t => (
-                    <label key={t} className="rounded-[8px] border border-border bg-background px-3 py-2">
-                      <div className="text-[11px] font-semibold text-ink-secondary">{QUESTION_TYPE_LABEL[t]}</div>
-                      <input type="number" min={0} max={formQuestionCount} value={aiTypeCounts[t]}
-                        onChange={e => {
-                          const v = Math.max(0, Math.round(Number(e.target.value) || 0));
-                          const others = aiOtherCount - aiTypeCounts[t];
-                          setAiTypeCounts(p => ({ ...p, [t]: Math.min(v, Math.max(0, formQuestionCount - others)) }));
-                        }}
-                        className="w-full bg-transparent text-[16px] font-bold text-ink focus:outline-none" />
-                    </label>
-                  ))}
-                </div>
-                <p className="mt-1.5 text-[10px] text-ink-tertiary">Total mengikuti jumlah soal di langkah 1 ({formQuestionCount}). Soal tipe lain bisa dicek di daftar hasil sebelum dipakai.</p>
-              </div>
               <div className="border-t border-border px-5 py-3.5 flex items-center justify-between">
                 <span className="text-[11px] text-ink-secondary">
                   {selectedMaterials.size === 0
                     ? "Pilih minimal 1 materi untuk generate soal"
-                    : `${selectedMaterials.size} materi dipilih · akan generate ${formQuestionCount} soal`}
+                    : `${selectedMaterials.size} materi dipilih · ${formQuestionCount} soal`}
                 </span>
                 <div className="flex items-center gap-2">
                   {aiGenerated && !aiGenerating && aiGeneratedQuestions.length > 0 && aiGeneratedQuestions.length < formQuestionCount && (
@@ -4680,7 +4684,7 @@ function TeacherAssessmentBuilder() {
                   )}
                   <Button variant="default" className="h-8 text-[12px]"
                     disabled={selectedMaterials.size === 0 || aiGenerating}
-                    onClick={() => generateAI(false)}>
+                    onClick={() => setShowAiTypes(true)}>
                     {aiGenerating ? (
                       <><span className="h-3 w-3 rounded-full border-2 border-white border-t-transparent animate-spin mr-1.5" />
                         {aiProgress ? `Membuat soal… ${aiGeneratedQuestions.length}/${formQuestionCount}` : "Membuat Soal..."}</>
@@ -4977,6 +4981,42 @@ function TeacherAssessmentBuilder() {
                   <Button variant="outline" className="h-8 text-[12px]" onClick={() => { setShowAddQuestion(false); setNewQ({ ...EMPTY_MANUAL_Q }); newQValidation.reset(); }}>Batal</Button>
                   <Button variant="default" className="h-8 text-[12px]" onClick={() => { if (!newQValidation.validate() || manualStructureError(newQ)) return; setShowAddQuestion(false); setConfirmAddToBank(true); }}>
                     Simpan ke Bank Soal
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showAiTypes && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+              <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setShowAiTypes(false)} />
+              <div className="relative w-full max-w-lg rounded-card border border-border bg-surface p-6 shadow-xl">
+                <h2 className="text-[16px] font-bold text-ink">Jenis soal yang dibuat AI</h2>
+                <p className="mt-1 text-[12px] text-ink-secondary">
+                  {formQuestionCount} soal dari {selectedMaterials.size} materi. Isi jumlah untuk tiap jenis; sisanya dibuat sebagai Pilihan Ganda.
+                </p>
+                <div className="mt-4 space-y-2">
+                  <div className="flex items-center justify-between rounded-[8px] border border-border bg-background px-3 py-2">
+                    <span className="text-[13px] font-medium text-ink">Pilihan Ganda <span className="text-[11px] text-ink-tertiary">(otomatis)</span></span>
+                    <span className="w-16 text-right text-[14px] font-bold text-ink">{aiPgCount}</span>
+                  </div>
+                  {(Object.keys(aiTypeCounts) as Array<keyof typeof aiTypeCounts>).map(t => {
+                    const others = aiOtherCount - aiTypeCounts[t];
+                    return (
+                      <label key={t} className="flex items-center justify-between gap-3 rounded-[8px] border border-border bg-background px-3 py-2">
+                        <span className="text-[13px] font-medium text-ink">{QUESTION_TYPE_LABEL[t]}</span>
+                        <NumberInput value={aiTypeCounts[t]} min={0} max={Math.max(0, formQuestionCount - others)} ariaLabel={`Jumlah soal ${QUESTION_TYPE_LABEL[t]}`}
+                          onChange={v => setAiTypeCounts(p => ({ ...p, [t]: v }))}
+                          className="w-16 rounded-[6px] border border-border bg-surface px-2 py-1 text-right text-[13px] text-ink focus:border-primary focus:outline-none" />
+                      </label>
+                    );
+                  })}
+                </div>
+                <p className="mt-2 text-[11px] text-ink-tertiary">Total {formQuestionCount} soal (ubah jumlahnya di langkah 1). Semua soal bisa dicek dan diedit setelah dibuat.</p>
+                <div className="mt-5 flex justify-end gap-2">
+                  <Button variant="outline" size="sm" onClick={() => setShowAiTypes(false)}>Batal</Button>
+                  <Button variant="default" size="sm" onClick={() => { setShowAiTypes(false); generateAI(false); }}>
+                    <Sparkles className="mr-1.5 h-3.5 w-3.5" />Buat {formQuestionCount} Soal
                   </Button>
                 </div>
               </div>
