@@ -6,6 +6,7 @@ import Link from "next/link";
 import { getCurrentSession, signInWithPassword, signOut } from "@/lib/auth/session";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { AuthShell, AuthFieldLabel } from "@/components/auth-shell";
 import { AlertPanel } from "@/components/product-primitives";
 
@@ -111,9 +112,8 @@ export default function LoginPage() {
           <AuthFieldLabel htmlFor="password" required>
             Kata Sandi
           </AuthFieldLabel>
-          <Input
+          <PasswordInput
             id="password"
-            type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="••••••••"

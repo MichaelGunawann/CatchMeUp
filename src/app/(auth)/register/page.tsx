@@ -5,6 +5,7 @@ import Link from "next/link";
 import { GraduationCap, School as SchoolIcon, UsersRound } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { PasswordInput } from "@/components/ui/password-input";
 import { SchoolCombobox } from "@/components/school-combobox";
 import { AuthShell, AuthFieldLabel } from "@/components/auth-shell";
 import { AlertPanel } from "@/components/product-primitives";
@@ -335,9 +336,8 @@ export default function RegisterPage() {
           <AuthFieldLabel htmlFor="password" required>
             Kata Sandi
           </AuthFieldLabel>
-          <Input
+          <PasswordInput
             id="password"
-            type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
             placeholder="••••••••"
@@ -350,9 +350,8 @@ export default function RegisterPage() {
           <AuthFieldLabel htmlFor="confirmPassword" required>
             Konfirmasi Kata Sandi
           </AuthFieldLabel>
-          <Input
+          <PasswordInput
             id="confirmPassword"
-            type="password"
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
             placeholder="••••••••"
