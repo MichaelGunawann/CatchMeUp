@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { getCurrentSession, signInWithPassword } from "@/lib/auth/session";
+import { getCurrentSession, signInWithPassword, signOut } from "@/lib/auth/session";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { AuthShell, AuthFieldLabel } from "@/components/auth-shell";
@@ -16,20 +16,21 @@ export default function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   // The form renders immediately - no blocking "Memeriksa sesi..." screen.
-  // An already signed-in visitor is redirected in the background using the
-  // locally stored session (no network round-trip); /dashboard does the
-  // authoritative profile check and role routing.
+  // Someone still signed in on this device is NOT redirected silently any
+  // more (on shared school computers that made it impossible to switch from
+  // a student to a teacher account): they choose to continue or switch.
+  const [signedInAs, setSignedInAs] = useState<string | null>(null);
   useEffect(() => {
     let cancelled = false;
     getCurrentSession()
       .then((session) => {
-        if (!cancelled && session) router.replace("/dashboard");
+        if (!cancelled && session) setSignedInAs(session.user?.email ?? "akun lain");
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [router]);
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -37,14 +38,20 @@ export default function LoginPage() {
     setLoading(true);
 
     try {
-      const session = await signInWithPassword(email, password);
+      // Switching account: end the previous session first.
+      if (signedInAs) { await signOut().catch(() => {}); setSignedInAs(null); }
+      const session = await signInWithPassword(email.trim().toLowerCase(), password);
       if (session) {
         router.replace("/dashboard");
       } else {
         setError("Email atau kata sandi salah");
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Gagal masuk. Silakan coba lagi.");
+      const msg = err instanceof Error ? err.message : "";
+      setError(/invalid login credentials/i.test(msg) ? "Email atau kata sandi salah"
+        : /email not confirmed/i.test(msg) ? "Email belum dikonfirmasi. Hubungi admin sekolah."
+        : /fetch|network/i.test(msg) ? "Tidak bisa terhubung ke server. Periksa koneksi internet."
+        : msg || "Gagal masuk. Silakan coba lagi.");
     } finally {
       setLoading(false);
     }
@@ -63,6 +70,18 @@ export default function LoginPage() {
         </p>
       }
     >
+      {signedInAs && (
+        <div className="mb-4 rounded-[10px] border border-primary/30 bg-primary-soft p-3 text-[13px] text-ink">
+          Kamu masih masuk sebagai <span className="font-semibold">{signedInAs}</span>.
+          <div className="mt-2 flex flex-wrap gap-2">
+            <Button type="button" size="sm" onClick={() => router.replace("/dashboard")}>Lanjut ke dasbor</Button>
+            <Button type="button" size="sm" variant="outline"
+              onClick={async () => { await signOut().catch(() => {}); setSignedInAs(null); }}>
+              Keluar & masuk akun lain
+            </Button>
+          </div>
+        </div>
+      )}
       {error && (
         <div className="mb-4">
           <AlertPanel tone="danger" title="Tidak dapat masuk">
