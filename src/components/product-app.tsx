@@ -1442,6 +1442,8 @@ function draftToQuestionFields(q: typeof EMPTY_MANUAL_Q) {
     const extras = rows.filter(p => p.distractor).map(p => p.right.trim()).filter(Boolean);
     options = { left: pairs.map(p => p.left.trim()), right: [...pairs.map(p => p.right.trim()), ...extras] };
     answerKey = pairs.map((_, i) => i);
+  } else if (type === "isian") {
+    answerKey = { accepted: q.accepted.split(/[;\n|]/).map(x => x.trim()).filter(Boolean) };
   } else if (type === "esai") {
     const keywords = q.keywords.split(/[,;\n]/).map(k => k.trim()).filter(Boolean);
     answerKey = q.rubric.trim() || keywords.length ? { ...(q.rubric.trim() ? { rubric: q.rubric.trim() } : {}), ...(keywords.length ? { keywords } : {}) } : null;
@@ -1490,6 +1492,8 @@ function questionToDraft(q: {
       ...left.map((l, i) => ({ left: l, right: right[key[i]] ?? "" })),
       ...right.filter((_, i) => !used.has(i)).map(r => ({ left: "", right: r, distractor: true })),
     ]);
+  } else if (type === "isian") {
+    draft.accepted = ((q.answer_key as { accepted?: string[] } | null)?.accepted ?? []).join("; ");
   } else if (type === "esai") {
     draft.rubric = (q.answer_key as { rubric?: string } | null)?.rubric ?? "";
     draft.keywords = ((q.answer_key as { keywords?: string[] } | null)?.keywords ?? []).join(", ");
@@ -1573,6 +1577,8 @@ function manualStructureError(q: typeof EMPTY_MANUAL_Q): string | null {
   const pts = Number(q.points);
   if (!Number.isFinite(pts) || pts < 1 || pts > 100) return "Skor soal harus antara 1 dan 100.";
   switch (q.type) {
+    case "isian":
+      return q.accepted.split(/[;\n|]/).some(x => x.trim()) ? null : "Isi jawaban yang benar.";
     case "pg":
       return ["A", "B", "C", "D", "E"].includes(q.correct) ? null : "Kunci jawaban wajib diisi.";
     case "pg_kompleks": {
@@ -1832,6 +1838,13 @@ function ManualQuestionFields({ value, onChange, errorFor, attempted, topicOptio
             </div>
             <p className="text-[11px] text-ink-tertiary">Pengecoh = jawaban kanan tanpa pasangan di kiri. Urutan kolom kanan diacak otomatis untuk setiap siswa.</p>
           </div>
+        </FormField>
+      )}
+
+      {type === "isian" && (
+        <FormField label="Jawaban yang benar" required hint="Pisahkan beberapa jawaban yang sama-sama benar dengan titik koma, misal: 5040; 5.040. Angka dibandingkan nilainya (5.040 = 5040 = 5040 cara), huruf besar/kecil diabaikan.">
+          <input type="text" placeholder="contoh: 5040" value={value.accepted}
+            onChange={e => set("accepted", e.target.value)} className={fieldClass(!!(attempted && !value.accepted.trim()))} />
         </FormField>
       )}
 
@@ -3687,7 +3700,7 @@ const ANSWER_OPTIONS: SelectOption[] = ["A", "B", "C", "D"].map(o => ({ value: o
 const EMPTY_MANUAL_Q = {
   type: "pg", text: "", optA: "", optB: "", optC: "", optD: "", optE: "", correct: "", complex: "",
   // JSON-encoded drafts for Benar/Salah and Menjodohkan (keeps the form flat for useRequiredFields)
-  statements: "", pairs: "", rubric: "", keywords: "",
+  statements: "", pairs: "", rubric: "", keywords: "", accepted: "",
   difficulty: "Sedang", topic: "", explanation: "", imageUrl: "", points: "1",
 };
 
@@ -3961,8 +3974,10 @@ function QuestionDetailDialog({ q, onClose, onEdit }: { q: QuestionBankEntry; on
             </div>
           )}
 
-          {type === "esai" && (
-            <div className="rounded-[8px] border border-border bg-background p-3 text-[13px] text-ink">{describeKey(raw)}</div>
+          {(type === "esai" || type === "isian") && (
+            <div className="rounded-[8px] border border-border bg-background p-3 text-[13px] text-ink">
+              {type === "isian" && <span className="font-semibold text-success">Jawaban benar: </span>}{describeKey(raw)}
+            </div>
           )}
 
           {q.explanation && (
@@ -4289,7 +4304,7 @@ function TeacherAssessmentBuilder() {
   const [selectedMaterials, setSelectedMaterials] = useState<Set<string>>(new Set());
   const [aiGenerating, setAiGenerating] = useState(false);
   // How many of each TKA type the AI should make; the rest are plain PG.
-  const [aiTypeCounts, setAiTypeCounts] = useState<Record<Exclude<QuestionType, "pg">, number>>({ pg_kompleks: 0, benar_salah: 0, menjodohkan: 0, esai: 0 });
+  const [aiTypeCounts, setAiTypeCounts] = useState<Record<Exclude<QuestionType, "pg">, number>>({ pg_kompleks: 0, benar_salah: 0, menjodohkan: 0, isian: 0, esai: 0 });
   const aiOtherCount = Object.values(aiTypeCounts).reduce((a, b) => a + b, 0);
   const aiPgCount = Math.max(0, formQuestionCount - aiOtherCount);
   const [showAiTypes, setShowAiTypes] = useState(false);
@@ -5603,6 +5618,12 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
   const [fresh, setFresh] = useState<Record<string, { points: number; reason: string }>>({});
   const [keyIssues, setKeyIssues] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState<{ text: string; tone: "success" | "danger" } | null>(null);
+  const [view, setView] = useState<"soal" | "siswa">("soal");
+  const [qFilter, setQFilter] = useState("all");
+  const [stFilter, setStFilter] = useState("all");
+  const [onlyPending, setOnlyPending] = useState(false);
+  const [keyDraft, setKeyDraft] = useState<Record<string, string>>({});
+  const [convertToIsian, setConvertToIsian] = useState<Record<string, boolean>>({});
 
   const suggestionOf = (r: ResultStudentRow["results"][string]) =>
     fresh[r.qaId] ?? (r.aiPoints != null ? { points: r.aiPoints, reason: r.aiReason ?? "" } : null);
@@ -5659,6 +5680,71 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
     onGraded();
   }
 
+  // One student's answer to one essay question, with AI suggestion + grading.
+  function renderAnswer(q: ResultQuestionRow, st: ResultStudentRow, r: ResultStudentRow["results"][string], title: string) {
+                const d = drafts[r.qaId] ?? { points: r.isCorrect === null ? "" : String(r.earned), feedback: r.feedback ?? "" };
+                const sug = suggestionOf(r);
+                const isChecking = checking.has(r.qaId);
+                return (
+                  <div key={r.qaId} className={cn("rounded-[8px] border bg-surface p-3", selected.has(r.qaId) ? "border-primary/40" : "border-border")}>
+                    <div className="mb-1 flex flex-wrap items-center gap-2">
+                      <input type="checkbox" className="h-4 w-4 accent-primary" checked={selected.has(r.qaId)} aria-label={`Pilih jawaban ${st.name}`}
+                        onChange={() => setSelected(prev => { const n = new Set(prev); if (n.has(r.qaId)) n.delete(r.qaId); else n.add(r.qaId); return n; })} />
+                      <span className="text-[12px] font-semibold text-ink">{title}</span>
+                      {r.isCorrect === null ? <Badge tone="warning">Belum dinilai</Badge> : <Badge tone="success">{r.earned}/{q.points} poin</Badge>}
+                      <Button variant="outline" size="sm" className="ml-auto" disabled={isChecking} onClick={() => aiCheck([r.qaId])}>
+                        <Sparkles className="mr-1.5 h-3.5 w-3.5" />{isChecking ? "AI mengecek..." : sug ? "AI cek ulang" : "AI cek"}
+                      </Button>
+                    </div>
+                    <p className="whitespace-pre-line rounded-[6px] bg-background p-2.5 text-[12px] text-ink">{st.answers[q.assessmentQuestionId]}</p>
+                    {sug && (
+                      <div className="mt-2 flex flex-wrap items-start gap-2 rounded-[6px] border border-primary/20 bg-primary-soft p-2.5">
+                        <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                        <p className="flex-1 text-[12px] text-ink"><span className="font-semibold">Usulan AI: {sug.points}/{q.points}</span>{sug.reason ? ` — ${sug.reason}` : ""}</p>
+                        <button type="button" className="text-[11px] font-semibold text-primary hover:underline"
+                          onClick={() => setDrafts(p => ({ ...p, [r.qaId]: { ...d, points: String(sug.points) } }))}>
+                          Pakai nilai ini
+                        </button>
+                      </div>
+                    )}
+                    <div className="mt-2 flex flex-wrap items-center gap-2">
+                      <label className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary">
+                        Nilai
+                        <input type="number" min={0} max={q.points} step={0.5} value={d.points}
+                          onChange={e => setDrafts(p => ({ ...p, [r.qaId]: { ...d, points: e.target.value } }))}
+                          className="w-20 rounded-[6px] border border-border bg-background px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
+                        / {q.points}
+                      </label>
+                      <input type="text" placeholder="Catatan untuk siswa (opsional)" value={d.feedback}
+                        onChange={e => setDrafts(p => ({ ...p, [r.qaId]: { ...d, feedback: e.target.value } }))}
+                        className="min-w-[180px] flex-1 rounded-[6px] border border-border bg-background px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
+                      <Button variant="default" size="sm" disabled={saving === r.qaId} onClick={() => save(r.qaId, q.points)}>
+                        {saving === r.qaId ? "Menyimpan..." : "Simpan"}
+                      </Button>
+                    </div>
+                  </div>
+    );
+  }
+
+  async function gradeByKey(q: ResultQuestionRow) {
+    const accepted = (keyDraft[q.assessmentQuestionId] ?? "").split(/[;\n|]/).map(x => x.trim()).filter(Boolean);
+    if (!accepted.length) { setMsg({ text: "Isi jawaban yang benar dulu, misal 5040.", tone: "danger" }); return; }
+    setSaving(`key:${q.assessmentQuestionId}`); setMsg(null);
+    const res = await apiPost<{ graded?: number; right?: number; converted?: boolean; convertError?: string | null }>("/api/teacher/grade-by-key",
+      { assessmentQuestionId: q.assessmentQuestionId, accepted, convert: convertToIsian[q.assessmentQuestionId] ?? true });
+    setSaving(null);
+    if (res.error) { setMsg({ text: `Gagal: ${res.error}`, tone: "danger" }); return; }
+    setMsg({ text: `${res.graded} jawaban dinilai otomatis (${res.right} benar).${res.converted ? " Soal ini sekarang Isian Singkat - berikutnya dinilai otomatis." : ""}${res.convertError ? ` (${res.convertError})` : ""}`, tone: "success" });
+    onGraded();
+  }
+
+  const students = detail.studentRows.filter(st => essays.some(q => st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]));
+  const shownEssays = qFilter === "all" ? essays : essays.filter(q => q.assessmentQuestionId === qFilter);
+  const keep = (st: ResultStudentRow, q: ResultQuestionRow) => {
+    const r = st.results[q.assessmentQuestionId];
+    return !!st.answers[q.assessmentQuestionId] && !!r && (stFilter === "all" || st.studentId === stFilter) && (!onlyPending || r.isCorrect === null);
+  };
+
   return (
     <div className="space-y-5">
       <p className="text-[12px] text-ink-secondary">
@@ -5667,10 +5753,58 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
         kalau keduanya kosong, AI memakai materi kelas. Usulan AI baru berlaku setelah kamu menyimpannya.
       </p>
       {msg && <p className={cn("text-[12px] font-medium", msg.tone === "success" ? "text-success" : "text-danger")}>{msg.text}</p>}
-      {essays.map((q) => {
+
+      {/* Filters: by question number or by student */}
+      <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 rounded-[10px] border border-border bg-surface/95 p-3 backdrop-blur">
+        <div className="flex rounded-full border border-border p-0.5">
+          {(["soal", "siswa"] as const).map(v => (
+            <button key={v} type="button" onClick={() => setView(v)}
+              className={cn("rounded-full px-3 py-1 text-[12px] font-semibold", view === v ? "bg-primary text-white" : "text-ink-secondary")}>
+              {v === "soal" ? "Per soal" : "Per siswa"}
+            </button>
+          ))}
+        </div>
+        <div className="w-48">
+          <SelectField value={qFilter} onChange={setQFilter} options={[{ value: "all", label: "Semua soal" }, ...essays.map(q => {
+            const pending = detail.studentRows.filter(st => st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]?.isCorrect === null).length;
+            return { value: q.assessmentQuestionId, label: `Soal ${detail.questions.indexOf(q) + 1}`, description: pending ? `${pending} belum dinilai` : "Selesai dinilai" };
+          })]} />
+        </div>
+        <div className="w-56">
+          <SelectField value={stFilter} onChange={setStFilter} options={[{ value: "all", label: "Semua siswa" }, ...students.map(st => {
+            const pending = essays.filter(q => st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]?.isCorrect === null).length;
+            return { value: st.studentId, label: st.name, description: pending ? `${pending} esai belum dinilai` : "Selesai dinilai" };
+          })]} />
+        </div>
+        <label className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
+          <input type="checkbox" className="h-4 w-4 accent-primary" checked={onlyPending} onChange={e => setOnlyPending(e.target.checked)} />
+          Hanya yang belum dinilai
+        </label>
+      </div>
+
+      {view === "siswa" ? (
+        <div className="space-y-4">
+          {students.filter(st => shownEssays.some(q => keep(st, q))).map(st => (
+            <div key={st.studentId} className="rounded-[10px] border border-border bg-background p-4">
+              <p className="mb-3 text-[14px] font-bold text-ink">{st.name}</p>
+              <div className="space-y-3">
+                {shownEssays.filter(q => keep(st, q)).map(q => (
+                  <div key={q.assessmentQuestionId}>
+                    <p className="mb-1 text-[11px] text-ink-secondary"><b className="text-ink">Soal {detail.questions.indexOf(q) + 1}</b> · {q.question.slice(0, 160)}{q.question.length > 160 ? "…" : ""}</p>
+                    {renderAnswer(q, st, st.results[q.assessmentQuestionId], `Soal ${detail.questions.indexOf(q) + 1} · maks. ${q.points}`)}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          {students.every(st => !shownEssays.some(q => keep(st, q))) && <p className="py-6 text-center text-[13px] text-ink-tertiary">Tidak ada jawaban yang cocok dengan filter.</p>}
+        </div>
+      ) : (
+      <>
+      {shownEssays.map((q) => {
         const idx = detail.questions.indexOf(q) + 1;
         const rows = detail.studentRows
-          .filter(st => st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId])
+          .filter(st => keep(st, q))
           .map(st => ({ st, r: st.results[q.assessmentQuestionId] }));
         const ids = rows.map(x => x.r.qaId);
         const selectedHere = ids.filter(id => selected.has(id));
@@ -5690,7 +5824,21 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
                 </div>
               ) : null;
             })()}
-            {rows.length === 0 && <p className="mt-3 text-[12px] text-ink-tertiary">Belum ada jawaban.</p>}
+            <div className="mt-3 flex flex-wrap items-center gap-2 rounded-[8px] border border-success/30 bg-success-light/50 px-3 py-2">
+              <span className="text-[12px] font-semibold text-ink">Jawabannya pasti (angka/kata)? Nilai otomatis:</span>
+              <input type="text" placeholder="jawaban benar, mis. 5040" value={keyDraft[q.assessmentQuestionId] ?? ""}
+                onChange={e => setKeyDraft(p => ({ ...p, [q.assessmentQuestionId]: e.target.value }))}
+                className="w-44 rounded-[6px] border border-border bg-surface px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
+              <label className="flex items-center gap-1 text-[11px] text-ink-secondary">
+                <input type="checkbox" className="h-3.5 w-3.5 accent-primary" checked={convertToIsian[q.assessmentQuestionId] ?? true}
+                  onChange={e => setConvertToIsian(p => ({ ...p, [q.assessmentQuestionId]: e.target.checked }))} />
+                jadikan Isian Singkat (berikutnya otomatis)
+              </label>
+              <Button variant="success" size="sm" className="ml-auto" disabled={saving === `key:${q.assessmentQuestionId}`} onClick={() => gradeByKey(q)}>
+                {saving === `key:${q.assessmentQuestionId}` ? "Menilai..." : "Nilai semua otomatis"}
+              </Button>
+            </div>
+            {rows.length === 0 && <p className="mt-3 text-[12px] text-ink-tertiary">{onlyPending || stFilter !== "all" ? "Tidak ada jawaban yang cocok dengan filter." : "Belum ada jawaban."}</p>}
             {rows.length > 0 && (
               <div className="mt-3 flex flex-wrap items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-2">
                 <label className="flex items-center gap-2 text-[12px] font-semibold text-ink">
@@ -5725,58 +5873,16 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
               </div>
             )}
             <div className="mt-3 space-y-3">
-              {rows.map(({ st, r }) => {
-                const d = drafts[r.qaId] ?? { points: r.isCorrect === null ? "" : String(r.earned), feedback: r.feedback ?? "" };
-                const sug = suggestionOf(r);
-                const isChecking = checking.has(r.qaId);
-                return (
-                  <div key={st.studentId} className={cn("rounded-[8px] border bg-surface p-3", selected.has(r.qaId) ? "border-primary/40" : "border-border")}>
-                    <div className="mb-1 flex flex-wrap items-center gap-2">
-                      <input type="checkbox" className="h-4 w-4 accent-primary" checked={selected.has(r.qaId)} aria-label={`Pilih jawaban ${st.name}`}
-                        onChange={() => setSelected(prev => { const n = new Set(prev); if (n.has(r.qaId)) n.delete(r.qaId); else n.add(r.qaId); return n; })} />
-                      <span className="text-[12px] font-semibold text-ink">{st.name}</span>
-                      {r.isCorrect === null ? <Badge tone="warning">Belum dinilai</Badge> : <Badge tone="success">{r.earned}/{q.points} poin</Badge>}
-                      <Button variant="outline" size="sm" className="ml-auto" disabled={isChecking} onClick={() => aiCheck([r.qaId])}>
-                        <Sparkles className="mr-1.5 h-3.5 w-3.5" />{isChecking ? "AI mengecek..." : sug ? "AI cek ulang" : "AI cek"}
-                      </Button>
-                    </div>
-                    <p className="whitespace-pre-line rounded-[6px] bg-background p-2.5 text-[12px] text-ink">{st.answers[q.assessmentQuestionId]}</p>
-                    {sug && (
-                      <div className="mt-2 flex flex-wrap items-start gap-2 rounded-[6px] border border-primary/20 bg-primary-soft p-2.5">
-                        <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
-                        <p className="flex-1 text-[12px] text-ink"><span className="font-semibold">Usulan AI: {sug.points}/{q.points}</span>{sug.reason ? ` — ${sug.reason}` : ""}</p>
-                        <button type="button" className="text-[11px] font-semibold text-primary hover:underline"
-                          onClick={() => setDrafts(p => ({ ...p, [r.qaId]: { ...d, points: String(sug.points) } }))}>
-                          Pakai nilai ini
-                        </button>
-                      </div>
-                    )}
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <label className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary">
-                        Nilai
-                        <input type="number" min={0} max={q.points} step={0.5} value={d.points}
-                          onChange={e => setDrafts(p => ({ ...p, [r.qaId]: { ...d, points: e.target.value } }))}
-                          className="w-20 rounded-[6px] border border-border bg-background px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
-                        / {q.points}
-                      </label>
-                      <input type="text" placeholder="Catatan untuk siswa (opsional)" value={d.feedback}
-                        onChange={e => setDrafts(p => ({ ...p, [r.qaId]: { ...d, feedback: e.target.value } }))}
-                        className="min-w-[180px] flex-1 rounded-[6px] border border-border bg-background px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
-                      <Button variant="default" size="sm" disabled={saving === r.qaId} onClick={() => save(r.qaId, q.points)}>
-                        {saving === r.qaId ? "Menyimpan..." : "Simpan"}
-                      </Button>
-                    </div>
-                  </div>
-                );
-              })}
+              {rows.map(({ st, r }) => renderAnswer(q, st, r, st.name))}
             </div>
           </div>
         );
       })}
+      </>
+      )}
     </div>
   );
 }
-
 function TeacherResults() {
   const { teacher, loading: teacherLoading } = useRealTeacherStatus();
   const [activeClass] = useActiveClass();
@@ -5925,7 +6031,8 @@ function TeacherResults() {
       {detail && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setDetailId(null)} />
-          <div className="relative w-full max-w-2xl rounded-card border border-border bg-surface shadow-xl max-h-[90vh] flex flex-col">
+          <div className={cn("relative w-full rounded-card border border-border bg-surface shadow-xl flex flex-col",
+            detailTab === "esai" || detailTab === "siswa" ? "max-w-6xl h-[94vh]" : "max-w-4xl max-h-[94vh]")}>
             <div className="flex items-start justify-between border-b border-border px-6 py-4 shrink-0">
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-primary mb-0.5">{detail.type}</p>
@@ -7752,6 +7859,16 @@ function ZoomableImage({ src, alt, className }: { src: string; alt: string; clas
 /** Answer area for one exam question, per question type. */
 function ExamAnswerInput({ q, value, onChange }: { q: ExamQuestion; value: string | undefined; onChange: (v: string) => void }) {
   const type = q.type ?? "pg";
+  if (type === "isian") {
+    return (
+      <div>
+        <input type="text" value={value ?? ""} maxLength={200} placeholder="Tulis jawaban singkatmu (angka atau kata)..."
+          onChange={e => onChange(e.target.value)}
+          className="w-full select-text rounded-[10px] border border-border bg-surface p-3.5 text-[15px] text-ink focus:border-primary focus:outline-none" />
+        <p className="mt-1 text-[11px] text-ink-tertiary">Jawaban singkat, misalnya angka hasil hitungan.</p>
+      </div>
+    );
+  }
   if (type === "esai") {
     return (
       <div>

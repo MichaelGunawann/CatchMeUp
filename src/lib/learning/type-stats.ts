@@ -34,7 +34,7 @@ export async function loadTypeStats(studentId: string, subjectId?: string): Prom
       add(r.assessment_questions?.questions, r.is_correct);
     }
   }
-  return (["pg", "pg_kompleks", "benar_salah", "menjodohkan", "esai"] as QuestionType[]).map(type => {
+  return (["pg", "pg_kompleks", "benar_salah", "menjodohkan", "isian", "esai"] as QuestionType[]).map(type => {
     const s = agg.get(type) ?? { correct: 0, total: 0 };
     return { type, label: QUESTION_TYPE_LABEL[type], ...s, accuracy: s.total ? Math.round((s.correct / s.total) * 100) : null };
   });

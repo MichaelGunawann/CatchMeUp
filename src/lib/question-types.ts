@@ -12,15 +12,16 @@
 //   pg "A" · pg_kompleks "A,C" · benar_salah '["B","S",null]' ·
 //   menjodohkan '[2,0,null]' (indices into the ORIGINAL right list) · esai free text
 
-export type QuestionType = "pg" | "pg_kompleks" | "benar_salah" | "menjodohkan" | "esai";
+export type QuestionType = "pg" | "pg_kompleks" | "benar_salah" | "menjodohkan" | "isian" | "esai";
 
-export const QUESTION_TYPES: QuestionType[] = ["pg", "pg_kompleks", "benar_salah", "menjodohkan", "esai"];
+export const QUESTION_TYPES: QuestionType[] = ["pg", "pg_kompleks", "benar_salah", "menjodohkan", "isian", "esai"];
 
 export const QUESTION_TYPE_LABEL: Record<QuestionType, string> = {
   pg: "Pilihan Ganda",
   pg_kompleks: "PG Kompleks",
   benar_salah: "Benar / Salah",
   menjodohkan: "Menjodohkan",
+  isian: "Isian Singkat",
   esai: "Esai",
 };
 
@@ -29,6 +30,7 @@ export const QUESTION_TYPE_HINT: Record<QuestionType, string> = {
   pg_kompleks: "Jawaban benar bisa lebih dari satu. Nilai parsial per opsi (dicentang/tidak dicentang dengan benar).",
   benar_salah: "Beberapa pernyataan, siswa menentukan Benar/Salah. Nilai parsial per pernyataan.",
   menjodohkan: "Siswa memasangkan item kiri dengan kanan. Nilai parsial per pasangan.",
+  isian: "Jawaban singkat (angka/kata) yang dinilai OTOMATIS dengan kunci, misal 5040. Tidak perlu dicek guru.",
   esai: "Jawaban uraian, dinilai guru setelah dikumpulkan.",
 };
 
@@ -147,6 +149,10 @@ export function gradeAnswer(q: QuestionLike, answer: string | null | undefined, 
       const earned = key.length ? roundPoints(points * right / key.length) : 0;
       return { isCorrect: ok, earned, pending: false };
     }
+    case "isian": {
+      const ok = isianMatches(ans, isianKey(q.answer_key));
+      return { isCorrect: ok, earned: ok ? points : 0, pending: false };
+    }
     case "esai": {
       if (!ans.trim()) return { isCorrect: false, earned: 0, pending: false };
       return { isCorrect: null, earned: 0, pending: true };
@@ -156,6 +162,42 @@ export function gradeAnswer(q: QuestionLike, answer: string | null | undefined, 
       return { isCorrect: ok, earned: ok ? points : 0, pending: false };
     }
   }
+}
+
+/** Accepted answers of a short-answer question ({accepted: [...]}). */
+export function isianKey(key: unknown): string[] {
+  const acc = (key as { accepted?: unknown } | null)?.accepted;
+  return Array.isArray(acc) ? acc.map(String).map(x => x.trim()).filter(Boolean) : [];
+}
+
+/**
+ * Normalises a short answer for comparison: case, spaces and punctuation
+ * don't matter, and numbers are compared by value - "5.040", "5040",
+ * "5,040 cara" and "5040 susunan" all equal 5040; "0,5" equals "0.5".
+ */
+function normalizeShort(s: string): { num: number | null; text: string } {
+  const t = s.toLowerCase().trim();
+  const m = t.match(/-?\d[\d.,\s]*/);
+  let num: number | null = null;
+  if (m) {
+    let d = m[0].replace(/\s/g, "");
+    // 1.234.567 / 1,234 thousands separators vs 0,5 / 2.5 decimals
+    if (/^-?\d{1,3}([.,]\d{3})+$/.test(d)) d = d.replace(/[.,]/g, "");
+    else d = d.replace(",", ".");
+    const v = Number(d);
+    if (Number.isFinite(v)) num = v;
+  }
+  return { num, text: t.replace(/[^\p{L}\p{N}]+/gu, "") };
+}
+
+export function isianMatches(answer: string, accepted: string[]): boolean {
+  if (!answer.trim() || accepted.length === 0) return false;
+  const a = normalizeShort(answer);
+  return accepted.some(k => {
+    const b = normalizeShort(k);
+    if (a.num !== null && b.num !== null) return Math.abs(a.num - b.num) < 1e-9;
+    return a.text.length > 0 && a.text === b.text;
+  });
 }
 
 function roundPoints(n: number): number {
@@ -176,6 +218,7 @@ export function describeAnswer(q: QuestionLike, answer: string | null | undefine
       return parseArray(answer).map((v, i) => `${left[i] ?? i + 1} → ${v == null || v === "" ? "-" : right[Number(v)] ?? "-"}`).join(" · ");
     }
     case "esai":
+    case "isian":
       return answer;
     default: {
       const text = (q.options as Record<string, unknown> | null)?.[answer];
@@ -196,6 +239,8 @@ export function describeKey(q: QuestionLike): string {
       const { left, right } = matchingOf(q.options);
       return (Array.isArray(q.answer_key) ? q.answer_key : []).map((r, i) => `${left[i] ?? i + 1} → ${right[Number(r)] ?? "-"}`).join(" · ");
     }
+    case "isian":
+      return isianKey(q.answer_key).join(" / ") || "-";
     case "esai": {
       const k = (q.answer_key ?? {}) as { rubric?: string; keywords?: string[] };
       const parts = [k.keywords?.length ? `Kata kunci: ${k.keywords.join(", ")}` : "", k.rubric ? `Pedoman: ${k.rubric}` : ""].filter(Boolean);
@@ -223,7 +268,7 @@ export function seededOrder(n: number, seed: string): number[] {
 }
 
 /** Types used in self-paced practice (auto-graded; essays need a teacher). */
-export const PRACTICE_TYPES: QuestionType[] = ["pg", "pg_kompleks", "benar_salah", "menjodohkan"];
+export const PRACTICE_TYPES: QuestionType[] = ["pg", "pg_kompleks", "benar_salah", "menjodohkan", "isian"];
 
 /**
  * What a student sees for a question (no answer key). Matching's right
@@ -237,7 +282,7 @@ export function displayPayload(q: QuestionLike & { question: string }, seed: str
     const order = seededOrder(right.length, seed);
     return { type, displayOptions: [] as { key: string; text: string }[], matchLeft: left, matchRight: order.map(i => ({ index: i, text: right[i] })) };
   }
-  if (type === "esai") return { type, displayOptions: [] as { key: string; text: string }[] };
+  if (type === "esai" || type === "isian") return { type, displayOptions: [] as { key: string; text: string }[] };
   const opts = letterOptions(q.options);
   const keys = optionOrder ? optionOrder(opts.map(o => o.key)) : opts.map(o => o.key);
   const textOf = Object.fromEntries(opts.map(o => [o.key, o.text]));

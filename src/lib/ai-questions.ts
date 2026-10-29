@@ -114,7 +114,7 @@ export function avoidListPrompt(avoid: string[] | undefined): string {
 
 // ── Typed AI questions (TKA formats) ────────────────────────────────────────
 
-export type AiQuestionType = "pg" | "pg_kompleks" | "benar_salah" | "menjodohkan" | "esai";
+export type AiQuestionType = "pg" | "pg_kompleks" | "benar_salah" | "menjodohkan" | "isian" | "esai";
 
 /** A generated question in the shape the questions table stores (see src/lib/question-types.ts). */
 export type TypedQuestion = {
@@ -145,6 +145,10 @@ Jawab HANYA JSON array: [{"question":"Tentukan benar atau salah setiap pernyataa
     case "menjodohkan":
       return `Buat ${count} soal MENJODOHKAN: setiap soal berisi 3-5 pasangan (kiri -> kanan) dan 1-2 pengecoh (jawaban kanan tanpa pasangan). Semua jawaban kanan harus berbeda.
 Jawab HANYA JSON array: [{"question":"Pasangkan ... dengan ... yang tepat!","pairs":[{"left":"","right":""}],"distractors":[""],${common}}]`;
+    case "isian":
+      return `Buat ${count} soal ISIAN SINGKAT: jawabannya SATU angka atau 1-3 kata yang pasti (misalnya hasil hitungan), sehingga bisa dinilai otomatis.
+Jawab HANYA JSON array: [{"question":"...","answers":["jawaban utama","penulisan lain yang juga benar"],${common}}]
+Hitung ulang jawabannya langkah demi langkah sebelum menulis "answers"; "explanation" berisi cara singkatnya.`;
     case "esai":
       return `Buat ${count} soal ESAI (uraian singkat) yang menguji pemahaman, bukan hafalan kata per kata.
 Jawab HANYA JSON array: [{"question":"","modelAnswer":"contoh jawaban benar yang lengkap","keywords":["2-5 konsep/kata kunci yang wajib muncul dengan makna benar"],"rubric":"poin-poin yang harus ada di jawaban siswa",${common}}]`;
@@ -208,6 +212,10 @@ export function parseTypedQuestions(text: string, type: AiQuestionType): TypedQu
       const right = [...pairs.map(p => p.right), ...extras];
       if (pairs.length < 2 || new Set(right.map(r => r.toLowerCase())).size !== right.length) continue;
       out.push({ ...base, options: { left: pairs.map(p => p.left), right }, answerKey: pairs.map((_, i) => i) });
+    } else if (type === "isian") {
+      const accepted = (Array.isArray(o.answers) ? o.answers : []).map(str).filter(Boolean).slice(0, 6);
+      if (!accepted.length) continue;
+      out.push({ ...base, options: {}, answerKey: { accepted } });
     } else if (type === "esai") {
       const model = str(o.modelAnswer);
       const rubric = str(o.rubric);

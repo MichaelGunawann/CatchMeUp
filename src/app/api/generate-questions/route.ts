@@ -38,7 +38,7 @@ export async function POST(req: Request) {
   // Capped per call - callers batch larger requests (45 at once timed out).
   const count = Math.min(Math.max(1, body.count ?? 5), MAX_QUESTIONS_PER_CALL);
 
-  if (body.questionType && body.questionType !== "pg" && ["pg_kompleks", "benar_salah", "menjodohkan", "esai"].includes(body.questionType)) {
+  if (body.questionType && body.questionType !== "pg" && ["pg_kompleks", "benar_salah", "menjodohkan", "isian", "esai"].includes(body.questionType)) {
     try {
       const questions = await generateTyped(body.questionType, count,
         `Mata pelajaran ${subject}, topik "${topic}" (materi: ${materialTitle}), tingkat kesulitan ${difficulty}.`, body.avoid);

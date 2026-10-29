@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { requireTeacher } from "@/lib/auth/api-teacher";
+import { recomputeAttempt } from "@/lib/grading";
 
 export const dynamic = "force-dynamic";
 
@@ -52,22 +53,6 @@ export async function POST(req: Request) {
     return Response.json({ error: missing ? "Jalankan migrasi 026 terlebih dahulu." : upErr.message }, { status: 500 });
   }
 
-  // Recompute the attempt score from every answer in it.
-  const { data: all } = await supabaseAdmin
-    .from("question_attempts")
-    .select("points_earned, is_correct, student_answer, assessment_questions(points, questions(question_type))")
-    .eq("assessment_attempt_id", row.assessment_attempt_id);
-  type Part = { points_earned: number | null; is_correct: boolean | null; student_answer: string | null; assessment_questions: { points: number; questions: { question_type?: string | null } | null } | null };
-  const parts = (all ?? []) as unknown as Part[];
-  const total = parts.reduce((s, p) => s + (Number(p.assessment_questions?.points) || 1), 0);
-  const got = parts.reduce((s, p) => s + (Number(p.points_earned) || 0), 0);
-  const stillPending = parts.some(p => (p.assessment_questions?.questions?.question_type ?? "pg") === "esai" && p.is_correct === null && !!p.student_answer);
-  const score = total > 0 ? Math.round((got / total) * 100) : 0;
-  await supabaseAdmin.from("assessment_attempts")
-    // No score until every essay in the attempt is graded (shown as "–").
-    .update({ score: stillPending ? null : score, total_points: total, status: stillPending ? "submitted" : "graded" })
-    .eq("id", row.assessment_attempt_id)
-    .in("status", ["submitted", "graded"]);
-
-  return Response.json({ success: true, earned, score: stillPending ? null : score, pending: stillPending });
+  const { score, pending } = await recomputeAttempt(row.assessment_attempt_id);
+  return Response.json({ success: true, earned, score, pending });
 }

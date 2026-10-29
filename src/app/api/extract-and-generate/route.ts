@@ -58,7 +58,7 @@ export async function POST(req: Request) {
       /** TKA format to generate (default pg) */
       questionType?: AiQuestionType;
     };
-    if (body.questionType && ["pg", "pg_kompleks", "benar_salah", "menjodohkan", "esai"].includes(body.questionType)) questionType = body.questionType;
+    if (body.questionType && ["pg", "pg_kompleks", "benar_salah", "menjodohkan", "isian", "esai"].includes(body.questionType)) questionType = body.questionType;
     segment = body.segment ?? 0;
     segments = body.segments ?? 1;
     avoid = Array.isArray(body.avoid) ? body.avoid : [];
