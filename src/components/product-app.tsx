@@ -5601,6 +5601,7 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
   const [checking, setChecking] = useState<Set<string>>(new Set());
   // Suggestions fetched in this session (stored ones come from detail.results).
   const [fresh, setFresh] = useState<Record<string, { points: number; reason: string }>>({});
+  const [keyIssues, setKeyIssues] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState<{ text: string; tone: "success" | "danger" } | null>(null);
 
   const suggestionOf = (r: ResultStudentRow["results"][string]) =>
@@ -5613,9 +5614,10 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
     // Server takes up to 20 per request.
     let done = 0; let failed: string | null = null;
     for (let i = 0; i < ids.length; i += 20) {
-      const res = await apiPost<{ suggestions?: Record<string, { points: number; reason: string }> }>("/api/teacher/essay-suggest", { questionAttemptIds: ids.slice(i, i + 20) });
+      const res = await apiPost<{ suggestions?: Record<string, { points: number; reason: string }>; keyIssues?: Record<string, string> }>("/api/teacher/essay-suggest", { questionAttemptIds: ids.slice(i, i + 20) });
       if (res.error) { failed = res.error; break; }
       setFresh(prev => ({ ...prev, ...(res.suggestions ?? {}) }));
+      setKeyIssues(prev => ({ ...prev, ...(res.keyIssues ?? {}) }));
       done += Object.keys(res.suggestions ?? {}).length;
     }
     setChecking(prev => { const n = new Set(prev); ids.forEach(id => n.delete(id)); return n; });
@@ -5680,6 +5682,14 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
             {describeKey(q.raw) === "Dinilai guru" && !(q.raw as { explanation?: string }).explanation
               ? <p className="mt-1 text-[11px] text-warning">Soal ini belum punya contoh jawaban / kata kunci - usulan AI akan memakai materi kelas. Tambahkan lewat Bank Soal → Edit Soal supaya usulan lebih tepat.</p>
               : <p className="mt-1 text-[11px] text-ink-secondary">{describeKey(q.raw)}</p>}
+            {(() => {
+              const issue = keyIssues[q.assessmentQuestionId] ?? rows.map(({ r }) => suggestionOf(r)?.reason ?? "").find(x => x.startsWith("⚠ Kunci guru mungkin keliru"))?.split(" · ")[0].replace("⚠ Kunci guru mungkin keliru: ", "");
+              return issue ? (
+                <div className="mt-2 rounded-[8px] border border-warning/40 bg-warning-light px-3 py-2 text-[12px] text-ink">
+                  <b className="text-warning">⚠ Contoh jawaban di soal ini mungkin keliru.</b> {issue} Usulan AI memakai jawaban yang benar - cek dulu, lalu perbaiki soalnya lewat Bank Soal → Edit Soal.
+                </div>
+              ) : null;
+            })()}
             {rows.length === 0 && <p className="mt-3 text-[12px] text-ink-tertiary">Belum ada jawaban.</p>}
             {rows.length > 0 && (
               <div className="mt-3 flex flex-wrap items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-2">
