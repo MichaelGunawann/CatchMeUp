@@ -1324,16 +1324,21 @@ async function jsonAuthHeaders(): Promise<Record<string, string>> {
 
 async function apiPost<T = Record<string, unknown>>(path: string, body: unknown): Promise<T & { error?: string }> {
   try {
-    const { data: { session } } = await supabase.auth.getSession();
-    const res = await fetch(path, {
+    const send = (token?: string) => fetch(path, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(session ? { Authorization: `Bearer ${session.access_token}` } : {}),
-      },
+      headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       body: JSON.stringify(body),
     });
+    const { data: { session } } = await supabase.auth.getSession();
+    let res = await send(session?.access_token);
+    // A stored token can be stale (tab asleep, refresh missed): refresh once
+    // and retry before telling the user to sign in again.
+    if (res.status === 401) {
+      const { data: refreshed } = await supabase.auth.refreshSession();
+      if (refreshed.session) res = await send(refreshed.session.access_token);
+    }
     const json = await res.json().catch(() => ({})) as T & { error?: string };
+    if (res.status === 401) return { ...json, error: "Sesi login kamu sudah berakhir. Keluar lalu masuk lagi, ya." };
     if (!res.ok && !json.error) return { ...json, error: `Server error (${res.status})` };
     return json;
   } catch (err) {

@@ -64,8 +64,11 @@ export async function getCurrentProfile(): Promise<UserProfile | null> {
   return profile;
 }
 
+// "local": logging out on one device must not end the same account's
+// sessions elsewhere (Supabase's default "global" revokes all of them,
+// which showed up as "Sesi tidak valid" for teachers sharing a test login).
 export async function signOut() {
-  const { error } = await supabase.auth.signOut();
+  const { error } = await supabase.auth.signOut({ scope: "local" });
   if (error) {
     throw error;
   }
