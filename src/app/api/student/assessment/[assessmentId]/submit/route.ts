@@ -55,9 +55,11 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
       return Response.json({ error: "Akun siswa belum aktif" }, { status: 403 });
     }
 
-    const { attemptId, answers } = (await req.json()) as {
+    const { attemptId, answers, endReason } = (await req.json()) as {
       attemptId?: string;
       answers?: Record<string, string>;
+      /** why the exam ended, e.g. "Kamu berpindah tab" (shown to the teacher) */
+      endReason?: string;
     };
     if (!attemptId || !answers) {
       return Response.json({ error: "attemptId dan answers wajib diisi" }, { status: 400 });
@@ -85,7 +87,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
     // discarded. Starting a NEW attempt after close is still blocked by
     // the start route.
     const SUBMIT_GRACE_MS = 2 * 60_000;
-    if (a.close_at && Date.now() > parseDbTime(a.close_at) + SUBMIT_GRACE_MS) {
+    // A teacher-reopened attempt has its own deadline (may be past close_at).
+    const override = (attempt as { deadline_override?: string | null }).deadline_override;
+    const limit = override ? parseDbTime(override) : a.close_at ? parseDbTime(a.close_at) : null;
+    if (limit !== null && Date.now() > limit + SUBMIT_GRACE_MS) {
       await supabaseAdmin.from("assessment_attempts").update({ status: "missed" }).eq("id", attemptId).eq("status", "in_progress");
       return Response.json({ error: "Waktu pengerjaan asesmen ini sudah berakhir" }, { status: 400 });
     }
@@ -175,6 +180,9 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
       }
     }
 
+    // A reopened attempt already has rows from its first submission.
+    await supabaseAdmin.from("question_attempts").delete().eq("assessment_attempt_id", attemptId);
+    await supabaseAdmin.from("student_wrong_answers").delete().eq("assessment_attempt_id", attemptId);
     if (questionAttemptRows.length > 0) {
       await supabaseAdmin.from("question_attempts").insert(questionAttemptRows);
     }
@@ -186,13 +194,15 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
 
     // With ungraded essays the attempt stays 'submitted' and the score is
     // provisional until the teacher grades them.
-    await supabaseAdmin
-      .from("assessment_attempts")
-      .update({ status: pendingCount > 0 ? "submitted" : "graded", submitted_at: new Date().toISOString(), score, total_points: totalPoints })
-      .eq("id", attemptId);
+    // Score stays empty (shown as "–") until the teacher has graded every
+    // essay - a provisional number looked like a real (low) grade.
+    const finalFields = { status: pendingCount > 0 ? "submitted" : "graded", submitted_at: new Date().toISOString(), score: pendingCount > 0 ? null : score, total_points: totalPoints };
+    const { error: finErr } = await supabaseAdmin.from("assessment_attempts")
+      .update({ ...finalFields, end_reason: endReason ? String(endReason).slice(0, 200) : null }).eq("id", attemptId);
+    if (finErr) await supabaseAdmin.from("assessment_attempts").update(finalFields).eq("id", attemptId); // before migration 031
 
     await awardXpAndStreak(student.id, correctCount * XP_PER_CORRECT_ANSWER);
-    await checkAndAwardAchievements(student.id, { perfectScore: score === 100, assessmentId });
+    await checkAndAwardAchievements(student.id, { perfectScore: pendingCount === 0 && score === 100, assessmentId });
 
     let review = null;
     if (a.allow_review) {
@@ -216,7 +226,7 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
 
     return Response.json({
       success: true,
-      score,
+      score: pendingCount > 0 ? null : score,
       correctCount,
       pendingCount,
       totalQuestions: rows.length,

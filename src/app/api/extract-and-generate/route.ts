@@ -1,20 +1,13 @@
 export const dynamic = "force-dynamic";
 // AI generation can take a while (typed formats ~30-45s per batch).
 export const maxDuration = 300;
-import Groq from "groq-sdk";
+import { aiChat } from "@/lib/ai";
 import { requireTeacher } from "@/lib/auth/api-teacher";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { sampleTextForPrompt, documentSegment } from "@/lib/office-text";
 import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type AiQuestionType } from "@/lib/ai-questions";
-import { cacheMaterialText, extractTextFromBuffer } from "@/lib/material-text";
-
-let _groq: Groq | null = null;
-function getGroq(): Groq {
-  if (_groq) return _groq;
-  _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  return _groq;
-}
+import { cacheMaterialText, extractTextFromBuffer, isQuestionSheet } from "@/lib/material-text";
 
 /**
  * Accepts either a real materials Storage path (preferred - the file is
@@ -31,8 +24,7 @@ ${context}
 ${typedFormatPrompt(type, count)}
 ${QUESTION_QUALITY_RULES}
 Pastikan kunci jawaban benar-benar sesuai isi materi; periksa ulang setiap kunci sebelum menulis.${avoidListPrompt(avoid)}`;
-  const completion = await getGroq().chat.completions.create({
-    model: "openai/gpt-oss-120b",
+  const completion = await aiChat("smart", {
     messages: [{ role: "user", content: prompt }],
     max_tokens: Math.min(8192, count * 450 + 600),
     temperature: 0.3,
@@ -147,6 +139,19 @@ export async function POST(req: Request) {
     const msg = err instanceof Error ? err.message : "Unknown";
     return Response.json({ error: `Gagal membaca file: ${msg}`, questions: [] }, { status: 500 });
   }
+  // A worksheet has no facts to take answers from - generating "new"
+  // questions from it made the AI invent keys. Send the teacher to
+  // "Impor soal" instead (copies the sheet's questions for review).
+  if (storagePath && isQuestionSheet(extractedText, materialTitle)) {
+    const materialId = storagePath.split("/").pop()?.replace(/\.[^.]+$/, "");
+    if (materialId) await supabaseAdmin.from("materials").update({ is_question_sheet: true }).eq("id", materialId).then(() => {}, () => {});
+    return Response.json({
+      code: "question_sheet",
+      error: "File ini lembar soal, bukan materi. AI tidak bisa memastikan kunci jawaban dari lembar soal - pakai \"Impor soal\" untuk memasukkan soal-soalnya ke bank soal.",
+      questions: [],
+    }, { status: 422 });
+  }
+
 
   // Sample evenly across the whole document instead of only its first
   // pages (which for a textbook are just the cover and table of contents).
@@ -211,8 +216,7 @@ ${QUESTION_QUALITY_RULES}${avoidListPrompt(avoid)}`;
     // checks requested max_tokens against remaining quota, not just actual
     // usage, so an oversized fixed value rejects small requests needlessly).
     const maxTokens = Math.min(8192, count * 350 + 500);
-    const completion = await getGroq().chat.completions.create({
-      model: "openai/gpt-oss-120b",
+    const completion = await aiChat("smart", {
       messages: [{ role: "user", content: prompt }],
       max_tokens: maxTokens,
       // Low temperature specifically to reduce answer-key inconsistency -

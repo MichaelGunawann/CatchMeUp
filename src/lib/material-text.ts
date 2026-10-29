@@ -36,7 +36,7 @@ export async function extractTextFromBuffer(buffer: Buffer, fileName: string): P
   return "";
 }
 
-type MaterialRef = { id: string; file_url: string | null; content_text?: string | null };
+type MaterialRef = { id: string; file_url: string | null; content_text?: string | null; title?: string };
 
 export async function getMaterialText(m: MaterialRef): Promise<string> {
   if (m.content_text) return m.content_text;
@@ -58,9 +58,28 @@ export async function getMaterialText(m: MaterialRef): Promise<string> {
   // Persist so other server instances don't re-extract. Ignored if the
   // column doesn't exist yet (migration 022 not applied).
   await supabaseAdmin.from("materials").update({ content_text: text }).eq("id", m.id).then(() => {}, () => {});
+  // Flag quiz sheets (migration 031; ignored before it runs).
+  if (isQuestionSheet(text, m.title ?? "")) await supabaseAdmin.from("materials").update({ is_question_sheet: true }).eq("id", m.id).then(() => {}, () => {});
   return text;
 }
 
+/**
+ * True for a quiz/worksheet (numbered questions, option lists, Google-Form
+ * prints) rather than learning material. Signals, calibrated on real
+ * uploads: question stems ending in "…" / "..." / "?" per 1000 characters
+ * (worksheets ~1.3-4+, books/slides/articles <= ~1.1), "Mark only one oval"
+ * / "N points" form prints, and a title such as "Kuis", "Soal", "Try Out".
+ */
+export function isQuestionSheet(text: string, title = ""): boolean {
+  const t = text.replace(/\[hal\. \d+\]/g, "\n");
+  if (t.length < 300 || t.length > 80_000) return false; // whole books aren't worksheets
+  const per1k = (n: number) => (n * 1000) / t.length;
+  const stems = (t.match(/(…|\.\.\.|\?|\.{4,})\s*(\n|$|[A-Ea-e][.)]\s)/g) ?? []).length;
+  const formPrint = (t.match(/mark only one oval|pilih satu jawaban|\b\d+\s*(points|poin)\b/gi) ?? []).length;
+  const titled = /kuis|quiz|soal|try ?out|ulangan|ujian|latihan|\blks\b|\bpts\b|\bpas\b|\buts\b|\buas\b|\btes\b|\btest\b/i.test(title);
+  const score = per1k(stems) + (per1k(formPrint) >= 2 ? 2 : 0) + (titled ? 1 : 0);
+  return stems >= 4 && score >= 2;
+}
 /** Saves already-extracted text (e.g. from the question-generation route). */
 export async function cacheMaterialText(materialId: string, text: string) {
   const t = text.slice(0, MAX_STORED_CHARS);

@@ -1,17 +1,10 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-import Groq from "groq-sdk";
+import { aiChat } from "@/lib/ai";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth/api-user";
 import { hashInput, readCache, writeCache } from "@/lib/ai-cache";
-
-let _groq: Groq | null = null;
-function getGroq(): Groq {
-  if (_groq) return _groq;
-  _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  return _groq;
-}
 
 type Body = {
   topicStats: Array<{ topic: string; avgSuccessRate: number; count: number }>;
@@ -88,8 +81,7 @@ Ketentuan:
 - suggestion harus spesifik dan langsung bisa dipraktikkan guru`;
 
   try {
-    const completion = await getGroq().chat.completions.create({
-      model: "openai/gpt-oss-120b",
+    const completion = await aiChat("fast", {
       messages: [{ role: "user", content: prompt }],
       max_tokens: 1500,
       reasoning_effort: "low",

@@ -197,8 +197,9 @@ export function describeKey(q: QuestionLike): string {
       return (Array.isArray(q.answer_key) ? q.answer_key : []).map((r, i) => `${left[i] ?? i + 1} → ${right[Number(r)] ?? "-"}`).join(" · ");
     }
     case "esai": {
-      const rubric = (q.answer_key as { rubric?: string } | null)?.rubric;
-      return rubric ? `Pedoman: ${rubric}` : "Dinilai guru";
+      const k = (q.answer_key ?? {}) as { rubric?: string; keywords?: string[] };
+      const parts = [k.keywords?.length ? `Kata kunci: ${k.keywords.join(", ")}` : "", k.rubric ? `Pedoman: ${k.rubric}` : ""].filter(Boolean);
+      return parts.length ? parts.join(" · ") : "Dinilai guru";
     }
     default: {
       const k = q.correct_answer ?? "";

@@ -64,9 +64,10 @@ export async function POST(req: Request) {
   const stillPending = parts.some(p => (p.assessment_questions?.questions?.question_type ?? "pg") === "esai" && p.is_correct === null && !!p.student_answer);
   const score = total > 0 ? Math.round((got / total) * 100) : 0;
   await supabaseAdmin.from("assessment_attempts")
-    .update({ score, total_points: total, status: stillPending ? "submitted" : "graded" })
+    // No score until every essay in the attempt is graded (shown as "–").
+    .update({ score: stillPending ? null : score, total_points: total, status: stillPending ? "submitted" : "graded" })
     .eq("id", row.assessment_attempt_id)
     .in("status", ["submitted", "graded"]);
 
-  return Response.json({ success: true, earned, score, pending: stillPending });
+  return Response.json({ success: true, earned, score: stillPending ? null : score, pending: stillPending });
 }

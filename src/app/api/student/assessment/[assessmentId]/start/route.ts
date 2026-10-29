@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { getAssessmentAvailability, parseDbTime } from "@/lib/auth/assessment-availability";
+import { attemptDeadline } from "@/lib/auth/exam-deadline";
 import { letterOptions, matchingOf, questionTypeOf, seededOrder, statementsOf } from "@/lib/question-types";
 import type { Assessment, AssessmentAttempt, Question } from "@/lib/supabase/types";
 
@@ -261,15 +262,20 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
       return { ...base, displayOptions: displayOrder.map((k) => ({ key: k, text: textOf[k] })) };
     });
 
-    const startedAtMs = parseDbTime(attempt.started_at);
-    const durationDeadline = a.duration_minutes ? startedAtMs + a.duration_minutes * 60000 : null;
-    const closeDeadline = a.close_at ? parseDbTime(a.close_at) : null;
-    const deadlineAt = [durationDeadline, closeDeadline].filter((d): d is number => d !== null).sort((x, y) => x - y)[0] ?? null;
+    const deadlineAt = attemptDeadline(attempt as AssessmentAttempt & { deadline_override?: string | null }, a);
+
+    // A reopened attempt (teacher kept the answers) or a resumed one: send
+    // the answers already stored server-side so the exam doesn't start blank.
+    const { data: storedAnswers } = await supabaseAdmin
+      .from("question_attempts").select("assessment_question_id, student_answer").eq("assessment_attempt_id", attempt.id);
+    const savedAnswers = Object.fromEntries(((storedAnswers ?? []) as Array<{ assessment_question_id: string; student_answer: string | null }>)
+      .filter(r => r.student_answer).map(r => [r.assessment_question_id, r.student_answer as string]));
 
     return Response.json({
       attemptId: attempt.id,
       title: a.title,
       deadlineAt,
+      savedAnswers,
       allowReview: a.allow_review,
       questions,
     });

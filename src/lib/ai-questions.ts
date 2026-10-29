@@ -147,7 +147,7 @@ Jawab HANYA JSON array: [{"question":"Tentukan benar atau salah setiap pernyataa
 Jawab HANYA JSON array: [{"question":"Pasangkan ... dengan ... yang tepat!","pairs":[{"left":"","right":""}],"distractors":[""],${common}}]`;
     case "esai":
       return `Buat ${count} soal ESAI (uraian singkat) yang menguji pemahaman, bukan hafalan kata per kata.
-Jawab HANYA JSON array: [{"question":"","modelAnswer":"contoh jawaban benar yang lengkap","rubric":"poin-poin yang harus ada di jawaban siswa",${common}}]`;
+Jawab HANYA JSON array: [{"question":"","modelAnswer":"contoh jawaban benar yang lengkap","keywords":["2-5 konsep/kata kunci yang wajib muncul dengan makna benar"],"rubric":"poin-poin yang harus ada di jawaban siswa",${common}}]`;
     default:
       return `Buat ${count} soal PILIHAN GANDA dengan 4 pilihan (A-D) dan tepat satu jawaban benar.
 Jawab HANYA JSON array: [{"question":"","options":{"A":"","B":"","C":"","D":""},"correctAnswer":"A",${common}}]`;
@@ -211,7 +211,9 @@ export function parseTypedQuestions(text: string, type: AiQuestionType): TypedQu
     } else if (type === "esai") {
       const model = str(o.modelAnswer);
       const rubric = str(o.rubric);
-      out.push({ ...base, options: {}, answerKey: rubric ? { rubric } : null, explanation: model || base.explanation });
+      const keywords = (Array.isArray(o.keywords) ? o.keywords : []).map(str).filter(Boolean).slice(0, 8);
+      const key = { ...(rubric ? { rubric } : {}), ...(keywords.length ? { keywords } : {}) };
+      out.push({ ...base, options: {}, answerKey: Object.keys(key).length ? key : null, explanation: model || base.explanation });
     }
   }
   return out;

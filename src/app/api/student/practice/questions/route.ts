@@ -1,5 +1,5 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
-import Groq from "groq-sdk";
+import { aiChat } from "@/lib/ai";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve } from "@/lib/retrieval";
 import { QUESTION_QUALITY_RULES, isSelfContained, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type TypedQuestion } from "@/lib/ai-questions";
@@ -8,13 +8,6 @@ import { loadTypeStats } from "@/lib/learning/type-stats";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
-let _groq: Groq | null = null;
-function getGroq(): Groq {
-  if (_groq) return _groq;
-  _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  return _groq;
-}
 
 /**
  * POST /api/student/practice/questions
@@ -208,8 +201,7 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
         // tutor can't explain the questions afterwards. Only a subject with
         // no readable material at all falls back to general questions.
         const ask = async (groundingText: string) => {
-          const completion = await getGroq().chat.completions.create({
-            model: "openai/gpt-oss-120b",
+          const completion = await aiChat("smart", {
             messages: [{ role: "user", content: buildPrompt(groundingText) }],
             max_tokens: 4000,
             temperature: 0.3,
@@ -220,8 +212,7 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
         };
         // Non-PG formats use the typed prompt (same grounding + rules).
         const askTyped = async (groundingText: string) => {
-          const completion = await getGroq().chat.completions.create({
-            model: "openai/gpt-oss-120b",
+          const completion = await aiChat("smart", {
             messages: [{ role: "user", content: `Buat soal latihan bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${topic ? ` topik "${topic}"` : ""}, tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana, sesuai tingkat materi.${groundingText}
 
 ${typedFormatPrompt(genType, shortfall)}

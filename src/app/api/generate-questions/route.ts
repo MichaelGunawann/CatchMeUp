@@ -1,17 +1,10 @@
 export const dynamic = "force-dynamic";
 // AI generation can take a while (typed formats ~30-45s per batch).
 export const maxDuration = 300;
-import Groq from "groq-sdk";
+import { aiChat } from "@/lib/ai";
 import { requireTeacher } from "@/lib/auth/api-teacher";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type AiQuestionType } from "@/lib/ai-questions";
-
-let _groq: Groq | null = null;
-function getGroq(): Groq {
-  if (_groq) return _groq;
-  _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  return _groq;
-}
 
 async function generateTyped(type: AiQuestionType, count: number, context: string, avoid: string[] | undefined) {
   const prompt = `Kamu adalah pembuat soal profesional untuk sekolah di Indonesia (SD sampai SMA); sesuaikan tingkat soal dengan materinya.
@@ -20,8 +13,7 @@ ${context}
 ${typedFormatPrompt(type, count)}
 ${QUESTION_QUALITY_RULES}
 Pastikan kunci jawaban benar-benar sesuai isi materi; periksa ulang setiap kunci sebelum menulis.${avoidListPrompt(avoid)}`;
-  const completion = await getGroq().chat.completions.create({
-    model: "openai/gpt-oss-120b",
+  const completion = await aiChat("smart", {
     messages: [{ role: "user", content: prompt }],
     max_tokens: Math.min(8192, count * 450 + 600),
     temperature: 0.3,
@@ -92,8 +84,7 @@ ${QUESTION_QUALITY_RULES}${avoidListPrompt(body.avoid)}`;
     // remaining quota, so a fixed oversized value rejects small requests
     // even when there'd be plenty of real headroom for them.
     const maxTokens = Math.min(8192, count * 300 + 500);
-    const completion = await getGroq().chat.completions.create({
-      model: "openai/gpt-oss-120b",
+    const completion = await aiChat("smart", {
       messages: [{ role: "user", content: prompt }],
       max_tokens: maxTokens,
       // Low temperature specifically to reduce answer-key inconsistency -

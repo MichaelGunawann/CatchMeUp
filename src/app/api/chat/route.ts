@@ -1,18 +1,11 @@
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-import Groq from "groq-sdk";
+import { aiChatStream, tutorTier } from "@/lib/ai";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve, type Chunk } from "@/lib/retrieval";
 import { describeKey } from "@/lib/question-types";
-
-let _groq: Groq | null = null;
-function getGroq(): Groq {
-  if (_groq) return _groq;
-  _groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-  return _groq;
-}
 
 type TeachingStyle = "socratic" | "explicit" | "analogy";
 
@@ -239,13 +232,12 @@ ${excerpts.length ? excerptBlock(excerpts) : "(tidak ada kutipan yang cocok deng
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        const response = await getGroq().chat.completions.create({
-          model: "openai/gpt-oss-120b",
+        // Maths / "jelaskan" / long questions -> smart model; small talk -> fast.
+        const response = await aiChatStream(tutorTier(lastUser), {
           messages: [
             { role: "system", content: systemPrompt },
             ...messages.slice(-20).map(m => ({ role: m.role as "user" | "assistant", content: m.content })),
           ],
-          stream: true,
           temperature: 0.4,
           max_tokens: 2048,
         });

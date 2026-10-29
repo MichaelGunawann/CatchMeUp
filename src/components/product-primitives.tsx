@@ -454,12 +454,13 @@ export function RecentAssessmentRow({
   title: string;
   type: string;
   date: string;
-  score: number;
+  /** null = not graded yet (essays waiting for the teacher) -> "–" */
+  score: number | null;
   classAvg?: number;
   rank?: number;
   onClick?: () => void;
 }) {
-  const scoreTone = score >= 80 ? "text-success" : score >= 65 ? "text-primary" : score >= 50 ? "text-warning" : "text-danger";
+  const scoreTone = score === null ? "text-ink-tertiary" : score >= 80 ? "text-success" : score >= 65 ? "text-primary" : score >= 50 ? "text-warning" : "text-danger";
 
   return (
     <div
@@ -471,7 +472,7 @@ export function RecentAssessmentRow({
         <div className="text-[11px] text-ink-secondary">{type} · {date}</div>
       </div>
       <div className="text-right shrink-0">
-        <div className={cn("text-[18px] font-bold tabular-nums", scoreTone)}>{score}</div>
+        <div className={cn("text-[18px] font-bold tabular-nums", scoreTone)} title={score === null ? "Menunggu penilaian esai oleh guru" : undefined}>{score ?? "–"}</div>
         {classAvg && (
           <div className="text-[10px] text-ink-tertiary tabular-nums">
             Avg: {classAvg}{rank ? ` · #${rank}` : ""}

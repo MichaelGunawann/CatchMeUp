@@ -125,7 +125,8 @@ export async function POST(req: Request) {
           difficulty: ["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang",
           explanation: q.explanation ?? "",
           correct_answer: ["A", "B", "C", "D"].includes(q.correctAnswer) ? q.correctAnswer : "A",
-          options: { A: opts.A.trim(), B: opts.B.trim(), C: opts.C.trim(), D: opts.D.trim() },
+          options: { A: opts.A.trim(), B: opts.B.trim(), C: opts.C.trim(), D: opts.D.trim(), ...(((current?.options ?? {}) as Record<string, string>).E ? { E: ((current?.options ?? {}) as Record<string, string>).E } : {}) },
+          answer_key: null, // approving = the teacher checked the key
           updated_at: new Date().toISOString(),
         })
         .eq("id", q.id)

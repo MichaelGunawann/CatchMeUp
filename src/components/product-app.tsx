@@ -1443,7 +1443,8 @@ function draftToQuestionFields(q: typeof EMPTY_MANUAL_Q) {
     options = { left: pairs.map(p => p.left.trim()), right: [...pairs.map(p => p.right.trim()), ...extras] };
     answerKey = pairs.map((_, i) => i);
   } else if (type === "esai") {
-    answerKey = q.rubric.trim() ? { rubric: q.rubric.trim() } : null;
+    const keywords = q.keywords.split(/[,;\n]/).map(k => k.trim()).filter(Boolean);
+    answerKey = q.rubric.trim() || keywords.length ? { ...(q.rubric.trim() ? { rubric: q.rubric.trim() } : {}), ...(keywords.length ? { keywords } : {}) } : null;
   }
   return {
     question_type: type,
@@ -1491,6 +1492,7 @@ function questionToDraft(q: {
     ]);
   } else if (type === "esai") {
     draft.rubric = (q.answer_key as { rubric?: string } | null)?.rubric ?? "";
+    draft.keywords = ((q.answer_key as { keywords?: string[] } | null)?.keywords ?? []).join(", ");
   }
   return draft;
 }
@@ -1834,6 +1836,13 @@ function ManualQuestionFields({ value, onChange, errorFor, attempted, topicOptio
       )}
 
       {type === "esai" && (
+        <FormField label="Kata kunci (opsional)" hint="Pisahkan dengan koma, misal: fotosintesis, klorofil, cahaya matahari. AI memeriksa apakah kata kunci dipakai dengan makna dan konteks yang benar - bukan sekadar disebut.">
+          <input type="text" placeholder="kata kunci 1, kata kunci 2, ..." value={value.keywords}
+            onChange={e => set("keywords", e.target.value)} className={fieldClass(false)} />
+        </FormField>
+      )}
+
+      {type === "esai" && (
         <FormField label="Pedoman penilaian (opsional)">
           <textarea rows={2} placeholder="Poin-poin yang harus ada di jawaban siswa..."
             value={value.rubric} onChange={e => set("rubric", e.target.value)}
@@ -1874,6 +1883,11 @@ function ManualQuestionFields({ value, onChange, errorFor, attempted, topicOptio
   );
 }
 
+
+/** Imported worksheet question whose answer key wasn't printed on the sheet. */
+function needsKeyCheck(q: PendingQuestion): boolean {
+  return !!(q.answerKey as { keyCheck?: boolean } | null)?.keyCheck;
+}
 
 function pendingToApprovePayload(m: PendingQuestion) {
   // TKA types: options/key are kept as generated (the server ignores them).
@@ -1991,7 +2005,7 @@ async function fetchStudentAssessments(): Promise<SavedAssessment[]> {
   });
 }
 
-type ReviewListItem = { attemptId: string; assessmentId: string; assessmentTitle: string; type: string; date: string; score: number; allowReview: boolean };
+type ReviewListItem = { attemptId: string; assessmentId: string; assessmentTitle: string; type: string; date: string; score: number | null; allowReview: boolean };
 type ReviewQuestionDetail = {
   question: string; options: Record<string, string>; correctAnswer: string; explanation: string;
   yourAnswer: string | null; isCorrect: boolean; topic: string; sourceTitle: string | null; sourcePage: number | null;
@@ -2014,7 +2028,7 @@ async function fetchStudentCompletedAttempts(): Promise<ReviewListItem[]> {
     assessmentTitle: r.assessments?.title ?? "Asesmen",
     type: r.assessments?.type ?? "Asesmen",
     date: r.submitted_at ? new Date(r.submitted_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }) : "-",
-    score: r.score ?? 0,
+    score: r.score ?? null, // null while essays wait for the teacher
     allowReview: r.assessments?.allow_review ?? false,
   }));
 }
@@ -2037,7 +2051,7 @@ async function fetchChildCompletedAttempts(studentId: string): Promise<ReviewLis
     assessmentTitle: r.assessments?.title ?? "Asesmen",
     type: r.assessments?.type ?? "Asesmen",
     date: r.submitted_at ? new Date(r.submitted_at).toLocaleDateString("id-ID", { day: "numeric", month: "short", year: "numeric" }) : "-",
-    score: r.score ?? 0,
+    score: r.score ?? null, // null while essays wait for the teacher
     allowReview: r.assessments?.allow_review ?? false,
   }));
 }
@@ -2538,6 +2552,19 @@ function TeacherMaterials() {
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialWithFile | null>(null);
   const [confirmProcessId, setConfirmProcessId] = useState<string | null>(null);
   const [processCounts, setProcessCounts] = useState<Partial<Record<QuestionType, number>>>({ pg: 5 });
+  // A worksheet was detected: offer "Impor soal" instead of AI generation.
+  const [sheetPromptId, setSheetPromptId] = useState<string | null>(null);
+  const [importingId, setImportingId] = useState<string | null>(null);
+  async function importSheet(id: string) {
+    setSheetPromptId(null);
+    setImportingId(id);
+    setToast({ message: "Menyalin soal dari lembar soal... (bisa sampai 1-2 menit)", tone: "primary" });
+    const res = await apiPost<{ imported?: number; keyFromSheet?: number; keyToCheck?: number; essays?: number }>("/api/teacher/materials/import-questions", { materialId: id });
+    setImportingId(null);
+    if (res.error) { setToast({ message: `Gagal impor soal: ${res.error}`, tone: "primary" }); return; }
+    if (activeClass && activeSubjectId) await refreshBankAndReview(activeClass, activeSubjectId);
+    setToast({ message: `${res.imported} soal diimpor ke Tinjau Soal AI (${res.keyFromSheet} kunci dari lembar, ${res.keyToCheck} kunci perlu dicek${res.essays ? `, ${res.essays} uraian` : ""}).`, tone: "success" });
+  }
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
   const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
   const [toast, setToast] = useState<{ message: string; tone: "success" | "primary" } | null>(null);
@@ -2721,7 +2748,8 @@ function TeacherMaterials() {
             ? { storagePath, fileName: mat?.title ?? "Materi", count, materialTitle: mat?.title ?? "Materi", subject: mat?.subject ?? activeSubjectName, questionType: qType }
             : { materialTitle: mat?.title ?? "Materi", topic: mat?.subject ?? mat?.title ?? "Umum", subject: mat?.subject ?? activeSubjectName, count, difficulty: "Sedang", questionType: qType }),
         });
-        const data = await res.json().catch(() => null) as { questions?: PendingRawQuestion[]; error?: string } | null;
+        const data = await res.json().catch(() => null) as { questions?: PendingRawQuestion[]; error?: string; code?: string } | null;
+        if (data?.code === "question_sheet") { setSheetPromptId(id); return 0; }
         if (data?.questions?.length) rawQuestions = [...rawQuestions, ...data.questions.map(q => ({ ...q, questionType: q.questionType ?? qType }))];
         else lastError = data?.error ?? `Server error (${res.status})`;
         if (res.status === 429) break; // quota gone - the other types would fail too
@@ -3131,6 +3159,12 @@ function TeacherMaterials() {
                     </Button>
                   )}
                 </div>
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+                  <p className="text-[11px] text-ink-secondary">File ini lembar soal/kuis? Salin soal-soalnya ke bank soal (tanpa AI mengarang soal baru).</p>
+                  <Button variant="outline" className="h-8 text-[12px]" disabled={importingId === m.id} onClick={() => importSheet(m.id)}>
+                    {importingId === m.id ? "Mengimpor..." : "Impor soal dari file ini"}
+                  </Button>
+                </div>
               </div>
 
               {/* Soal Diekstrak section */}
@@ -3271,6 +3305,25 @@ function TeacherMaterials() {
                 onClick={() => startAIProcess(confirmProcessId)}>
                 <Sparkles className="mr-1.5 h-3.5 w-3.5" />Buat Soal
               </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {sheetPromptId && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setSheetPromptId(null)} />
+          <div className="relative w-full max-w-md rounded-card border border-border bg-surface p-6 shadow-xl">
+            <h2 className="text-[16px] font-bold text-ink">Ini lembar soal, bukan materi</h2>
+            <p className="mt-2 text-[13px] text-ink-secondary">
+              Lembar soal tidak berisi penjelasan, jadi AI tidak bisa memastikan kunci jawaban kalau diminta membuat soal baru dari sini (itu penyebab kunci yang salah sebelumnya).
+            </p>
+            <p className="mt-2 text-[13px] text-ink-secondary">
+              <b className="text-ink">Impor soal</b> menyalin soal-soal di lembar ini ke <b className="text-ink">Tinjau Soal AI</b>. Kunci yang tertulis di lembar dipakai; kalau tidak ada, AI mengusulkan kunci dan soalnya ditandai untuk dicek dulu.
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" size="sm" onClick={() => setSheetPromptId(null)}>Batal</Button>
+              <Button variant="default" size="sm" onClick={() => importSheet(sheetPromptId)}>Impor soal</Button>
             </div>
           </div>
         </div>
@@ -3634,7 +3687,7 @@ const ANSWER_OPTIONS: SelectOption[] = ["A", "B", "C", "D"].map(o => ({ value: o
 const EMPTY_MANUAL_Q = {
   type: "pg", text: "", optA: "", optB: "", optC: "", optD: "", optE: "", correct: "", complex: "",
   // JSON-encoded drafts for Benar/Salah and Menjodohkan (keeps the form flat for useRequiredFields)
-  statements: "", pairs: "", rubric: "",
+  statements: "", pairs: "", rubric: "", keywords: "",
   difficulty: "Sedang", topic: "", explanation: "", imageUrl: "", points: "1",
 };
 
@@ -4025,6 +4078,11 @@ function TeacherQuestionReview() {
           <div className="grid gap-5 lg:grid-cols-2">
             {pending.map(q => (
               <div key={q.id} className={cn("relative transition-opacity", busyIds.has(q.id) && "pointer-events-none opacity-50")}>
+                {needsKeyCheck(q) && (
+                  <div className="mb-2 rounded-[8px] border border-warning/40 bg-warning-light px-3 py-2 text-[12px] font-semibold text-warning">
+                    ⚠ Diimpor dari lembar soal - kunci jawaban {(q.answerKey as { keySource?: string } | null)?.keySource === "ai" ? "diusulkan AI" : "belum ada"}. Cek / ubah kuncinya lewat Edit sebelum menyetujui.
+                  </div>
+                )}
                 {(q.questionType ?? "pg") === "pg" ? (
                 <QuestionReviewCard question={{ ...q, ...edits[q.id] } as PendingQuestion}
                   onApprove={() => approveQuestion({ ...q, ...edits[q.id] } as PendingQuestion)}
@@ -4167,13 +4225,15 @@ function TeacherQuestionReview() {
       <ConfirmDialog
         open={confirmApproveAll}
         title="Setujui Semua Soal?"
-        message={`${pending.length} soal AI akan langsung masuk ke bank soal. Tindakan ini tidak dapat dibatalkan.`}
+        message={`${pending.filter(q => !needsKeyCheck(q)).length} soal akan langsung masuk ke bank soal. Tindakan ini tidak dapat dibatalkan.${pending.some(needsKeyCheck) ? ` ${pending.filter(needsKeyCheck).length} soal impor dengan kunci yang belum dicek tidak ikut - setujui satu per satu setelah kuncinya dicek.` : ""}`}
         confirmLabel="Setujui Semua"
         confirmVariant="success"
         onConfirm={async () => {
           setConfirmApproveAll(false);
           if (!activeClass || !activeSubjectId) return;
-          const merged = pending.map(q => ({ ...q, ...edits[q.id] } as PendingQuestion));
+          // Imported questions whose key wasn't on the sheet must be checked one by one.
+          const merged = pending.filter(q => !needsKeyCheck(q)).map(q => ({ ...q, ...edits[q.id] } as PendingQuestion));
+          if (!merged.length) { setToast({ message: "Semua soal yang tersisa perlu dicek kuncinya satu per satu.", tone: "danger" }); return; }
           setApprovingAll(true);
           const err = await approveAllBankQuestions(merged, activeClass, activeSubjectId);
           setApprovingAll(false);
@@ -5385,6 +5445,148 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
   return { questions, distributions, studentRows };
 }
 
+// "Peserta & Waktu": who is doing the exam right now, extra time for
+// everyone or one student, and reopening the exam for a student whose
+// exam ended (e.g. left the exam screen by accident).
+type SessionAttempt = { id: string; student_id: string; status: string; started_at: string; submitted_at: string | null; score: number | null; deadline_override?: string | null; end_reason?: string | null };
+function ExamSessionPanel({ assessmentId, students, onChanged }: {
+  assessmentId: string; students: { id: string; name: string }[]; onChanged: () => void;
+}) {
+  const [attempts, setAttempts] = useState<SessionAttempt[] | null>(null);
+  const [assessment, setAssessment] = useState<{ duration_minutes: number | null; close_at: string | null } | null>(null);
+  const [dialog, setDialog] = useState<null | { kind: "extend-all" } | { kind: "extend-one"; attempt: SessionAttempt; name: string } | { kind: "reopen"; attempt: SessionAttempt; name: string }>(null);
+  const [minutes, setMinutes] = useState(10);
+  const [keepAnswers, setKeepAnswers] = useState(true);
+  const [extendClose, setExtendClose] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<{ text: string; tone: "success" | "danger" } | null>(null);
+  const [, tick] = useState(0);
+
+  const load = React.useCallback(async () => {
+    const [{ data: at }, { data: a }] = await Promise.all([
+      supabase.from("assessment_attempts").select("*").eq("assessment_id", assessmentId),
+      supabase.from("assessments").select("duration_minutes, close_at").eq("id", assessmentId).single(),
+    ]);
+    setAttempts((at ?? []) as SessionAttempt[]);
+    setAssessment(a as typeof assessment);
+  }, [assessmentId]);
+  useEffect(() => { load(); const t = setInterval(() => { load(); tick(n => n + 1); }, 20_000); return () => clearInterval(t); }, [load]);
+
+  const deadlineOf = (at: SessionAttempt) => {
+    if (at.deadline_override) return parseDbTime(at.deadline_override);
+    const start = parseDbTime(at.started_at);
+    const d = assessment?.duration_minutes ? start + assessment.duration_minutes * 60000 : null;
+    const c = assessment?.close_at ? parseDbTime(assessment.close_at) : null;
+    return [d, c].filter((x): x is number => x !== null).sort((x, y) => x - y)[0] ?? null;
+  };
+  const latest = (sid: string) => (attempts ?? []).filter(a => a.student_id === sid)
+    .sort((x, y) => parseDbTime(y.started_at) - parseDbTime(x.started_at))[0];
+
+  async function run() {
+    if (!dialog) return;
+    setBusy(true); setMsg(null);
+    const res = dialog.kind === "reopen"
+      ? await apiPost("/api/teacher/attempts/reopen", { attemptId: dialog.attempt.id, keepAnswers, minutes })
+      : await apiPost("/api/teacher/assessments/extend", {
+          assessmentId, minutes,
+          ...(dialog.kind === "extend-one" ? { attemptIds: [dialog.attempt.id] } : { extendClose }),
+        });
+    setBusy(false);
+    if (res.error) { setMsg({ text: res.error, tone: "danger" }); return; }
+    setMsg({ text: dialog.kind === "reopen" ? `Ujian ${dialog.name} dibuka kembali selama ${minutes} menit. Minta siswa membuka ujiannya lagi.`
+      : dialog.kind === "extend-one" ? `${dialog.name} mendapat tambahan ${minutes} menit.`
+      : `Waktu ujian ditambah ${minutes} menit untuk semua siswa.`, tone: "success" });
+    setDialog(null);
+    await load(); onChanged();
+  }
+
+  const fmtTime = (ms: number) => new Date(ms).toLocaleString("id-ID", { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const running = (attempts ?? []).filter(a => a.status === "in_progress").length;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <p className="text-[12px] text-ink-secondary">
+          Durasi {assessment?.duration_minutes ?? "-"} menit{assessment?.close_at ? ` · ditutup ${fmtTime(parseDbTime(assessment.close_at))}` : ""} · <b className="text-ink">{running}</b> siswa sedang mengerjakan
+        </p>
+        <Button variant="default" size="sm" className="ml-auto" onClick={() => { setMinutes(10); setExtendClose(true); setDialog({ kind: "extend-all" }); }}>
+          <Clock className="mr-1.5 h-3.5 w-3.5" />Tambah waktu untuk semua
+        </Button>
+      </div>
+      {msg && <p className={cn("text-[12px] font-medium", msg.tone === "success" ? "text-success" : "text-danger")}>{msg.text}</p>}
+      {attempts === null ? <SectionLoading message="Memuat peserta..." /> : (
+        <div className="overflow-hidden rounded-[10px] border border-border">
+          {students.map(st => {
+            const at = latest(st.id);
+            const dl = at ? deadlineOf(at) : null;
+            const left = dl ? Math.round((dl - Date.now()) / 60000) : null;
+            return (
+              <div key={st.id} className="flex flex-wrap items-center gap-2 border-b border-border/60 px-3 py-2 last:border-0">
+                <span className="min-w-[140px] flex-1 text-[12px] font-medium text-ink">{st.name}</span>
+                {!at ? <Badge tone="neutral">Belum mulai</Badge>
+                  : at.status === "in_progress" ? (
+                    <>
+                      <Badge tone="primary">Mengerjakan</Badge>
+                      {left !== null && <span className="text-[11px] text-ink-secondary">{left > 0 ? `sisa ± ${left} menit` : "waktu habis"}</span>}
+                      <Button variant="outline" size="sm" onClick={() => { setMinutes(5); setDialog({ kind: "extend-one", attempt: at, name: st.name }); }}>+ Waktu</Button>
+                    </>
+                  ) : (
+                    <>
+                      <Badge tone={at.status === "missed" ? "danger" : "success"}>
+                        {at.status === "missed" ? "Tidak selesai" : at.score == null ? "Selesai · nilai –" : `Selesai · ${at.score}`}
+                      </Badge>
+                      {at.end_reason && <span className="text-[11px] text-warning" title="Alasan ujian berakhir">{at.end_reason}</span>}
+                      <Button variant="outline" size="sm" onClick={() => { setMinutes(15); setKeepAnswers(true); setDialog({ kind: "reopen", attempt: at, name: st.name }); }}>Buka kembali</Button>
+                    </>
+                  )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {dialog && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => !busy && setDialog(null)} />
+          <div className="relative w-full max-w-md rounded-card border border-border bg-surface p-6 shadow-xl">
+            <h2 className="text-[16px] font-bold text-ink">
+              {dialog.kind === "reopen" ? `Buka kembali ujian ${dialog.name}` : dialog.kind === "extend-one" ? `Tambah waktu untuk ${dialog.name}` : "Tambah waktu untuk semua siswa"}
+            </h2>
+            {dialog.kind === "reopen" && dialog.attempt.end_reason && (
+              <p className="mt-1 text-[12px] text-ink-secondary">Ujian berakhir karena: <b>{dialog.attempt.end_reason}</b></p>
+            )}
+            <label className="mt-4 flex items-center justify-between gap-3 text-[13px] font-medium text-ink">
+              {dialog.kind === "reopen" ? "Waktu yang diberikan (menit)" : "Tambahan waktu (menit)"}
+              <NumberInput value={minutes} min={1} max={600} onChange={setMinutes} ariaLabel="Menit"
+                className="w-20 rounded-[6px] border border-border bg-background px-2 py-1.5 text-right text-[13px] text-ink focus:border-primary focus:outline-none" />
+            </label>
+            {dialog.kind === "reopen" && (
+              <div className="mt-3 space-y-2 text-[13px] text-ink">
+                <label className="flex items-start gap-2"><input type="radio" className="mt-0.5 accent-primary" checked={keepAnswers} onChange={() => setKeepAnswers(true)} />
+                  <span><b>Lanjutkan jawaban sebelumnya</b><br /><span className="text-[12px] text-ink-secondary">Jawaban yang sudah diisi tetap ada, siswa melanjutkan.</span></span></label>
+                <label className="flex items-start gap-2"><input type="radio" className="mt-0.5 accent-primary" checked={!keepAnswers} onChange={() => setKeepAnswers(false)} />
+                  <span><b>Kosongkan semua jawaban</b><br /><span className="text-[12px] text-ink-secondary">Siswa mengulang dari awal.</span></span></label>
+                <p className="text-[11px] text-ink-tertiary">Nilai lama dihapus sampai siswa mengumpulkan lagi. Bisa dibuka walau jadwal asesmen sudah ditutup (khusus siswa ini).</p>
+              </div>
+            )}
+            {dialog.kind === "extend-all" && (
+              <label className="mt-3 flex items-start gap-2 text-[13px] text-ink">
+                <input type="checkbox" className="mt-0.5 accent-primary" checked={extendClose} onChange={e => setExtendClose(e.target.checked)} />
+                <span>Mundurkan juga waktu tutup asesmen<br /><span className="text-[12px] text-ink-secondary">Supaya tambahan waktu tidak terpotong jadwal tutup.</span></span>
+              </label>
+            )}
+            <p className="mt-3 text-[11px] text-ink-tertiary">Layar ujian siswa menyesuaikan dalam ± 30 detik.</p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button variant="outline" size="sm" disabled={busy} onClick={() => setDialog(null)}>Batal</Button>
+              <Button variant="default" size="sm" disabled={busy} onClick={run}>{busy ? "Menyimpan..." : dialog.kind === "reopen" ? "Buka kembali" : "Tambah waktu"}</Button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Teacher scores essay answers (0..points) with optional feedback. The AI
 // can suggest a score for one answer or for a selection (it costs AI quota,
 // so it only runs when asked); a suggestion only counts once the teacher
@@ -5553,7 +5755,7 @@ function TeacherResults() {
   const [activeClass] = useActiveClass();
   const activeSubjectId = findActiveAssignment(teacher, activeClass)?.subjectId;
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<"soal" | "siswa" | "esai">("soal");
+  const [detailTab, setDetailTab] = useState<"soal" | "siswa" | "esai" | "sesi">("soal");
   // null = still loading - never show "Belum ada asesmen" before the fetch returns
   const [assessmentRows, setAssessmentRows] = useState<SavedAssessment[] | null>(null);
   const allAssessments = assessmentRows ?? [];
@@ -5734,6 +5936,7 @@ function TeacherResults() {
                   {([
                     { key: "soal" as const, label: "Analisis Soal" },
                     { key: "siswa" as const, label: "Jawaban Siswa" },
+                    { key: "sesi" as const, label: "Peserta & Waktu" },
                     ...(resultDetail.questions.some(q => q.type === "esai") ? [{ key: "esai" as const, label: `Nilai Esai${essayPendingCount ? ` (${essayPendingCount})` : ""}` }] : []),
                   ]).map(t => (
                     <button key={t.key} onClick={() => setDetailTab(t.key)}
@@ -5925,6 +6128,12 @@ function TeacherResults() {
                     </div>
                   )}
                 </div>
+              )}
+
+              {/* TAB: Peserta & Waktu */}
+              {detailTab === "sesi" && resultDetail && detailId && (
+                <ExamSessionPanel assessmentId={detailId} students={resultDetail.studentRows.map(st => ({ id: st.studentId, name: st.name }))}
+                  onChanged={() => { if (activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail); }} />
               )}
 
               {/* TAB: Nilai Esai */}
@@ -7594,7 +7803,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [confidence, setConfidence] = useState<Record<number, "yakin" | "cukup" | "ragu">>({});
   const [finished, setFinished] = useState(false);
-  const [finalScore, setFinalScore] = useState(0);
+  const [finalScore, setFinalScore] = useState<number | null>(0);
   const [finalCorrect, setFinalCorrect] = useState(0);
   const [timeLeft, setTimeLeft] = useState(0);
   const [confirmSubmit, setConfirmSubmit] = useState(false);
@@ -7630,8 +7839,10 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   const [submitNotice, setSubmitNotice] = useState<string | null>(null);
   const [pendingEssays, setPendingEssays] = useState(0);
 
-  async function autoSubmit() {
+  const endReasonRef = React.useRef<string | null>(null);
+  async function autoSubmit(reason?: string) {
     if (finishedRef.current) return;
+    if (reason && !endReasonRef.current) endReasonRef.current = reason;
     finishedRef.current = true; // stops the timer, lockdown and further edits
     exitFullscreen();
     await trySubmit();
@@ -7654,7 +7865,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     let data: SubmitResult | null = null;
     try {
       data = await authedFetch(`/api/student/assessment/${session.assessmentId}/submit`, {
-        attemptId: session.attemptId, answers: answersByQid,
+        attemptId: session.attemptId, answers: answersByQid, endReason: endReasonRef.current,
       }) as SubmitResult | null;
     } catch {
       data = null; // network failure
@@ -7678,7 +7889,8 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
       return;
     }
 
-    const score = data.score ?? 0;
+    // null = essays still waiting for the teacher (no score yet)
+    const score = data.score ?? null;
     const correctCount = data.correctCount ?? 0;
     setFinalScore(score);
     setFinalCorrect(correctCount);
@@ -7690,7 +7902,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
       assessmentTitle: session.title,
       type: "Asesmen",
       date: new Date().toLocaleDateString("id-ID"),
-      score,
+      score: score ?? 0,
       totalQuestions: data.totalQuestions ?? session.questions.length,
       correctCount,
       answers: Object.fromEntries(Object.entries(ans).map(([k, v]) => [k, v])),
@@ -7736,6 +7948,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     enterFullscreen();
     const data = await authedFetch(`/api/student/assessment/${assessmentId}/start`, {}) as {
       attemptId?: string; title?: string; deadlineAt?: number | null; allowReview?: boolean; questions?: ExamQuestion[]; error?: string;
+      savedAnswers?: Record<string, string>;
     } | null;
     if (!data || data.error || !data.attemptId || !data.questions?.length) {
       setStartError(data?.error ?? null);
@@ -7750,8 +7963,12 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     // Resuming (refresh / reconnect): restore this attempt's saved answers
     // instead of starting blank.
     const saved = loadExamProgress(data.attemptId);
+    // Answers kept on the server (exam reopened by the teacher) when this
+    // device has none stored.
+    const fromServer: Record<number, string> = {};
+    data.questions.forEach((q, i) => { const v = data.savedAnswers?.[q.assessmentQuestionId]; if (v) fromServer[i] = v; });
     setCurrent(saved?.current ?? 0);
-    setAnswers(saved?.answers ?? {});
+    setAnswers(saved?.answers && Object.keys(saved.answers).length ? saved.answers : fromServer);
     setConfidence(saved?.confidence ?? {});
     onPageChange("exam");
   }
@@ -7778,6 +7995,34 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     saveExamProgress(attemptId, { answers, confidence, current });
   }, [answers, confidence, current, page, examSession?.attemptId, finished]);
 
+  // Extra time given by the teacher mid-exam: re-check the deadline every
+  // 30 seconds and tell the student when it moved.
+  const [timeNotice, setTimeNotice] = useState<string | null>(null);
+  React.useEffect(() => {
+    const session = examSession;
+    if (finished || page !== "exam" || !session) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const { data: { session: auth } } = await supabase.auth.getSession();
+        if (!auth) return;
+        const res = await fetch(`/api/student/assessment/${session.assessmentId}/deadline?attemptId=${session.attemptId}`, { headers: { Authorization: `Bearer ${auth.access_token}` } });
+        const body = await res.json() as { deadlineAt?: number | null };
+        if (cancelled || body.deadlineAt === undefined || body.deadlineAt === session.deadlineAt) return;
+        const added = body.deadlineAt && session.deadlineAt ? Math.round((body.deadlineAt - session.deadlineAt) / 60000) : 0;
+        setExamSession(prev => prev ? { ...prev, deadlineAt: body.deadlineAt ?? null } : prev);
+        if (added > 0) setTimeNotice(`Guru menambah waktu ${added} menit ⏱`);
+      } catch { /* offline - try again next round */ }
+    };
+    const t = setInterval(poll, 30_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [finished, page, examSession]);
+  React.useEffect(() => {
+    if (!timeNotice) return;
+    const t = setTimeout(() => setTimeNotice(null), 6000);
+    return () => clearTimeout(t);
+  }, [timeNotice]);
+
   // Countdown timer, driven by the server-computed deadline (duration_minutes
   // / close_at) rather than a hardcoded 45-minute constant
   React.useEffect(() => {
@@ -7786,7 +8031,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
     function tick() {
       const remaining = Math.max(0, Math.round((deadline - Date.now()) / 1000));
       setTimeLeft(remaining);
-      if (remaining <= 0) autoSubmit();
+      if (remaining <= 0) autoSubmit("Waktu habis");
     }
     tick();
     const timer = setInterval(tick, 1000);
@@ -7799,7 +8044,7 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
   useExamLockdown(page === "exam" && !finished && !!examSession, reason => {
     setKioskReason(reason);
     triggerKioskWarning();
-    autoSubmit(); // submit right away - not when the dialog is dismissed
+    autoSubmit(reason); // submit right away - not when the dialog is dismissed
   }, () => setBackNotice(true));
   const [backNotice, setBackNotice] = useState(false);
   useEffect(() => {
@@ -7906,14 +8151,17 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
             <h2 className="text-2xl font-bold text-ink">Asesmen Selesai!</h2>
             {submitNotice
               ? <p className="text-[14px] text-ink-secondary mt-1">{submitNotice}</p>
-              : <p className="text-[14px] text-ink-secondary mt-1">{finalCorrect} dari {examSession?.questions.length ?? 0} soal benar</p>}
-            {!submitNotice && pendingEssays > 0 && (
-              <p className="mt-2 max-w-sm text-[13px] font-medium text-warning">
-                {pendingEssays} soal esai masih dinilai guru, jadi nilai di bawah ini sementara dan bisa naik.
-              </p>
-            )}
+              : pendingEssays > 0 || finalScore === null
+                ? <p className="mt-2 max-w-sm text-[14px] font-medium text-ink-secondary">Jawabanmu sudah terkumpul. Ada soal esai yang dinilai guru, jadi <b>nilaimu muncul setelah guru selesai menilai</b>.</p>
+                : <p className="text-[14px] text-ink-secondary mt-1">{finalCorrect} dari {examSession?.questions.length ?? 0} soal benar</p>}
           </div>
-          {!submitNotice && <ScoreCircle score={finalScore} size={96} />}
+          {!submitNotice && finalScore !== null && pendingEssays === 0 && <ScoreCircle score={finalScore} size={96} />}
+          {!submitNotice && (finalScore === null || pendingEssays > 0) && (
+            <div className="flex h-24 w-24 flex-col items-center justify-center rounded-full border-4 border-border text-center">
+              <span className="text-[26px] font-bold text-ink-tertiary">–</span>
+              <span className="text-[10px] text-ink-tertiary">menunggu</span>
+            </div>
+          )}
           <Button variant="default" onClick={() => { onPageChange("pick"); setFinished(false); setSubmitNotice(null); setCurrent(0); setAnswers({}); setTimeLeft(0); setExamSession(null); }}>
             Kembali ke Beranda
           </Button>
@@ -7959,6 +8207,11 @@ function StudentSimulator({ page, onPageChange }: { page: string; onPageChange: 
         </div>
       )}
 
+      {timeNotice && (
+        <div role="status" className="fixed left-1/2 top-16 z-[121] -translate-x-1/2 rounded-full bg-success px-4 py-2 text-[13px] font-semibold text-white shadow-lg">
+          {timeNotice}
+        </div>
+      )}
       {backNotice && (
         <div role="alert" className="fixed left-1/2 top-16 z-[120] -translate-x-1/2 rounded-full bg-ink px-4 py-2 text-[13px] font-semibold text-white shadow-lg">
           Tombol kembali tidak bisa dipakai saat ujian. Kumpulkan lewat &quot;Selesaikan Ujian&quot;.
@@ -8739,7 +8992,7 @@ function StudentReview() {
             <div className="flex items-start justify-between border-b border-border px-5 py-4 shrink-0">
               <div>
                 <h2 className="text-[15px] font-bold text-ink">{reviewResult.assessmentTitle}</h2>
-                <p className="text-[12px] text-ink-secondary">{reviewResult.type} · {reviewResult.date} · Nilai: <strong className="text-ink">{reviewResult.score}</strong></p>
+                <p className="text-[12px] text-ink-secondary">{reviewResult.type} · {reviewResult.date} · Nilai: <strong className="text-ink">{reviewResult.score ?? "– (menunggu penilaian esai)"}</strong></p>
               </div>
               <button onClick={() => setReviewDetailId(null)}
                 className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-background text-ink-secondary">
