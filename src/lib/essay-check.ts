@@ -41,7 +41,7 @@ export type EssayPrecheck = {
 
 export function precheckEssay(answer: string, keywords: string[], example: string): EssayPrecheck {
   const ans = tokens(answer);
-  const words = answer.trim().split(/\s+/).filter(Boolean).length;
+  const words = answer.trim().split(/\s+/).filter(w => /[\p{L}\p{N}]/u.test(w)).length;
   const has = (kw: string) => {
     const kt = tokens(kw);
     return kt.length > 0 && kt.every(k => ans.some(a => near(a, k)));
@@ -54,8 +54,10 @@ export function precheckEssay(answer: string, keywords: string[], example: strin
 
 /** A suggestion that needs no AI, or null when the AI should judge it. */
 export function obviousSuggestion(p: EssayPrecheck, hasKeywords: boolean, hasExample: boolean): { points: 0; reason: string } | null {
-  if (p.words < 3) return { points: 0, reason: "Jawaban kosong atau terlalu singkat (dicek otomatis, tanpa AI)." };
-  if (hasKeywords && p.hits.length === 0 && (!hasExample || p.exampleOverlap < 0.1) && p.words < 12) {
+  // Short is NOT wrong: "5040" can be a perfect answer to a maths question,
+  // so only a truly empty answer is decided here.
+  if (p.words === 0) return { points: 0, reason: "Jawaban kosong (dicek otomatis, tanpa AI)." };
+  if (hasKeywords && p.hits.length === 0 && (!hasExample || p.exampleOverlap < 0.1) && p.words >= 3 && p.words < 12) {
     return { points: 0, reason: "Tidak menyinggung satu pun kata kunci/konsep yang diminta (dicek otomatis, tanpa AI)." };
   }
   return null;
