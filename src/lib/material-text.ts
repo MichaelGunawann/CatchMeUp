@@ -74,7 +74,9 @@ export function isQuestionSheet(text: string, title = ""): boolean {
   const t = text.replace(/\[hal\. \d+\]/g, "\n");
   if (t.length < 300 || t.length > 80_000) return false; // whole books aren't worksheets
   const per1k = (n: number) => (n * 1000) / t.length;
-  const stems = (t.match(/(…|\.\.\.|\?|\.{4,})\s*(\n|$|[A-Ea-e][.)]\s)/g) ?? []).length;
+  // A stem marker followed by a line break, an option ("A. ") or the next
+  // question number ("2 Banyak ...") - PDFs lose their line breaks.
+  const stems = (t.match(/(…|\.\.\.|\?|\.{4,})(?=\s*(\n|$|[A-Ea-e][.)]\s|\d{1,3}[.)]?\s+[A-Z]))/g) ?? []).length;
   const formPrint = (t.match(/mark only one oval|pilih satu jawaban|\b\d+\s*(points|poin)\b/gi) ?? []).length;
   const titled = /kuis|quiz|soal|try ?out|ulangan|ujian|latihan|\blks\b|\bpts\b|\bpas\b|\buts\b|\buas\b|\btes\b|\btest\b/i.test(title);
   const score = per1k(stems) + (per1k(formPrint) >= 2 ? 2 : 0) + (titled ? 1 : 0);

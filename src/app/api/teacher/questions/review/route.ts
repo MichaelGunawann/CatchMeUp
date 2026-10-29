@@ -107,6 +107,10 @@ export async function POST(req: Request) {
           status: "active", question, topic, subtopic: topic,
           difficulty: ["Mudah", "Sedang", "Sulit"].includes(q.difficulty) ? q.difficulty : "Sedang",
           explanation: q.explanation ?? "", updated_at: new Date().toISOString(),
+          // approving = the teacher checked it; drop the "kunci perlu dicek" flag
+          ...((current.answer_key as { keyCheck?: boolean } | null)?.keyCheck
+            ? { answer_key: (({ keyCheck: _k, keySource: _s, ...rest }) => (Object.keys(rest).length ? rest : null))(current.answer_key as Record<string, unknown>) }
+            : {}),
         }).eq("id", q.id).eq("status", "pending");
         if (error) return Response.json({ error: error.message }, { status: 500 });
         continue;

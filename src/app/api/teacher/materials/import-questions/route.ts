@@ -14,6 +14,8 @@ type Extracted = {
   options?: Record<string, string>;
   answerOnSheet?: string | null;   // key printed on the sheet
   suggestedAnswer?: string | null; // AI's suggestion when the sheet has none
+  answerTextOnSheet?: string | null;  // uraian: answer printed on the sheet
+  suggestedAnswerText?: string | null; // uraian: AI's short model answer
   needsImage?: boolean;
 };
 
@@ -69,6 +71,7 @@ ATURAN:
 - Pilihan jawaban beri huruf A, B, C, D, E sesuai urutannya walau di dokumen tidak berhuruf. Soal tanpa pilihan (uraian) -> "options": {}.
 - "answerOnSheet": huruf kunci HANYA jika kuncinya tertulis di dokumen (lihat juga bagian KUNCI di bawah). Jika tidak ada -> null.
 - "suggestedAnswer": jika answerOnSheet null dan soal pilihan ganda, isi huruf jawaban yang menurutmu benar (akan dicek guru). Selain itu null.
+- Soal uraian/isian (tanpa pilihan): "answerTextOnSheet" = jawaban jika tertulis di dokumen, selain itu null; "suggestedAnswerText" = jawaban singkat yang benar menurutmu (beserta cara singkat bila hitungan), akan dicek guru.
 - "needsImage": true jika soal merujuk gambar/tabel/grafik yang tidak ada di teks.
 - Abaikan teks yang bukan soal (judul, nama/absen, "Mark only one oval", "2 points", petunjuk umum).
 
@@ -78,7 +81,7 @@ TEKS DOKUMEN:
 ${part}
 ---
 
-Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answerOnSheet":null,"suggestedAnswer":"A","needsImage":false}]}` }],
+Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answerOnSheet":null,"suggestedAnswer":"A","answerTextOnSheet":null,"suggestedAnswerText":null,"needsImage":false}]}` }],
         max_tokens: 6000,
         temperature: 0.1,
       });
@@ -108,8 +111,12 @@ Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answer
       options: isPg ? opts : {},
       correct_answer: isPg ? (onSheet ?? suggested ?? Object.keys(opts)[0]) : null,
       // Flag for Tinjau Soal: the key wasn't on the sheet.
-      answer_key: isPg && !onSheet ? { keyCheck: true, keySource: suggested ? "ai" : "none" } : null,
-      explanation: "",
+      answer_key: isPg
+        ? (!onSheet ? { keyCheck: true, keySource: suggested ? "ai" : "none" } : null)
+        : (q.answerTextOnSheet?.trim() ? null : { keyCheck: true, keySource: q.suggestedAnswerText?.trim() ? "ai" : "none" }),
+      // Uraian: the (printed or suggested) answer becomes the example answer
+      // the essay check compares against.
+      explanation: isPg ? "" : (q.answerTextOnSheet?.trim() || q.suggestedAnswerText?.trim() || ""),
       status: "pending",
       source_title: mat.title,
       source_material_id: mat.id,
@@ -122,7 +129,7 @@ Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answer
   return Response.json({
     imported: rows.length,
     keyFromSheet: rows.filter(r => r.question_type === "pg" && !r.answer_key).length,
-    keyToCheck: rows.filter(r => r.answer_key).length,
+    keyToCheck: rows.filter(r => (r.answer_key as { keyCheck?: boolean } | null)?.keyCheck).length,
     essays: rows.filter(r => r.question_type === "esai").length,
   });
 }
