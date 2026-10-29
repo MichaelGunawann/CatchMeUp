@@ -5344,10 +5344,11 @@ async function attachAssessmentStats(rows: SavedAssessment[]): Promise<SavedAsse
     .select("assessment_id, status, score")
     .in("assessment_id", rows.map(r => r.id))
     .in("status", ["submitted", "graded"]);
-  const byAssessment = new Map<string, { count: number; sum: number; scored: number }>();
+  const byAssessment = new Map<string, { count: number; sum: number; scored: number; pending: number }>();
   for (const row of (data ?? []) as Array<{ assessment_id: string; status: string; score: number | null }>) {
-    const cur = byAssessment.get(row.assessment_id) ?? { count: 0, sum: 0, scored: 0 };
+    const cur = byAssessment.get(row.assessment_id) ?? { count: 0, sum: 0, scored: 0, pending: 0 };
     cur.count += 1;
+    if (row.status === "submitted") cur.pending += 1; // essays not graded yet
     if (row.score !== null) { cur.sum += row.score; cur.scored += 1; }
     byAssessment.set(row.assessment_id, cur);
   }
@@ -5356,6 +5357,7 @@ async function attachAssessmentStats(rows: SavedAssessment[]): Promise<SavedAsse
     return {
       ...r,
       participants: stat?.count ?? 0,
+      pendingGrading: stat?.pending ?? 0,
       avgScore: stat && stat.scored > 0 ? Math.round(stat.sum / stat.scored) : undefined,
       // From the schedule (an open assessment nobody has submitted yet used
       // to show "Terjadwal / belum dimulai").
@@ -5639,8 +5641,10 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
   }
 
   // Accept the AI suggestion for every selected answer that has one.
+  // Ticked answers, or - when nothing is ticked - every ungraded answer.
   async function acceptSelected(q: ResultQuestionRow, rows: Array<{ r: ResultStudentRow["results"][string] }>) {
-    const targets = rows.filter(({ r }) => selected.has(r.qaId) && suggestionOf(r));
+    const anyTicked = rows.some(({ r }) => selected.has(r.qaId));
+    const targets = rows.filter(({ r }) => (anyTicked ? selected.has(r.qaId) : r.isCorrect === null) && suggestionOf(r));
     if (targets.length === 0) { setMsg({ text: "Belum ada usulan AI untuk jawaban yang dipilih. Klik \"AI cek\" dulu.", tone: "danger" }); return; }
     setSaving("bulk"); setMsg(null);
     let ok = 0;
@@ -5656,7 +5660,8 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
   return (
     <div className="space-y-5">
       <p className="text-[12px] text-ink-secondary">
-        AI hanya mengecek kalau diminta (hemat kuota). AI membandingkan jawaban dengan <span className="font-semibold text-ink">contoh jawaban / pedoman</span> di soal;
+        <b className="text-ink">Cara menilai:</b> ketik nilai di kotak &quot;Nilai&quot; lalu <b className="text-ink">Simpan</b>, atau minta <b className="text-ink">usulan nilai AI</b> lalu pakai/ubah usulannya.
+        AI hanya mengecek kalau diminta (hemat kuota). AI membandingkan jawaban dengan <span className="font-semibold text-ink">contoh jawaban / kata kunci / pedoman</span> di soal;
         kalau keduanya kosong, AI memakai materi kelas. Usulan AI baru berlaku setelah kamu menyimpannya.
       </p>
       {msg && <p className={cn("text-[12px] font-medium", msg.tone === "success" ? "text-success" : "text-danger")}>{msg.text}</p>}
@@ -5672,7 +5677,9 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
           <div key={q.assessmentQuestionId} className="rounded-[10px] border border-border bg-background p-4">
             <p className="text-[12px] font-bold text-ink">Soal {idx} · maks. {q.points} poin</p>
             <p className="mt-1 whitespace-pre-line text-[12px] text-ink">{q.question}</p>
-            <p className="mt-1 text-[11px] text-ink-secondary">{describeKey(q.raw)}</p>
+            {describeKey(q.raw) === "Dinilai guru" && !(q.raw as { explanation?: string }).explanation
+              ? <p className="mt-1 text-[11px] text-warning">Soal ini belum punya contoh jawaban / kata kunci - usulan AI akan memakai materi kelas. Tambahkan lewat Bank Soal → Edit Soal supaya usulan lebih tepat.</p>
+              : <p className="mt-1 text-[11px] text-ink-secondary">{describeKey(q.raw)}</p>}
             {rows.length === 0 && <p className="mt-3 text-[12px] text-ink-tertiary">Belum ada jawaban.</p>}
             {rows.length > 0 && (
               <div className="mt-3 flex flex-wrap items-center gap-2 rounded-[8px] border border-border bg-surface px-3 py-2">
@@ -5686,14 +5693,24 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
                   Pilih yang belum dinilai
                 </button>
                 <div className="ml-auto flex flex-wrap gap-2">
-                  <Button variant="outline" size="sm" disabled={selectedHere.length === 0 || selectedHere.some(id => checking.has(id))}
-                    onClick={() => aiCheck(selectedHere)}>
-                    <Sparkles className="mr-1.5 h-3.5 w-3.5" />AI cek yang dipilih ({selectedHere.length})
-                  </Button>
-                  <Button variant="default" size="sm" disabled={selectedHere.length === 0 || saving === "bulk"}
-                    onClick={() => acceptSelected(q, rows)}>
-                    {saving === "bulk" ? "Menyimpan..." : "Pakai usulan AI (dipilih)"}
-                  </Button>
+                  {(() => {
+                    const ungraded = rows.filter(({ r }) => r.isCorrect === null).map(({ r }) => r.qaId);
+                    const targetIds = selectedHere.length ? selectedHere : ungraded;
+                    const withSuggestion = rows.filter(({ r }) => (selectedHere.length ? selected.has(r.qaId) : r.isCorrect === null) && suggestionOf(r)).length;
+                    return (
+                      <>
+                        <Button variant="default" size="sm" disabled={targetIds.length === 0 || targetIds.some(id => checking.has(id))}
+                          onClick={() => aiCheck(targetIds)}>
+                          <Sparkles className="mr-1.5 h-3.5 w-3.5" />
+                          {targetIds.some(id => checking.has(id)) ? "AI mengecek..." : selectedHere.length ? `Usulan AI untuk yang dipilih (${selectedHere.length})` : `Minta usulan nilai AI (${ungraded.length} belum dinilai)`}
+                        </Button>
+                        <Button variant="success" size="sm" disabled={withSuggestion === 0 || saving === "bulk"}
+                          onClick={() => acceptSelected(q, rows)}>
+                          {saving === "bulk" ? "Menyimpan..." : `Pakai ${withSuggestion} usulan AI`}
+                        </Button>
+                      </>
+                    );
+                  })()}
                 </div>
               </div>
             )}
@@ -5784,7 +5801,12 @@ function TeacherResults() {
   // Reset analysis, tab, and detail data when dialog closes or changes
   useEffect(() => {
     setAiAnalysis(null); setAiLoading(false); setDetailTab("soal"); setResultDetail(null);
-    if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail);
+    if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(d => {
+      setResultDetail(d);
+      // Essays waiting for a score: open straight on "Nilai Esai".
+      const waiting = d.studentRows.some(st => d.questions.some(q => q.type === "esai" && st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]?.isCorrect === null));
+      if (waiting) setDetailTab("esai");
+    });
   }, [detailId, activeClass]);
 
   const essayPendingCount = resultDetail
@@ -5880,6 +5902,9 @@ function TeacherResults() {
               ) : (
                 <Badge tone={a.status === "Terjadwal" ? "neutral" : "primary"}>{a.status}</Badge>
               )}
+              {((a as { pendingGrading?: number }).pendingGrading ?? 0) > 0 && (
+                <div className="mt-1"><Badge tone="warning">✍️ {(a as { pendingGrading?: number }).pendingGrading} menunggu nilai esai</Badge></div>
+              )}
             </div>
             <ChevronRight className="h-4 w-4 text-ink-tertiary shrink-0" />
           </div>
@@ -5923,6 +5948,12 @@ function TeacherResults() {
                 <AlertPanel tone="primary" title="Asesmen belum dimulai">
                   Asesmen akan tersedia sesuai jadwal pada {detail.scheduledFor}.
                 </AlertPanel>
+              )}
+              {essayPendingCount > 0 && detailTab !== "esai" && (
+                <div className="flex flex-wrap items-center gap-3 rounded-[10px] border border-warning/40 bg-warning-light px-4 py-3">
+                  <span className="text-[13px] font-semibold text-ink">✍️ {essayPendingCount} jawaban esai menunggu dinilai. Nilai siswa baru muncul setelah semuanya dinilai.</span>
+                  <Button variant="default" size="sm" className="ml-auto" onClick={() => setDetailTab("esai")}>Nilai esai sekarang</Button>
+                </div>
               )}
               {resultDetail && resultDetail.questions.length === 0 && (
                 <AlertPanel tone="danger" title="Asesmen ini tidak punya soal">
