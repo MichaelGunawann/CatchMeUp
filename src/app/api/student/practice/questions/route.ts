@@ -2,7 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import { aiChat } from "@/lib/ai";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve } from "@/lib/retrieval";
-import { QUESTION_QUALITY_RULES, isSelfContained, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type TypedQuestion } from "@/lib/ai-questions";
+import { QUESTION_QUALITY_RULES, defaultQuestionLanguage, isSelfContained, languageRule, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type TypedQuestion } from "@/lib/ai-questions";
 import { PRACTICE_TYPES, displayPayload, questionTypeOf, type QuestionType } from "@/lib/question-types";
 import { loadTypeStats } from "@/lib/learning/type-stats";
 
@@ -189,12 +189,15 @@ export async function POST(req: Request) {
           : "";
         const grounding = groundingFor(retrieve(chunks, topic ?? subjectRow?.name ?? "", 7000));
 
-        const buildPrompt = (groundingText: string) => `Buat ${shortfall} soal latihan pilihan ganda (A-D) bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
+        // English class -> English questions (see languageRule).
+        const practiceLang = defaultQuestionLanguage(subjectRow?.name);
+        const langName = practiceLang === "en" ? "bahasa Inggris" : "bahasa Indonesia";
+        const buildPrompt = (groundingText: string) => `Buat ${shortfall} soal latihan pilihan ganda (A-D) ${langName} untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${
           topic ? ` topik "${topic}"` : ""
         } tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana dan jelas, sesuai tingkat materi.${groundingText}
 Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":"","C":"","D":""},"correctAnswer":"A","explanation":"","topic":"","sourceTitle":"","sourcePage":1}]}
 ${QUESTION_QUALITY_RULES}
-SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langkah demi langkah dan pastikan hasilnya benar-benar cocok dengan salah satu dari 4 pilihan. correctAnswer HARUS konsisten dengan explanation.`;
+SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langkah demi langkah dan pastikan hasilnya benar-benar cocok dengan salah satu dari 4 pilihan. correctAnswer HARUS konsisten dengan explanation.${languageRule(practiceLang)}`;
         // Grounded in the materials first. If the topic's excerpts weren't
         // enough to write questions, retry with a broader slice of the same
         // materials - never ungrounded while materials exist, otherwise the
@@ -213,11 +216,11 @@ SANGAT PENTING: sebelum menuliskan correctAnswer, hitung ulang jawabannya langka
         // Non-PG formats use the typed prompt (same grounding + rules).
         const askTyped = async (groundingText: string) => {
           const completion = await aiChat("smart", {
-            messages: [{ role: "user", content: `Buat soal latihan bahasa Indonesia untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${topic ? ` topik "${topic}"` : ""}, tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana, sesuai tingkat materi.${groundingText}
+            messages: [{ role: "user", content: `Buat soal latihan ${langName} untuk mata pelajaran "${subjectRow?.name ?? "Umum"}"${topic ? ` topik "${topic}"` : ""}, tingkat kesulitan "${difficulty ?? "Sedang"}". Bahasa sederhana, sesuai tingkat materi.${groundingText}
 
 ${typedFormatPrompt(genType, shortfall)}
 ${QUESTION_QUALITY_RULES}
-Periksa ulang setiap kunci jawaban sebelum menulis.` }],
+Periksa ulang setiap kunci jawaban sebelum menulis.${languageRule(practiceLang)}` }],
             max_tokens: Math.min(8192, shortfall * 450 + 600),
             temperature: 0.3,
           });

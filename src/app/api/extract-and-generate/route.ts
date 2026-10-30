@@ -6,7 +6,7 @@ import { requireTeacher } from "@/lib/auth/api-teacher";
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { sampleTextForPrompt, documentSegment } from "@/lib/office-text";
-import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type AiQuestionType } from "@/lib/ai-questions";
+import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, languageRule, resolveQuestionLanguage, type AiQuestionType, type QuestionLanguage } from "@/lib/ai-questions";
 import { cacheMaterialText, extractTextFromBuffer, isQuestionSheet } from "@/lib/material-text";
 
 /**
@@ -17,13 +17,13 @@ import { cacheMaterialText, extractTextFromBuffer, isQuestionSheet } from "@/lib
  * hasn't uploaded to Storage yet). The multipart path is subject to
  * Vercel's serverless request body size cap; the storagePath path is not.
  */
-async function generateTyped(type: AiQuestionType, count: number, context: string, avoid: string[] | undefined) {
+async function generateTyped(type: AiQuestionType, count: number, context: string, avoid: string[] | undefined, lang: QuestionLanguage) {
   const prompt = `Kamu adalah pembuat soal profesional untuk sekolah di Indonesia (SD sampai SMA); sesuaikan tingkat soal dengan materinya.
 ${context}
 
 ${typedFormatPrompt(type, count)}
 ${QUESTION_QUALITY_RULES}
-Pastikan kunci jawaban benar-benar sesuai isi materi; periksa ulang setiap kunci sebelum menulis.${avoidListPrompt(avoid)}`;
+Pastikan kunci jawaban benar-benar sesuai isi materi; periksa ulang setiap kunci sebelum menulis.${avoidListPrompt(avoid)}${languageRule(lang)}`;
   const completion = await aiChat("smart", {
     messages: [{ role: "user", content: prompt }],
     max_tokens: Math.min(8192, count * 450 + 600),
@@ -48,6 +48,7 @@ export async function POST(req: Request) {
   let storagePath = "";
   let questionType: AiQuestionType = "pg";
   let cachedText = "";
+  let language = "";
 
   if (contentType.includes("application/json")) {
     const body = await req.json() as {
@@ -57,6 +58,8 @@ export async function POST(req: Request) {
       segment?: number; segments?: number; avoid?: string[];
       /** TKA format to generate (default pg) */
       questionType?: AiQuestionType;
+      /** "en" = everything in English; default by subject (Bahasa Inggris -> en) */
+      language?: string;
     };
     if (body.questionType && ["pg", "pg_kompleks", "benar_salah", "menjodohkan", "isian", "esai"].includes(body.questionType)) questionType = body.questionType;
     segment = body.segment ?? 0;
@@ -78,6 +81,7 @@ export async function POST(req: Request) {
     count = body.count ?? 5;
     materialTitle = body.materialTitle ?? "";
     subject = body.subject ?? "";
+    language = body.language ?? "";
 
     // Material id is the storage file's base name ({school}/{id}.{ext}).
     // If its text was already extracted (cached for the AI tutor), reuse it
@@ -167,7 +171,7 @@ export async function POST(req: Request) {
   if (questionType !== "pg") {
     try {
       const questions = await generateTyped(questionType, count,
-        `Buat soal BERDASARKAN isi materi "${materialTitle}" (${subject}) berikut:\n---\n${extractedText}\n---`, avoid);
+        `Buat soal BERDASARKAN isi materi "${materialTitle}" (${subject}) berikut:\n---\n${extractedText}\n---`, avoid, resolveQuestionLanguage(language, subject));
       if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal yang valid. Coba lagi.", questions: [] }, { status: 502 });
       return Response.json({ questions: questions.map(q => ({ ...q, sourceTitle: materialTitle })) });
     } catch (err) {
@@ -208,7 +212,7 @@ Pastikan:
   tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
   agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
   pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.
-${QUESTION_QUALITY_RULES}${avoidListPrompt(avoid)}`;
+${QUESTION_QUALITY_RULES}${avoidListPrompt(avoid)}${languageRule(resolveQuestionLanguage(language, subject))}`;
 
   try {
     // Scaled to the actual question count instead of a flat 4096 - see

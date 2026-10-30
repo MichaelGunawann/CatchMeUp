@@ -226,3 +226,26 @@ export function parseTypedQuestions(text: string, type: AiQuestionType): TypedQu
   }
   return out;
 }
+
+/** Language the generated questions are written in. */
+export type QuestionLanguage = "id" | "en";
+
+/** English for an English subject ("Bahasa Inggris", "English"), else Indonesian. */
+export function defaultQuestionLanguage(subject: string | null | undefined): QuestionLanguage {
+  return /inggris|english/i.test(subject ?? "") ? "en" : "id";
+}
+
+export function resolveQuestionLanguage(requested: unknown, subject: string | null | undefined): QuestionLanguage {
+  return requested === "en" || requested === "id" ? requested : defaultQuestionLanguage(subject);
+}
+
+/**
+ * Appended to a generation prompt. The prompts themselves are written in
+ * Indonesian, so English output has to be asked for explicitly - including
+ * the options, explanation and topic, which otherwise come out Indonesian.
+ */
+export function languageRule(lang: QuestionLanguage): string {
+  if (lang !== "en") return "";
+  return `
+BAHASA SOAL: tulis SELURUH isi soal dalam BAHASA INGGRIS (English) - pertanyaan, semua pilihan jawaban, pernyataan benar/salah, pasangan menjodohkan, contoh jawaban, kata kunci, "explanation" dan "topic". Jangan memakai Bahasa Indonesia sama sekali di isi soal. Nama field JSON dan nilai "difficulty" ("Mudah"/"Sedang"/"Sulit") tetap seperti format.`;
+}

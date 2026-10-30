@@ -4,15 +4,15 @@ export const maxDuration = 300;
 import { aiChat } from "@/lib/ai";
 import { requireTeacher } from "@/lib/auth/api-teacher";
 import { groqErrorResponse } from "@/lib/groq-error";
-import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, type AiQuestionType } from "@/lib/ai-questions";
+import { MAX_QUESTIONS_PER_CALL, QUESTION_QUALITY_RULES, avoidListPrompt, parseQuestionsJson, parseTypedQuestions, typedFormatPrompt, languageRule, resolveQuestionLanguage, type AiQuestionType, type QuestionLanguage } from "@/lib/ai-questions";
 
-async function generateTyped(type: AiQuestionType, count: number, context: string, avoid: string[] | undefined) {
+async function generateTyped(type: AiQuestionType, count: number, context: string, avoid: string[] | undefined, lang: QuestionLanguage) {
   const prompt = `Kamu adalah pembuat soal profesional untuk sekolah di Indonesia (SD sampai SMA); sesuaikan tingkat soal dengan materinya.
 ${context}
 
 ${typedFormatPrompt(type, count)}
 ${QUESTION_QUALITY_RULES}
-Pastikan kunci jawaban benar-benar sesuai isi materi; periksa ulang setiap kunci sebelum menulis.${avoidListPrompt(avoid)}`;
+Pastikan kunci jawaban benar-benar sesuai isi materi; periksa ulang setiap kunci sebelum menulis.${avoidListPrompt(avoid)}${languageRule(lang)}`;
   const completion = await aiChat("smart", {
     messages: [{ role: "user", content: prompt }],
     max_tokens: Math.min(8192, count * 450 + 600),
@@ -33,15 +33,18 @@ export async function POST(req: Request) {
     difficulty?: string;
     questionType?: AiQuestionType;
     avoid?: string[];
+    /** "en" = everything in English; default by subject (Bahasa Inggris -> en) */
+    language?: string;
   };
   const { materialTitle, topic, subject, difficulty = "Sedang" } = body;
+  const lang = resolveQuestionLanguage(body.language, subject);
   // Capped per call - callers batch larger requests (45 at once timed out).
   const count = Math.min(Math.max(1, body.count ?? 5), MAX_QUESTIONS_PER_CALL);
 
   if (body.questionType && body.questionType !== "pg" && ["pg_kompleks", "benar_salah", "menjodohkan", "isian", "esai"].includes(body.questionType)) {
     try {
       const questions = await generateTyped(body.questionType, count,
-        `Mata pelajaran ${subject}, topik "${topic}" (materi: ${materialTitle}), tingkat kesulitan ${difficulty}.`, body.avoid);
+        `Mata pelajaran ${subject}, topik "${topic}" (materi: ${materialTitle}), tingkat kesulitan ${difficulty}.`, body.avoid, lang);
       if (!questions.length) return Response.json({ error: "AI tidak menghasilkan soal yang valid. Coba lagi.", questions: [] }, { status: 502 });
       return Response.json({ questions });
     } catch (err) {
@@ -76,7 +79,7 @@ Pastikan:
   tidak cocok dengan pilihan manapun, ubah pilihannya (bukan jawabannya)
   agar cocok. correctAnswer HARUS konsisten dengan explanation - jangan
   pernah memilih opsi yang berbeda dari hasil perhitungan di explanation.
-${QUESTION_QUALITY_RULES}${avoidListPrompt(body.avoid)}`;
+${QUESTION_QUALITY_RULES}${avoidListPrompt(body.avoid)}${languageRule(lang)}`;
 
   try {
     // Scaled to the actual question count instead of a flat 8192 - Groq's

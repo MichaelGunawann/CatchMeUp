@@ -79,6 +79,7 @@ import {
   type StudentStatus,
 } from "@/lib/db";
 import { cn } from "@/lib/utils";
+import { defaultQuestionLanguage, type QuestionLanguage } from "@/lib/ai-questions";
 import { supabase } from "@/lib/supabase/client";
 import { getCurrentProfile } from "@/lib/auth/session";
 import { getCurrentTeacher, getCurrentStudent, getCurrentParent } from "@/lib/auth/authorization";
@@ -4344,6 +4345,8 @@ function TeacherAssessmentBuilder() {
   const aiOtherCount = Object.values(aiTypeCounts).reduce((a, b) => a + b, 0);
   const aiPgCount = Math.max(0, formQuestionCount - aiOtherCount);
   const [showAiTypes, setShowAiTypes] = useState(false);
+  // Language of AI questions: null = by subject (Bahasa Inggris -> English).
+  const [aiLanguageChoice, setAiLanguageChoice] = useState<QuestionLanguage | null>(null);
   // Editing an AI-made TKA question (not saved yet - edits the list in memory).
   const [aiTypedEdit, setAiTypedEdit] = useState<(typeof questionBank)[number] | null>(null);
   const [aiGenerated, setAiGenerated] = useState(false);
@@ -4362,6 +4365,8 @@ function TeacherAssessmentBuilder() {
   const subjectOptions: SelectOption[] = (teacher?.assignments ?? [])
     .filter(a => a.classId === formClassId)
     .map(a => ({ value: a.subjectId, label: a.subjectName }));
+  const aiLanguage: QuestionLanguage = aiLanguageChoice
+    ?? defaultQuestionLanguage(subjectOptions.find(o => o.value === formSubjectId)?.label);
 
   function chooseClass(classId: string) {
     const subjects = (teacher?.assignments ?? []).filter(a => a.classId === classId);
@@ -4574,9 +4579,9 @@ function TeacherAssessmentBuilder() {
             headers: await jsonAuthHeaders(),
             body: JSON.stringify(useFile
               ? { storagePath: job.mat.fileUrl, fileName: job.mat.title, materialTitle: job.mat.title, subject: job.mat.subject ?? "Umum",
-                  count: job.count, segment: job.segment, segments: job.segments, avoid, questionType: job.type }
+                  count: job.count, segment: job.segment, segments: job.segments, avoid, questionType: job.type, language: aiLanguage }
               : { materialTitle: job.mat.title, topic: job.mat.chapter || job.mat.subject || job.mat.title, subject: job.mat.subject ?? "Umum",
-                  count: job.count, difficulty: "Sedang", avoid, questionType: job.type }),
+                  count: job.count, difficulty: "Sedang", avoid, questionType: job.type, language: aiLanguage }),
           });
           const data = await res.json().catch(() => null) as { questions?: ApiQ[]; error?: string } | null;
           if (!data) { lastError = res.status === 504 ? "Server AI terlalu lama merespons" : `Server error (${res.status})`; }
@@ -5208,6 +5213,19 @@ function TeacherAssessmentBuilder() {
                       </label>
                     );
                   })}
+                </div>
+                <div className="mt-4">
+                  <div className="text-[12px] font-semibold text-ink">Bahasa soal</div>
+                  <div className="mt-1.5 flex gap-2">
+                    {([["id", "Bahasa Indonesia"], ["en", "English (Bahasa Inggris)"]] as const).map(([v, label]) => (
+                      <button key={v} type="button" onClick={() => setAiLanguageChoice(v)}
+                        className={cn("flex-1 rounded-[8px] border px-3 py-2 text-[12px] font-semibold transition-colors",
+                          aiLanguage === v ? "border-primary bg-primary/5 text-primary" : "border-border bg-background text-ink-secondary hover:border-primary/30")}>
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  {aiLanguage === "en" && <p className="mt-1 text-[11px] text-ink-tertiary">Pertanyaan, pilihan, pembahasan, dan topik semuanya ditulis dalam bahasa Inggris.</p>}
                 </div>
                 <p className="mt-2 text-[11px] text-ink-tertiary">Total {formQuestionCount} soal (ubah jumlahnya di langkah 1). Semua soal bisa dicek dan diedit setelah dibuat.</p>
                 <div className="mt-5 flex justify-end gap-2">
