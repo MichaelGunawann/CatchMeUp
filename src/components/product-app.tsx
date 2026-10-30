@@ -1348,6 +1348,25 @@ async function apiPost<T = Record<string, unknown>>(path: string, body: unknown)
   }
 }
 
+/** "Bahasa soal" for AI generation (English = everything in English). */
+function QuestionLanguagePicker({ value, onChange }: { value: QuestionLanguage; onChange: (v: QuestionLanguage) => void }) {
+  return (
+    <div className="mt-4">
+      <div className="text-[12px] font-semibold text-ink">Bahasa soal</div>
+      <div className="mt-1.5 flex gap-2">
+        {([["id", "Bahasa Indonesia"], ["en", "English (Bahasa Inggris)"]] as const).map(([v, label]) => (
+          <button key={v} type="button" onClick={() => onChange(v)}
+            className={cn("flex-1 rounded-[8px] border px-3 py-2 text-[12px] font-semibold transition-colors",
+              value === v ? "border-primary bg-primary/5 text-primary" : "border-border bg-background text-ink-secondary hover:border-primary/30")}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {value === "en" && <p className="mt-1 text-[11px] text-ink-tertiary">Pertanyaan, pilihan, pembahasan, dan topik semuanya ditulis dalam bahasa Inggris.</p>}
+    </div>
+  );
+}
+
 // Insert freshly AI-generated questions straight into the review queue (status 'pending')
 /** A question as the generation routes return it (any TKA type). */
 type PendingRawQuestion = {
@@ -2579,6 +2598,9 @@ function TeacherMaterials() {
   const [selectedMaterial, setSelectedMaterial] = useState<MaterialWithFile | null>(null);
   const [confirmProcessId, setConfirmProcessId] = useState<string | null>(null);
   const [processCounts, setProcessCounts] = useState<Partial<Record<QuestionType, number>>>({ pg: 5 });
+  // null = by subject (Bahasa Inggris -> English)
+  const [processLanguageChoice, setProcessLanguageChoice] = useState<QuestionLanguage | null>(null);
+  const processLanguage: QuestionLanguage = processLanguageChoice ?? defaultQuestionLanguage(activeSubjectName);
   // A worksheet was detected: offer "Impor soal" instead of AI generation.
   // "Impor soal" asks first what questions without options on the sheet
   // should become. detected = opened because AI generation found a worksheet.
@@ -2776,8 +2798,8 @@ function TeacherMaterials() {
           method: "POST",
           headers: await jsonAuthHeaders(),
           body: JSON.stringify(storagePath
-            ? { storagePath, fileName: mat?.title ?? "Materi", count, materialTitle: mat?.title ?? "Materi", subject: mat?.subject ?? activeSubjectName, questionType: qType }
-            : { materialTitle: mat?.title ?? "Materi", topic: mat?.subject ?? mat?.title ?? "Umum", subject: mat?.subject ?? activeSubjectName, count, difficulty: "Sedang", questionType: qType }),
+            ? { storagePath, fileName: mat?.title ?? "Materi", count, materialTitle: mat?.title ?? "Materi", subject: mat?.subject ?? activeSubjectName, questionType: qType, language: processLanguage }
+            : { materialTitle: mat?.title ?? "Materi", topic: mat?.subject ?? mat?.title ?? "Umum", subject: mat?.subject ?? activeSubjectName, count, difficulty: "Sedang", questionType: qType, language: processLanguage }),
         });
         const data = await res.json().catch(() => null) as { questions?: PendingRawQuestion[]; error?: string; code?: string } | null;
         if (data?.code === "question_sheet") { setSheetPrompt({ id, detected: true }); return 0; }
@@ -3329,6 +3351,7 @@ function TeacherMaterials() {
                 </label>
               ))}
             </div>
+            <QuestionLanguagePicker value={processLanguage} onChange={setProcessLanguageChoice} />
             <p className="mt-2 text-[11px] text-ink-tertiary">Total {Object.values(processCounts).reduce((a, b) => a + (b ?? 0), 0)} soal · maks. 10 per jenis.</p>
             <div className="mt-5 flex justify-end gap-2">
               <Button variant="outline" size="sm" onClick={() => setConfirmProcessId(null)}>Batal</Button>
@@ -5214,19 +5237,7 @@ function TeacherAssessmentBuilder() {
                     );
                   })}
                 </div>
-                <div className="mt-4">
-                  <div className="text-[12px] font-semibold text-ink">Bahasa soal</div>
-                  <div className="mt-1.5 flex gap-2">
-                    {([["id", "Bahasa Indonesia"], ["en", "English (Bahasa Inggris)"]] as const).map(([v, label]) => (
-                      <button key={v} type="button" onClick={() => setAiLanguageChoice(v)}
-                        className={cn("flex-1 rounded-[8px] border px-3 py-2 text-[12px] font-semibold transition-colors",
-                          aiLanguage === v ? "border-primary bg-primary/5 text-primary" : "border-border bg-background text-ink-secondary hover:border-primary/30")}>
-                        {label}
-                      </button>
-                    ))}
-                  </div>
-                  {aiLanguage === "en" && <p className="mt-1 text-[11px] text-ink-tertiary">Pertanyaan, pilihan, pembahasan, dan topik semuanya ditulis dalam bahasa Inggris.</p>}
-                </div>
+                <QuestionLanguagePicker value={aiLanguage} onChange={setAiLanguageChoice} />
                 <p className="mt-2 text-[11px] text-ink-tertiary">Total {formQuestionCount} soal (ubah jumlahnya di langkah 1). Semua soal bisa dicek dan diedit setelah dibuat.</p>
                 <div className="mt-5 flex justify-end gap-2">
                   <Button variant="outline" size="sm" onClick={() => setShowAiTypes(false)}>Batal</Button>
