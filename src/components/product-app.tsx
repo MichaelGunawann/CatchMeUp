@@ -118,6 +118,7 @@ import {
   Settings,
   ShieldCheck,
   Sparkles,
+  Loader2,
   Target,
   ThumbsUp,
   Trophy,
@@ -9321,6 +9322,7 @@ type WrongAnswerItem = {
   id: string; source: string; topic: string; question: string; options: Record<string, string>;
   yourAnswer: string | null; correctAnswer: string; explanation: string; at: number;
   yourText?: string; keyText?: string;
+  questionId?: string; aiExplanation?: boolean; needsAi?: boolean;
 };
 
 function StudentIncorrect() {
@@ -9348,6 +9350,32 @@ function StudentIncorrect() {
     });
     return () => { cancelled = true; };
   }, []);
+
+  // Questions without a teacher pembahasan: ask the AI, one question at a
+  // time (stored per question, so each is generated only once for everyone).
+  const [aiState, setAiState] = useState<Record<string, "loading" | "error">>({});
+  useEffect(() => {
+    const ids = [...new Set((items ?? []).filter(q => q.needsAi && q.questionId).map(q => q.questionId as string))];
+    if (!ids.length) return;
+    let cancelled = false;
+    (async () => {
+      for (const qid of ids) {
+        if (cancelled) return;
+        setAiState(s => ({ ...s, [qid]: "loading" }));
+        const res = await apiPost<{ explanation?: string; modelAnswer?: string }>("/api/student/explain", { questionId: qid });
+        if (cancelled) return;
+        if (res.error || !res.explanation) { setAiState(s => ({ ...s, [qid]: "error" })); continue; }
+        setAiState(s => { const n = { ...s }; delete n[qid]; return n; });
+        setItems(prev => (prev ?? []).map(q => q.questionId !== qid ? q : {
+          ...q, explanation: res.explanation!, aiExplanation: true, needsAi: false,
+          keyText: q.keyText || res.modelAnswer || q.keyText,
+        }));
+      }
+    })();
+    return () => { cancelled = true; };
+    // only when the list first arrives
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items === null]);
 
   function handleHide(id: string) {
     const next = new Set(hidden); next.add(id);
@@ -9394,13 +9422,22 @@ function StudentIncorrect() {
                 </div>
                 <div className="rounded-[6px] bg-success-light border border-success/20 p-2.5">
                   <div className="text-[9px] font-bold uppercase text-success mb-1">Jawaban benar</div>
-                  <div className="whitespace-pre-line text-[11px] text-ink">{q.keyText ?? answerText(q, q.correctAnswer)}</div>
+                  <div className="whitespace-pre-line text-[11px] text-ink">
+                    {q.keyText || (q.keyText === "" ? (q.needsAi ? "Lihat pembahasan" : "-") : answerText(q, q.correctAnswer))}
+                  </div>
                 </div>
               </div>
-              {q.explanation && (
+              {q.explanation ? (
                 <div className="rounded-[6px] bg-background border border-border p-2.5">
-                  <div className="text-[10px] font-semibold text-ink-secondary mb-1">Pembahasan</div>
-                  <p className="text-[11px] text-ink leading-relaxed">{q.explanation}</p>
+                  <div className="text-[10px] font-semibold text-ink-secondary mb-1 flex items-center gap-1">
+                    Pembahasan{q.aiExplanation && <span className="inline-flex items-center gap-0.5 rounded-[4px] bg-primary/10 px-1.5 py-px text-[9px] font-bold text-primary"><Sparkles className="h-2.5 w-2.5" />AI</span>}
+                  </div>
+                  <p className="whitespace-pre-line text-[11px] text-ink leading-relaxed">{q.explanation}</p>
+                </div>
+              ) : q.needsAi && q.questionId && (
+                <div className="rounded-[6px] bg-background border border-border p-2.5 text-[11px] text-ink-secondary">
+                  {aiState[q.questionId] === "error" ? "Pembahasan AI belum bisa dibuat sekarang. Coba muat ulang nanti."
+                    : <span className="inline-flex items-center gap-1.5"><Loader2 className="h-3 w-3 animate-spin" />Guru belum menulis pembahasan — AI sedang membuatnya…</span>}
                 </div>
               )}
             </div>

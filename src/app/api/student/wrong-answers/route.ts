@@ -1,6 +1,8 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { parseDbTime } from "@/lib/auth/assessment-availability";
 import { describeAnswer, describeKey, questionTypeOf } from "@/lib/question-types";
+import { hashInput } from "@/lib/ai-cache";
+import { explainCacheKey, explainInput, type AiExplanation, type ExplainQuestion } from "@/lib/ai-explain";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +11,11 @@ type WrongItem = {
   yourAnswer: string | null; correctAnswer: string; explanation: string; at: number;
   /** human-readable answer and key (all question types) */
   yourText: string; keyText: string;
+  questionId: string;
+  /** the pembahasan was written by the AI (teacher left none) */
+  aiExplanation?: boolean;
+  /** no pembahasan yet - the page asks /api/student/explain for one */
+  needsAi?: boolean;
 };
 
 /**
@@ -31,7 +38,8 @@ export async function GET(req: Request) {
   if (!student) return Response.json({ items: [] });
 
   const items: WrongItem[] = [];
-  type Q = { question: string; options: Record<string, string>; correct_answer: string; explanation: string | null; topic: string | null; question_type?: string | null; answer_key?: unknown };
+  const questions = new Map<string, ExplainQuestion>();
+  type Q = { id: string; question: string; options: Record<string, string>; correct_answer: string; explanation: string | null; topic: string | null; question_type?: string | null; answer_key?: unknown };
 
   // Practice: latest attempt per question decides.
   const { data: practice } = await supabaseAdmin
@@ -52,7 +60,9 @@ export async function GET(req: Request) {
       options: p.questions.options, yourAnswer, correctAnswer: p.questions.correct_answer,
       explanation: p.questions.explanation ?? "", at: parseDbTime(p.submitted_at),
       yourText: yourAnswer ? describeAnswer(p.questions, yourAnswer) : "(tidak tercatat)", keyText: describeKey(p.questions),
+      questionId: p.question_id,
     });
+    questions.set(p.question_id, p.questions);
   }
 
   // Assessments: submitted attempts of review-enabled assessments.
@@ -79,10 +89,46 @@ export async function GET(req: Request) {
         options: q.options, yourAnswer: r.student_answer, correctAnswer: q.correct_answer,
         explanation: q.explanation ?? "", at: att.submitted_at ? parseDbTime(att.submitted_at) : 0,
         yourText: describeAnswer(q, r.student_answer), keyText: describeKey(q),
+        questionId: q.id,
       });
+      questions.set(q.id, q);
     }
   }
 
   items.sort((a, b) => b.at - a.at);
-  return Response.json({ items: items.slice(0, 150) });
+  const list = items.slice(0, 150);
+  await fillExplanations(list, questions);
+  return Response.json({ items: list });
+}
+
+/**
+ * Essays: the teacher's only text is the example answer, shown as the key;
+ * the pembahasan comes from the AI. Other types without a teacher
+ * pembahasan also get the AI one. Stored AI explanations are filled in
+ * here; the rest are marked needsAi and requested by the page.
+ */
+async function fillExplanations(list: WrongItem[], questions: Map<string, ExplainQuestion>) {
+  for (const it of list) {
+    const q = questions.get(it.questionId);
+    if (q && questionTypeOf(q) === "esai") {
+      it.keyText = it.explanation ? `Contoh jawaban guru: ${it.explanation}` : "";
+      it.explanation = "";
+    }
+  }
+  const missing = [...new Set(list.filter(it => !it.explanation).map(it => it.questionId))];
+  if (!missing.length) return;
+  const { data } = await supabaseAdmin.from("ai_cache").select("key, input_hash, value").in("key", missing.map(explainCacheKey));
+  const stored = new Map(((data ?? []) as Array<{ key: string; input_hash: string; value: AiExplanation }>).map(r => [r.key, r]));
+  for (const it of list) {
+    if (it.explanation) continue;
+    const q = questions.get(it.questionId);
+    const c = stored.get(explainCacheKey(it.questionId));
+    if (q && c && c.input_hash === hashInput(explainInput(q))) {
+      it.explanation = c.value.explanation;
+      it.aiExplanation = true;
+      if (!it.keyText && c.value.modelAnswer) it.keyText = c.value.modelAnswer;
+    } else {
+      it.needsAi = true;
+    }
+  }
 }
