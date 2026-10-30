@@ -54,7 +54,7 @@ export async function POST(req: Request) {
     return Response.json({ error: "Kamu tidak mengajar kelas/mapel materi ini" }, { status: 403 });
   }
   const text = (await getMaterialText(mat)).replace(/\n{3,}/g, "\n\n");
-  if (!text.trim()) return Response.json({ error: "Teks file tidak terbaca (mungkin hasil scan/foto)." }, { status: 400 });
+  if (!text.trim()) return Response.json({ error: "Isi file tidak terbaca, juga oleh AI pembaca gambar. Coba unggah ulang dengan foto/scan yang lebih jelas." }, { status: 400 });
 
   // A printed key ("Kunci jawaban: 1. B 2. A ...") usually sits at the end.
   const keyAt = text.search(/kunci\s*jawaban|answer\s*key|\bkunci\b\s*:/i);
@@ -122,7 +122,9 @@ Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answer
       source_material_id: mat.id,
     };
   });
-  if (!rows.length) return Response.json({ error: "Tidak ada soal yang bisa dibaca dari file ini." }, { status: 422 });
+  if (!rows.length) {
+    return Response.json({ error: "Tidak ada soal di file ini (isinya materi/pembahasan, bukan lembar soal). Untuk membuat soal dari materi, pakai \"Proses dengan AI\"." }, { status: 422 });
+  }
   const { error } = await supabaseAdmin.from("questions").insert(rows);
   if (error) return Response.json({ error: error.message }, { status: 500 });
   await supabaseAdmin.from("materials").update({ is_question_sheet: true }).eq("id", mat.id).then(() => {}, () => {});
