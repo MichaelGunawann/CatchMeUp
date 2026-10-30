@@ -53,31 +53,48 @@ export function tutorTier(question: string): AiTier {
 }
 
 // Vision (reading scanned/photographed materials, src/lib/ocr.ts). Groq's
-// vision models change more often than the text ones, so several are tried
-// in order (GROQ_VISION_MODEL first when set).
+// vision models change more often than the text ones: known ids are tried
+// in order (GROQ_VISION_MODEL first when set), then any vision-looking
+// model the account's model list offers.
 const VISION_MODELS = [
   process.env.GROQ_VISION_MODEL,
+  "qwen/qwen3.8-27b",
+  "qwen/qwen3.6-27b",
   "meta-llama/llama-4-scout-17b-16e-instruct",
   "meta-llama/llama-4-maverick-17b-128e-instruct",
 ].filter((m): m is string => !!m);
 
+let _visionModel: string | null = null; // the one that worked last time
+
+async function visionCandidates(): Promise<string[]> {
+  let listed: string[] = [];
+  try {
+    const res = await groq().models.list();
+    listed = (res.data ?? []).map(m => m.id).filter(id => /vision|vl\b|-vl|scout|maverick|qwen3\.\d+-\d+b|gemma-?3/i.test(id));
+  } catch { /* list unavailable - known ids only */ }
+  return [...new Set([...(_visionModel ? [_visionModel] : []), ...VISION_MODELS, ...listed])];
+}
+
 export async function aiVision(imageDataUrl: string, instruction: string): Promise<string> {
-  let lastErr: unknown = null;
-  for (const model of VISION_MODELS) {
+  const errors: string[] = [];
+  for (const model of await visionCandidates()) {
     try {
       const res = await groq().chat.completions.create({
         model,
         temperature: 0,
-        max_completion_tokens: 3000,
+        max_completion_tokens: 4000,
         messages: [{ role: "user", content: [
           { type: "text", text: instruction },
           { type: "image_url", image_url: { url: imageDataUrl } },
         ] }],
       });
-      return res.choices[0].message.content ?? "";
+      _visionModel = model;
+      // Some vision models think out loud first; keep only the answer.
+      return (res.choices[0].message.content ?? "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
     } catch (err) {
-      lastErr = err; // rate limit, retired model, image too large -> next model
+      const status = (err as { status?: number } | null)?.status;
+      errors.push(`${model}: ${status ?? ""} ${err instanceof Error ? err.message.slice(0, 120) : ""}`);
     }
   }
-  throw lastErr ?? new Error("Model AI pembaca gambar tidak tersedia");
+  throw new Error(`Tidak ada model AI pembaca gambar yang bisa dipakai (${errors.join(" | ")})`);
 }
