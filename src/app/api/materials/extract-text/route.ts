@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { requireTeacher } from "@/lib/auth/api-teacher";
-import { getMaterialText } from "@/lib/material-text";
+import { getMaterialText, ocrErrors } from "@/lib/material-text";
 
 export const dynamic = "force-dynamic";
 // Reading a full textbook PDF takes ~40s; this route does only that, right
@@ -21,7 +21,8 @@ export async function POST(req: Request) {
       return Response.json({ error: "Tidak diizinkan" }, { status: 403 });
     }
     const text = await getMaterialText(m as { id: string; file_url: string | null; content_text?: string | null });
-    return Response.json({ success: true, chars: text.length });
+    const ocrError = text ? undefined : ocrErrors.get(m.file_url ?? "");
+    return Response.json({ success: true, chars: text.length, ...(ocrError ? { ocrError } : {}) });
   } catch (error) {
     console.error("Error extracting material text:", error);
     return Response.json({ error: "Terjadi kesalahan pada server" }, { status: 500 });

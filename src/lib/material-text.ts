@@ -12,6 +12,8 @@ import { looksScanned, ocrPages, pdfPageImages } from "@/lib/ocr";
  */
 
 const memoryCache = new Map<string, string>();
+/** Why reading a scanned file failed (by file name), for the upload route's message. */
+export const ocrErrors = new Map<string, string>();
 const MAX_STORED_CHARS = 400_000; // ~ a 250-page textbook; keeps rows sane
 
 export async function extractTextFromBuffer(buffer: Buffer, fileName: string): Promise<string> {
@@ -26,10 +28,14 @@ export async function extractTextFromBuffer(buffer: Buffer, fileName: string): P
     // Scanned / photographed PDF (pictures only): read the pictures.
     if (looksScanned(joined, (text as string[]).length)) {
       try {
-        const ocr = await ocrPages(await pdfPageImages(buffer));
+        const images = await pdfPageImages(buffer);
+        if (!images.length) throw new Error("tidak ada gambar halaman yang bisa diambil dari PDF");
+        const ocr = await ocrPages(images);
         if (ocr.trim()) return ocr;
+        throw new Error("AI tidak menemukan teks pada gambar");
       } catch (err) {
         console.error("OCR failed:", fileName, err);
+        ocrErrors.set(fileName, err instanceof Error ? err.message : String(err));
       }
     }
     return joined;
@@ -65,6 +71,7 @@ export async function getMaterialText(m: MaterialRef): Promise<string> {
     return "";
   }
 
+  if (!text.trim()) return ""; // nothing read: try again next time, don't cache
   memoryCache.set(m.id, text);
   // Persist so other server instances don't re-extract. Ignored if the
   // column doesn't exist yet (migration 022 not applied).
