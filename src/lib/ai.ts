@@ -51,3 +51,33 @@ export function tutorTier(question: string): AiTier {
   if (/\d/.test(q) || /hitung|berapa|rumus|selesaikan|buktikan|jelaskan bab|kenapa|mengapa|bagaimana/.test(q) || q.length > 160) return "smart";
   return "fast";
 }
+
+// Vision (reading scanned/photographed materials, src/lib/ocr.ts). Groq's
+// vision models change more often than the text ones, so several are tried
+// in order (GROQ_VISION_MODEL first when set).
+const VISION_MODELS = [
+  process.env.GROQ_VISION_MODEL,
+  "meta-llama/llama-4-scout-17b-16e-instruct",
+  "meta-llama/llama-4-maverick-17b-128e-instruct",
+].filter((m): m is string => !!m);
+
+export async function aiVision(imageDataUrl: string, instruction: string): Promise<string> {
+  let lastErr: unknown = null;
+  for (const model of VISION_MODELS) {
+    try {
+      const res = await groq().chat.completions.create({
+        model,
+        temperature: 0,
+        max_completion_tokens: 3000,
+        messages: [{ role: "user", content: [
+          { type: "text", text: instruction },
+          { type: "image_url", image_url: { url: imageDataUrl } },
+        ] }],
+      });
+      return res.choices[0].message.content ?? "";
+    } catch (err) {
+      lastErr = err; // rate limit, retired model, image too large -> next model
+    }
+  }
+  throw lastErr ?? new Error("Model AI pembaca gambar tidak tersedia");
+}

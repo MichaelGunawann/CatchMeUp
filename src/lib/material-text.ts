@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { extractPptxText } from "@/lib/office-text";
+import { looksScanned, ocrPages, pdfPageImages } from "@/lib/ocr";
 
 /**
  * Full text of teacher materials, for the student AI tutor.
@@ -18,10 +19,20 @@ export async function extractTextFromBuffer(buffer: Buffer, fileName: string): P
   if (name.endsWith(".pdf")) {
     const { extractText } = await import("unpdf");
     const { text } = await extractText(new Uint8Array(buffer), { mergePages: false });
-    return (text as string[])
+    const joined = (text as string[])
       .map((page, i) => `[hal. ${i + 1}] ${page.replace(/\s+/g, " ").trim()}`)
       .filter(p => p.length > 10)
       .join("\n");
+    // Scanned / photographed PDF (pictures only): read the pictures.
+    if (looksScanned(joined, (text as string[]).length)) {
+      try {
+        const ocr = await ocrPages(await pdfPageImages(buffer));
+        if (ocr.trim()) return ocr;
+      } catch (err) {
+        console.error("OCR failed:", fileName, err);
+      }
+    }
+    return joined;
   }
   if (name.endsWith(".docx")) {
     const mammoth = await import("mammoth");
