@@ -4832,13 +4832,13 @@ function TeacherAssessmentBuilder() {
                 )}
                 {(materials ?? []).map(mat => {
                   const checked = selectedMaterials.has(mat.id);
-                  const canProcess = mat.aiProcessed;
+                  // Generation reads the file itself: a material doesn't need
+                  // "Proses dengan AI" in Pustaka Materi first.
                   return (
                     <div key={mat.id}
-                      onClick={() => canProcess && toggleMaterial(mat.id)}
+                      onClick={() => toggleMaterial(mat.id)}
                       className={cn(
                         "flex items-center gap-3 rounded-[8px] border p-3 transition-all",
-                        !canProcess ? "opacity-50 cursor-not-allowed border-border bg-background" :
                         checked ? "border-primary/40 bg-primary-soft cursor-pointer" :
                         "border-border bg-background hover:border-primary/20 cursor-pointer"
                       )}>
@@ -4854,11 +4854,7 @@ function TeacherAssessmentBuilder() {
                         <div className="text-[10px] text-ink-secondary">{mat.type} · {mat.pages} hal.</div>
                       </div>
                       <div className="shrink-0">
-                        {canProcess ? (
-                          <Badge tone="success">{mat.questionsGenerated} soal</Badge>
-                        ) : (
-                          <Badge tone="neutral">Belum diproses AI</Badge>
-                        )}
+                        {mat.aiProcessed && mat.questionsGenerated > 0 && <Badge tone="success">{mat.questionsGenerated} soal</Badge>}
                       </div>
                     </div>
                   );
