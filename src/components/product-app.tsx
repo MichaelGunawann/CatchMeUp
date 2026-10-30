@@ -2126,11 +2126,18 @@ async function fetchScoreTrendAndSubjectMastery(studentId: string): Promise<{ sc
 // (supabase/migrations/009_secure_grading.sql) gates on. When allow_review
 // is false the questions SELECT returns nothing and this resolves empty -
 // never a client-side correctness comparison.
-async function fetchAttemptReviewDetail(attemptId: string): Promise<ReviewQuestionDetail[]> {
-  const { data } = await supabase
-    .from("question_attempts")
-    .select("*, assessment_questions(question_order, points, questions(*))")
-    .eq("assessment_attempt_id", attemptId);
+/** Pembahasan of one attempt via the server (see /api/student/attempt-review); null = failed to load. */
+async function fetchAttemptReviewDetail(attemptId: string): Promise<ReviewQuestionDetail[] | null> {
+  let data: unknown[] | null = null;
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    const res = await fetch(`/api/student/attempt-review?attemptId=${encodeURIComponent(attemptId)}`,
+      { headers: session ? { Authorization: `Bearer ${session.access_token}` } : {} });
+    if (!res.ok) return null;
+    data = ((await res.json()) as { items?: unknown[] }).items ?? [];
+  } catch {
+    return null;
+  }
   type QRow = { question: string; options: Record<string, string>; correct_answer: string | null; explanation: string | null; topic: string; source_title: string | null; source_page: number | null; question_type?: string | null; answer_key?: unknown; image_url?: string | null };
   type Row = {
     student_answer: string | null; is_correct: boolean | null; points_earned: number | null; teacher_feedback?: string | null;
@@ -9120,6 +9127,8 @@ function StudentReview() {
   const results = resultRows ?? [];
   const [reviewDetailId, setReviewDetailId] = useState<string | null>(null);
   const [reviewQs, setReviewQs] = useState<ReviewQuestionDetail[] | null>(null);
+  const [reviewError, setReviewError] = useState(false);
+  const [reviewReload, setReviewReload] = useState(0);
   const [materials, setMaterials] = useState<MaterialWithFile[]>([]);
   const [sourceError, setSourceError] = useState<string | null>(null);
   const ownStats = useOwnStudentStats();
@@ -9136,9 +9145,13 @@ function StudentReview() {
     if (!reviewResult.allowReview) { setReviewQs([]); return; }
     setReviewQs(null);
     let cancelled = false;
-    fetchAttemptReviewDetail(reviewResult.attemptId).then(rows => { if (!cancelled) setReviewQs(rows); });
+    setReviewError(false);
+    fetchAttemptReviewDetail(reviewResult.attemptId).then(rows => {
+      if (cancelled) return;
+      if (rows === null) { setReviewError(true); setReviewQs([]); } else setReviewQs(rows);
+    });
     return () => { cancelled = true; };
-  }, [reviewResult?.attemptId, reviewResult?.allowReview]);
+  }, [reviewResult?.attemptId, reviewResult?.allowReview, reviewReload]);
 
   return (
     <div className="space-y-6">
@@ -9186,9 +9199,14 @@ function StudentReview() {
               {sourceError && <AlertPanel tone="danger" title="Tidak dapat membuka sumber">{sourceError}</AlertPanel>}
               {reviewQs === null ? (
                 <SectionLoading message="Memuat pembahasan..." />
+              ) : reviewError ? (
+                <div className="flex flex-col items-center gap-3 py-8 text-center">
+                  <p className="text-[13px] text-ink-secondary">Pembahasan gagal dimuat (koneksi atau server sedang sibuk).</p>
+                  <Button variant="outline" size="sm" onClick={() => setReviewReload(n => n + 1)}>Coba lagi</Button>
+                </div>
               ) : reviewQs.length === 0 ? (
                 <p className="text-[13px] text-ink-secondary text-center py-8">
-                  {reviewResult.allowReview ? "Detail soal tidak tersedia" : "Guru tidak mengizinkan pembahasan untuk asesmen ini."}
+                  {reviewResult.allowReview ? "Belum ada jawaban yang tersimpan untuk ujian ini." : "Guru tidak mengizinkan pembahasan untuk asesmen ini."}
                 </p>
               ) : reviewQs.map((q, idx) => {
                 const studentAns = q.yourAnswer ?? undefined;
