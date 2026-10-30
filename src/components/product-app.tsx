@@ -9362,13 +9362,13 @@ function StudentIncorrect() {
       for (const qid of ids) {
         if (cancelled) return;
         setAiState(s => ({ ...s, [qid]: "loading" }));
-        const res = await apiPost<{ explanation?: string; modelAnswer?: string }>("/api/student/explain", { questionId: qid });
+        const res = await apiPost<{ explanation?: string; modelAnswer?: string; keyText?: string }>("/api/student/explain", { questionId: qid });
         if (cancelled) return;
         if (res.error || !res.explanation) { setAiState(s => ({ ...s, [qid]: "error" })); continue; }
         setAiState(s => { const n = { ...s }; delete n[qid]; return n; });
         setItems(prev => (prev ?? []).map(q => q.questionId !== qid ? q : {
           ...q, explanation: res.explanation!, aiExplanation: true, needsAi: false,
-          keyText: q.keyText || res.modelAnswer || q.keyText,
+          keyText: res.keyText ?? (q.keyText || res.modelAnswer || q.keyText),
         }));
       }
     })();

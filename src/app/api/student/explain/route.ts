@@ -4,7 +4,7 @@ import { requireUser } from "@/lib/auth/api-user";
 import { groqErrorResponse } from "@/lib/groq-error";
 import { hashInput, readCache, writeCache } from "@/lib/ai-cache";
 import { describeKey, questionTypeOf } from "@/lib/question-types";
-import { explainCacheKey, explainInput, type AiExplanation, type ExplainQuestion } from "@/lib/ai-explain";
+import { essayKeyText, explainCacheKey, explainInput, type AiExplanation, type ExplainQuestion } from "@/lib/ai-explain";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -38,7 +38,7 @@ export async function POST(req: Request) {
 
   const inputHash = hashInput(explainInput(question));
   const cached = await readCache<AiExplanation>(explainCacheKey(questionId));
-  if (cached && cached.inputHash === inputHash) return Response.json(cached.value);
+  if (cached && cached.inputHash === inputHash) return Response.json(withKey(question, cached.value));
 
   const type = questionTypeOf(question);
   const essay = type === "esai";
@@ -52,9 +52,10 @@ ${type === "pg" || type === "pg_kompleks" ? `PILIHAN: ${JSON.stringify(question.
 Tugas:
 - Tulis pembahasan langkah demi langkah (maks 120 kata) kenapa jawabannya begitu. Untuk hitungan, tunjukkan langkah dan hasil akhirnya.
 - Teks biasa saja: tanpa LaTeX, tanpa markdown tebal/judul. Pakai ×, ÷, ², √ bila perlu.${essay ? `
-- Isi "modelAnswer" dengan jawaban yang benar secara ringkas (1-3 kalimat atau hasil akhir hitungan).` : ""}
+- Isi "modelAnswer" dengan jawaban yang benar secara ringkas (1-3 kalimat atau hasil akhir hitungan).` : ""}${essay && teacherText ? `
+- Isi "teacherKeyOk": true jika contoh jawaban guru benar, false jika keliru (misalnya hasil hitungannya salah).` : ""}
 
-Jawab HANYA JSON: {"explanation":""${essay ? `,"modelAnswer":""` : ""}}`;
+Jawab HANYA JSON: {"explanation":""${essay ? `,"modelAnswer":""` : ""}${essay && teacherText ? `,"teacherKeyOk":true` : ""}}`;
 
   try {
     const completion = await aiChat("smart", {
@@ -67,13 +68,19 @@ Jawab HANYA JSON: {"explanation":""${essay ? `,"modelAnswer":""` : ""}}`;
     const json = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)) as Partial<AiExplanation>;
     const value: AiExplanation = { explanation: String(json.explanation ?? "").trim().slice(0, 2000) };
     if (essay && json.modelAnswer) value.modelAnswer = String(json.modelAnswer).trim().slice(0, 600);
+    if (essay && teacherText && json.teacherKeyOk === false) value.teacherKeyOk = false;
     if (!value.explanation) return Response.json({ error: "AI belum bisa membuat pembahasan. Coba lagi." }, { status: 502 });
     await writeCache(explainCacheKey(questionId), inputHash, value);
-    return Response.json(value);
+    return Response.json(withKey(question, value));
   } catch (err) {
     const { message, status } = groqErrorResponse(err);
     return Response.json({ error: message }, { status });
   }
+}
+
+/** Essays also get the "Jawaban benar" text to show (see essayKeyText). */
+function withKey(q: ExplainQuestion, v: AiExplanation) {
+  return questionTypeOf(q) === "esai" ? { ...v, keyText: essayKeyText(q.explanation ?? "", v) } : v;
 }
 
 async function hasAnswered(studentId: string, questionId: string): Promise<boolean> {

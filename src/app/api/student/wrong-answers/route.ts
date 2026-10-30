@@ -2,7 +2,7 @@ import { supabaseAdmin } from "@/lib/supabase/server";
 import { parseDbTime } from "@/lib/auth/assessment-availability";
 import { describeAnswer, describeKey, questionTypeOf } from "@/lib/question-types";
 import { hashInput } from "@/lib/ai-cache";
-import { explainCacheKey, explainInput, type AiExplanation, type ExplainQuestion } from "@/lib/ai-explain";
+import { essayKeyText, explainCacheKey, explainInput, type AiExplanation, type ExplainQuestion } from "@/lib/ai-explain";
 
 export const dynamic = "force-dynamic";
 
@@ -126,7 +126,7 @@ async function fillExplanations(list: WrongItem[], questions: Map<string, Explai
     if (q && c && c.input_hash === hashInput(explainInput(q))) {
       it.explanation = c.value.explanation;
       it.aiExplanation = true;
-      if (!it.keyText && c.value.modelAnswer) it.keyText = c.value.modelAnswer;
+      if (questionTypeOf(q) === "esai") it.keyText = essayKeyText(q.explanation ?? "", c.value);
     } else {
       it.needsAi = true;
     }
