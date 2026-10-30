@@ -2572,17 +2572,21 @@ function TeacherMaterials() {
   const [confirmProcessId, setConfirmProcessId] = useState<string | null>(null);
   const [processCounts, setProcessCounts] = useState<Partial<Record<QuestionType, number>>>({ pg: 5 });
   // A worksheet was detected: offer "Impor soal" instead of AI generation.
-  const [sheetPromptId, setSheetPromptId] = useState<string | null>(null);
+  // "Impor soal" asks first what questions without options on the sheet
+  // should become. detected = opened because AI generation found a worksheet.
+  const [sheetPrompt, setSheetPrompt] = useState<{ id: string; detected: boolean } | null>(null);
+  const [importAs, setImportAs] = useState<"pg" | "isian" | "esai">("pg");
   const [importingId, setImportingId] = useState<string | null>(null);
-  async function importSheet(id: string) {
-    setSheetPromptId(null);
+  async function importSheet(id: string, as: "pg" | "isian" | "esai") {
+    setSheetPrompt(null);
     setImportingId(id);
     setToast({ message: "Menyalin soal dari lembar soal... (bisa sampai 1-2 menit)", tone: "primary" });
-    const res = await apiPost<{ imported?: number; keyFromSheet?: number; keyToCheck?: number; essays?: number }>("/api/teacher/materials/import-questions", { materialId: id });
+    const res = await apiPost<{ imported?: number; keyFromSheet?: number; keyToCheck?: number; essays?: number; pg?: number; isian?: number }>("/api/teacher/materials/import-questions", { materialId: id, as });
     setImportingId(null);
     if (res.error) { setToast({ message: `Gagal impor soal: ${res.error}`, tone: "primary" }); return; }
     if (activeClass && activeSubjectId) await refreshBankAndReview(activeClass, activeSubjectId);
-    setToast({ message: `${res.imported} soal diimpor ke Tinjau Soal AI (${res.keyFromSheet} kunci dari lembar, ${res.keyToCheck} kunci perlu dicek${res.essays ? `, ${res.essays} uraian` : ""}).`, tone: "success" });
+    const kinds = [res.pg ? `${res.pg} PG` : "", res.isian ? `${res.isian} isian singkat` : "", res.essays ? `${res.essays} esai` : ""].filter(Boolean).join(", ");
+    setToast({ message: `${res.imported} soal diimpor ke Tinjau Soal AI (${kinds}). ${res.keyToCheck ? `${res.keyToCheck} kunci dibuat AI - cek dulu sebelum disetujui.` : "Kunci diambil dari lembar."}`, tone: "success" });
   }
   const [processingIds, setProcessingIds] = useState<Set<string>>(new Set());
   const [processedIds, setProcessedIds] = useState<Set<string>>(new Set());
@@ -2768,7 +2772,7 @@ function TeacherMaterials() {
             : { materialTitle: mat?.title ?? "Materi", topic: mat?.subject ?? mat?.title ?? "Umum", subject: mat?.subject ?? activeSubjectName, count, difficulty: "Sedang", questionType: qType }),
         });
         const data = await res.json().catch(() => null) as { questions?: PendingRawQuestion[]; error?: string; code?: string } | null;
-        if (data?.code === "question_sheet") { setSheetPromptId(id); return 0; }
+        if (data?.code === "question_sheet") { setSheetPrompt({ id, detected: true }); return 0; }
         if (data?.questions?.length) rawQuestions = [...rawQuestions, ...data.questions.map(q => ({ ...q, questionType: q.questionType ?? qType }))];
         else lastError = data?.error ?? `Server error (${res.status})`;
         if (res.status === 429) break; // quota gone - the other types would fail too
@@ -3180,7 +3184,7 @@ function TeacherMaterials() {
                 </div>
                 <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
                   <p className="text-[11px] text-ink-secondary">File ini lembar soal/kuis? Salin soal-soalnya ke bank soal (tanpa AI mengarang soal baru).</p>
-                  <Button variant="outline" className="h-8 text-[12px]" disabled={importingId === m.id} onClick={() => importSheet(m.id)}>
+                  <Button variant="outline" className="h-8 text-[12px]" disabled={importingId === m.id} onClick={() => setSheetPrompt({ id: m.id, detected: false })}>
                     {importingId === m.id ? "Mengimpor..." : "Impor soal dari file ini"}
                   </Button>
                 </div>
@@ -3329,20 +3333,39 @@ function TeacherMaterials() {
         </div>
       )}
 
-      {sheetPromptId && (
+      {sheetPrompt && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setSheetPromptId(null)} />
+          <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setSheetPrompt(null)} />
           <div className="relative w-full max-w-md rounded-card border border-border bg-surface p-6 shadow-xl">
-            <h2 className="text-[16px] font-bold text-ink">Ini lembar soal, bukan materi</h2>
+            <h2 className="text-[16px] font-bold text-ink">{sheetPrompt.detected ? "Ini lembar soal, bukan materi" : "Impor soal dari file ini"}</h2>
+            {sheetPrompt.detected && (
+              <p className="mt-2 text-[13px] text-ink-secondary">
+                Lembar soal tidak berisi penjelasan, jadi AI tidak bisa memastikan kunci jawaban kalau diminta membuat soal baru dari sini. Lebih aman soal-soalnya disalin.
+              </p>
+            )}
             <p className="mt-2 text-[13px] text-ink-secondary">
-              Lembar soal tidak berisi penjelasan, jadi AI tidak bisa memastikan kunci jawaban kalau diminta membuat soal baru dari sini (itu penyebab kunci yang salah sebelumnya).
+              Soal di file disalin ke <b className="text-ink">Tinjau Soal AI</b>. Soal yang sudah punya pilihan A–E tetap jadi pilihan ganda. Kunci yang tertulis di file dipakai; kalau tidak ada, AI mengerjakan soalnya dan kuncinya ditandai untuk dicek.
             </p>
-            <p className="mt-2 text-[13px] text-ink-secondary">
-              <b className="text-ink">Impor soal</b> menyalin soal-soal di lembar ini ke <b className="text-ink">Tinjau Soal AI</b>. Kunci yang tertulis di lembar dipakai; kalau tidak ada, AI mengusulkan kunci dan soalnya ditandai untuk dicek dulu.
-            </p>
+            <div className="mt-4 text-[12px] font-semibold text-ink">Soal yang tidak punya pilihan dijadikan:</div>
+            <div className="mt-2 space-y-2">
+              {([
+                ["pg", "Pilihan Ganda", "AI membuatkan pilihan A–E (1 benar + 4 pengecoh) dan kuncinya."],
+                ["isian", "Isian Singkat", "Jawaban pendek (angka/kata), dinilai otomatis."],
+                ["esai", "Esai", "Dinilai guru, dengan contoh jawaban dari file atau dari AI."],
+              ] as const).map(([value, label, hint]) => (
+                <label key={value} className={cn("flex cursor-pointer gap-2.5 rounded-[8px] border p-3 transition-colors",
+                  importAs === value ? "border-primary bg-primary/5" : "border-border hover:bg-background")}>
+                  <input type="radio" name="importAs" className="mt-0.5 accent-primary" checked={importAs === value} onChange={() => setImportAs(value)} />
+                  <span>
+                    <span className="block text-[13px] font-semibold text-ink">{label}</span>
+                    <span className="block text-[11px] text-ink-secondary">{hint}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
             <div className="mt-5 flex justify-end gap-2">
-              <Button variant="outline" size="sm" onClick={() => setSheetPromptId(null)}>Batal</Button>
-              <Button variant="default" size="sm" onClick={() => importSheet(sheetPromptId)}>Impor soal</Button>
+              <Button variant="outline" size="sm" onClick={() => setSheetPrompt(null)}>Batal</Button>
+              <Button variant="default" size="sm" onClick={() => importSheet(sheetPrompt.id, importAs)}>Impor soal</Button>
             </div>
           </div>
         </div>
