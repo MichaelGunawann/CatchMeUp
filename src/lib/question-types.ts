@@ -175,19 +175,20 @@ export function isianKey(key: unknown): string[] {
  * don't matter, and numbers are compared by value - "5.040", "5040",
  * "5,040 cara" and "5040 susunan" all equal 5040; "0,5" equals "0.5".
  */
-function normalizeShort(s: string): { num: number | null; text: string } {
+function normalizeShort(s: string): { num: number | null; text: string; letters: string } {
   const t = s.toLowerCase().trim();
-  const m = t.match(/-?\d[\d.,\s]*/);
+  // A minus counts only as a sign, not as a hyphen ("abad ke-15" is 15).
+  const m = t.match(/(?<![\p{L}\p{N}.,-])-?\d[\d.,\s]*/u) ?? t.match(/\d[\d.,\s]*/);
   let num: number | null = null;
   if (m) {
-    let d = m[0].replace(/\s/g, "");
+    let d = m[0].replace(/\s/g, "").replace(/[.,]$/, "");
     // 1.234.567 / 1,234 thousands separators vs 0,5 / 2.5 decimals
     if (/^-?\d{1,3}([.,]\d{3})+$/.test(d)) d = d.replace(/[.,]/g, "");
     else d = d.replace(",", ".");
     const v = Number(d);
     if (Number.isFinite(v)) num = v;
   }
-  return { num, text: t.replace(/[^\p{L}\p{N}]+/gu, "") };
+  return { num, text: t.replace(/[^\p{L}\p{N}]+/gu, ""), letters: t.replace(/[^\p{L}]+/gu, "") };
 }
 
 export function isianMatches(answer: string, accepted: string[]): boolean {
@@ -195,8 +196,11 @@ export function isianMatches(answer: string, accepted: string[]): boolean {
   const a = normalizeShort(answer);
   return accepted.some(k => {
     const b = normalizeShort(k);
-    if (a.num !== null && b.num !== null) return Math.abs(a.num - b.num) < 1e-9;
-    return a.text.length > 0 && a.text === b.text;
+    if (a.num === null || b.num === null) return a.text.length > 0 && a.text === b.text;
+    if (Math.abs(a.num - b.num) >= 1e-9) return false;
+    // Same number: a plain-number key accepts "5040 cara"; a key with words
+    // ("H2O", "abad ke-15") also needs those words, so "CO2" isn't "H2O".
+    return !b.letters || a.letters.includes(b.letters) || (a.letters.length >= 3 && b.letters.includes(a.letters));
   });
 }
 

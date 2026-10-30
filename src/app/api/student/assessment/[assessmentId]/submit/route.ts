@@ -1,7 +1,7 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
-import { parseDbTime } from "@/lib/auth/assessment-availability";
+import { attemptDeadline } from "@/lib/auth/exam-deadline";
 import { awardXpAndStreak, checkAndAwardAchievements } from "@/lib/gamification/award";
-import type { Assessment, Question } from "@/lib/supabase/types";
+import type { Assessment, AssessmentAttempt, Question } from "@/lib/supabase/types";
 import { describeAnswer, describeKey, gradeAnswer, questionTypeOf } from "@/lib/question-types";
 
 export const dynamic = "force-dynamic";
@@ -87,9 +87,10 @@ export async function POST(req: Request, { params }: { params: Promise<{ assessm
     // discarded. Starting a NEW attempt after close is still blocked by
     // the start route.
     const SUBMIT_GRACE_MS = 2 * 60_000;
-    // A teacher-reopened attempt has its own deadline (may be past close_at).
-    const override = (attempt as { deadline_override?: string | null }).deadline_override;
-    const limit = override ? parseDbTime(override) : a.close_at ? parseDbTime(a.close_at) : null;
+    // Same deadline the exam screen counts down to: a teacher's personal
+    // deadline, else started_at + duration capped by close_at (the duration
+    // was only enforced by the client before).
+    const limit = attemptDeadline(attempt as AssessmentAttempt, a);
     if (limit !== null && Date.now() > limit + SUBMIT_GRACE_MS) {
       await supabaseAdmin.from("assessment_attempts").update({ status: "missed" }).eq("id", attemptId).eq("status", "in_progress");
       return Response.json({ error: "Waktu pengerjaan asesmen ini sudah berakhir" }, { status: 400 });
