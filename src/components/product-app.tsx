@@ -5417,12 +5417,15 @@ async function attachAssessmentStats(rows: SavedAssessment[]): Promise<SavedAsse
 
 // Real per-question answer distribution + real per-student answer grid for
 // the detail dialog - replaces simulateDist/simulateStudentAnswer entirely.
+// Throws when a read fails (e.g. a timeout on a busy database): an empty
+// result used to be shown as "Asesmen ini tidak punya soal".
 async function loadAssessmentResultDetail(assessmentId: string, classId: string): Promise<AssessmentResultDetail> {
-  const { data: aqRows } = await supabase
+  const { data: aqRows, error: aqErr } = await supabase
     .from("assessment_questions")
     .select("id, question_order, points, questions(*)")
     .eq("assessment_id", assessmentId)
     .order("question_order", { ascending: true });
+  if (aqErr) throw new Error(aqErr.message);
   type AQRow = { id: string; question_order: number; points: number; questions: { question: string; options: { A: string; B: string; C: string; D: string; E?: string }; correct_answer: string; topic: string; difficulty: string; question_type?: string | null; answer_key?: unknown } | null };
   const questions: ResultQuestionRow[] = ((aqRows ?? []) as unknown as AQRow[])
     .filter((r): r is AQRow & { questions: NonNullable<AQRow["questions"]> } => !!r.questions)
@@ -5438,11 +5441,12 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
       raw: r.questions as unknown as ResultQuestionRow["raw"],
     }));
 
-  const { data: attemptData } = await supabase
+  const { data: attemptData, error: attErr } = await supabase
     .from("assessment_attempts")
     .select("id, student_id, score")
     .eq("assessment_id", assessmentId)
     .in("status", ["submitted", "graded"]);
+  if (attErr) throw new Error(attErr.message);
   type AttemptRow = { id: string; student_id: string; score: number | null };
   const attempts = (attemptData ?? []) as AttemptRow[];
 
@@ -5450,10 +5454,11 @@ async function loadAssessmentResultDetail(assessmentId: string, classId: string)
   const resultsByAttempt: Record<string, ResultStudentRow["results"]> = {};
   const distCounts: Record<string, Record<string, number>> = {};
   if (attempts.length > 0) {
-    const { data: qaRows } = await supabase
+    const { data: qaRows, error: qaErr } = await supabase
       .from("question_attempts")
       .select("*")
       .in("assessment_attempt_id", attempts.map(a => a.id));
+    if (qaErr) throw new Error(qaErr.message);
     for (const row of (qaRows ?? []) as Array<{ id: string; assessment_attempt_id: string; assessment_question_id: string; student_answer: string | null; is_correct: boolean | null; points_earned: number | null; teacher_feedback?: string | null; ai_suggested_points?: number | null; ai_reason?: string | null }>) {
       (resultsByAttempt[row.assessment_attempt_id] ??= {})[row.assessment_question_id] = {
         qaId: row.id, isCorrect: row.is_correct, earned: Number(row.points_earned) || 0, feedback: row.teacher_feedback ?? null,
@@ -5927,6 +5932,8 @@ function TeacherResults() {
   const listLoading = assessmentRows === null;
   const [classSize, setClassSize] = useState(0);
   const [resultDetail, setResultDetail] = useState<AssessmentResultDetail | null>(null);
+  const [resultDetailError, setResultDetailError] = useState<string | null>(null);
+  const [detailReload, setDetailReload] = useState(0);
   const [confirmDelete, setConfirmDelete] = useState<{ id: string; title: string; studentCount?: number } | null>(null);
   const [resultsToast, setResultsToast] = useState<{ message: string; tone: "success" | "danger" } | null>(null);
   const [aiAnalysis, setAiAnalysis] = useState<{ overallAnalysis: string; questionAnalyses: Array<{index:number;misconception:string;suggestion:string}> } | null>(null);
@@ -5948,14 +5955,17 @@ function TeacherResults() {
 
   // Reset analysis, tab, and detail data when dialog closes or changes
   useEffect(() => {
-    setAiAnalysis(null); setAiLoading(false); setDetailTab("soal"); setResultDetail(null);
+    setAiAnalysis(null); setAiLoading(false); setDetailTab("soal"); setResultDetail(null); setResultDetailError(null);
+    let cancelled = false;
     if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(d => {
+      if (cancelled) return;
       setResultDetail(d);
       // Essays waiting for a score: open straight on "Nilai Esai".
       const waiting = d.studentRows.some(st => d.questions.some(q => q.type === "esai" && st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]?.isCorrect === null));
       if (waiting) setDetailTab("esai");
-    });
-  }, [detailId, activeClass]);
+    }, (err: unknown) => { if (!cancelled) setResultDetailError(err instanceof Error ? err.message : "Gagal memuat"); });
+    return () => { cancelled = true; };
+  }, [detailId, activeClass, detailReload]);
 
   const essayPendingCount = resultDetail
     ? resultDetail.studentRows.reduce((n, st) => n + resultDetail.questions.filter(q => q.type === "esai" && st.answers[q.assessmentQuestionId] && st.results[q.assessmentQuestionId]?.isCorrect === null).length, 0)
@@ -6091,7 +6101,13 @@ function TeacherResults() {
                 ))}
               </div>
 
-              {!resultDetail && <SectionLoading message="Memuat detail hasil..." className="py-6" />}
+              {!resultDetail && !resultDetailError && <SectionLoading message="Memuat detail hasil..." className="py-6" />}
+              {resultDetailError && (
+                <AlertPanel tone="danger" title="Detail hasil gagal dimuat">
+                  Server database sedang lambat/sibuk, data soal dan jawaban tetap aman.{" "}
+                  <button type="button" className="font-semibold underline" onClick={() => setDetailReload(n => n + 1)}>Coba lagi</button>
+                </AlertPanel>
+              )}
 
               {detail.status === "Terjadwal" && (
                 <AlertPanel tone="primary" title="Asesmen belum dimulai">
@@ -6313,13 +6329,13 @@ function TeacherResults() {
               {/* TAB: Peserta & Waktu */}
               {detailTab === "sesi" && resultDetail && detailId && (
                 <ExamSessionPanel assessmentId={detailId} students={resultDetail.studentRows.map(st => ({ id: st.studentId, name: st.name }))}
-                  onChanged={() => { if (activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail); }} />
+                  onChanged={() => { if (activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail, () => {}); }} />
               )}
 
               {/* TAB: Nilai Esai */}
               {detailTab === "esai" && resultDetail && (
                 <EssayGradingPanel detail={resultDetail}
-                  onGraded={() => { if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail); }} />
+                  onGraded={() => { if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail, () => {}); }} />
               )}
             </div>
             <div className="flex justify-end gap-2 border-t border-border px-6 py-4 shrink-0">
