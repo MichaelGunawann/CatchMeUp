@@ -59,6 +59,7 @@ export async function POST(req: Request) {
   const suggestions: Record<string, { points: number; reason: string }> = {};
   // Per question: the teacher's example answer looks wrong (shown as a warning).
   const keyIssues: Record<string, string> = {};
+  let lastError: unknown = null;
   try {
     for (const group of byQuestion.values()) {
       const aq = group[0].assessment_questions!;
@@ -120,20 +121,33 @@ ${batch.map((r, k) => {
 }).join("\n")}
 
 Jawab HANYA JSON: {"keyIssue":null,"results":[{"no":1,"points":0,"reason":""}]}`;
-        const completion = await aiChat("smart", {
-          messages: [{ role: "user", content: prompt }],
-          max_tokens: 400 + batch.length * 150,
-          temperature: 0.2,
-          reasoning_effort: "medium", // judging meaning/context needs some thought
-        });
-        const text = completion.choices[0].message.content ?? "";
+        // gpt-oss counts its reasoning in max_tokens: with too small a budget
+        // a harder question (paraphrases to judge) ended with no JSON at all
+        // and those answers got no suggestion. Generous budget, and one
+        // retry with lighter reasoning if the answer still isn't usable.
         let parsed: Array<{ no?: number; points?: number; reason?: string }> = [];
         let keyIssue = "";
-        try {
-          const json = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
-          parsed = Array.isArray(json.results) ? json.results : [];
-          if (typeof json.keyIssue === "string" && json.keyIssue.trim()) keyIssue = json.keyIssue.trim().slice(0, 300);
-        } catch { /* leave empty - those answers get no suggestion */ }
+        for (const effort of ["medium", "low"] as const) {
+          let text = "";
+          try {
+            const completion = await aiChat("smart", {
+              messages: [{ role: "user", content: prompt }],
+              max_tokens: 2500 + batch.length * 300,
+              temperature: 0.2,
+              reasoning_effort: effort,
+            });
+            text = completion.choices[0].message.content ?? "";
+          } catch (err) {
+            lastError = err;
+            continue;
+          }
+          try {
+            const json = JSON.parse(text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1));
+            parsed = Array.isArray(json.results) ? json.results : [];
+            if (typeof json.keyIssue === "string" && json.keyIssue.trim()) keyIssue = json.keyIssue.trim().slice(0, 300);
+          } catch { parsed = []; }
+          if (parsed.length > 0) break;
+        }
         if (keyIssue) keyIssues[group[0].assessment_question_id] = keyIssue;
         for (const p of parsed) {
           const r = batch[(Number(p.no) || 0) - 1];
@@ -144,8 +158,11 @@ Jawab HANYA JSON: {"keyIssue":null,"results":[{"no":1,"points":0,"reason":""}]}`
       }
     }
   } catch (err) {
-    const { message, status } = groqErrorResponse(err);
-    if (Object.keys(suggestions).length === 0) return Response.json({ error: message }, { status });
+    lastError = err;
+  }
+  if (lastError && Object.keys(suggestions).length === 0) {
+    const { message, status } = groqErrorResponse(lastError);
+    return Response.json({ error: message }, { status });
   }
 
   // Store so the teacher can come back without paying for the check again.
