@@ -44,7 +44,8 @@ type PoolRow = { id: string; question_id: string; question_order: number; points
  * as 50% so they still get covered. Selection is round-robin across
  * topics from weakest to strongest so one weak topic can't swallow the
  * whole test, and ties/ordering are seeded by the attempt id so a reload
- * of the same attempt always yields the same set.
+ * of the same attempt always yields the same set. Difficulty follows the
+ * student too: within a topic, questions nearest their level come first.
  */
 async function pickAdaptiveQuestions(studentId: string, pool: PoolRow[], count: number, seed: string): Promise<PoolRow[]> {
   if (pool.length <= count) return pool;
@@ -87,10 +88,26 @@ async function pickAdaptiveQuestions(studentId: string, pool: PoolRow[], count: 
     return s && s.total > 0 ? s.correct / s.total : 0.5;
   };
 
+  // Difficulty per student and topic: weak -> Mudah first, middling ->
+  // Sedang, strong -> Sulit (no history -> Sedang). Within a topic the
+  // questions closest to that level come first; the shuffle above breaks
+  // ties, so students at the same level still get different questions.
+  const LEVEL: Record<string, number> = { mudah: 0, sedang: 1, sulit: 2 };
+  const target = (topic: string) => {
+    const s = stats.get(topic.trim().toLowerCase());
+    if (!s || s.total === 0) return 1;
+    const acc = s.correct / s.total;
+    return acc < 0.4 ? 0 : acc < 0.75 ? 1 : 2;
+  };
   const byTopic = new Map<string, PoolRow[]>();
   for (const row of seededShuffle(pool, seed)) {
     const t = row.questions.topic || "Umum";
     byTopic.set(t, [...(byTopic.get(t) ?? []), row]);
+  }
+  for (const [t, rows] of byTopic) {
+    const want = target(t);
+    const dist = (r: PoolRow) => Math.abs((LEVEL[(r.questions.difficulty ?? "").toLowerCase()] ?? 1) - want);
+    byTopic.set(t, [...rows].sort((a, b) => dist(a) - dist(b)));
   }
   const topics = [...byTopic.keys()].sort((a, b) => accuracy(a) - accuracy(b));
 

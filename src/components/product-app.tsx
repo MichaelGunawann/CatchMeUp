@@ -4778,7 +4778,7 @@ function TeacherAssessmentBuilder() {
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
               {([
                 { key: "uniform" as const, label: "Sama untuk Semua Siswa", desc: "Setiap siswa mendapat soal yang identik — cocok untuk ujian formal & perbandingan nilai.", icon: Users },
-                { key: "adaptive" as const, label: "Adaptif per Siswa", desc: "Soal dipilih otomatis berdasarkan topik lemah tiap siswa — cocok untuk latihan diagnostik.", icon: Zap },
+                { key: "adaptive" as const, label: "Adaptif per Siswa", desc: "Soal dipilih otomatis per siswa: lebih banyak dari topik lemahnya, dengan tingkat kesulitan sesuai kemampuannya — cocok untuk latihan diagnostik.", icon: Zap },
               ]).map(({ key, label, desc, icon: Icon }) => (
                 <button key={key} onClick={() => setAssessmentType(key)}
                   className={cn(
@@ -4800,7 +4800,7 @@ function TeacherAssessmentBuilder() {
             {assessmentType === "adaptive" && (
               <div className="mt-3">
                 <AlertPanel tone="primary" title="Mode Adaptif">
-                  Di langkah berikutnya, pilih <strong>pool soal</strong> (minimal {Number.isNaN(formQuestionCount) ? "N" : formQuestionCount} soal, lebih banyak lebih baik). Saat siswa mulai mengerjakan, sistem memilih {Number.isNaN(formQuestionCount) ? "N" : formQuestionCount} soal untuk tiap siswa dengan memprioritaskan topik yang paling lemah bagi siswa tersebut — soal tiap siswa bisa berbeda.
+                  Di langkah berikutnya, pilih <strong>pool soal</strong> (minimal {Number.isNaN(formQuestionCount) ? "N" : formQuestionCount} soal, lebih banyak lebih baik). Saat siswa mulai mengerjakan, sistem memilih {Number.isNaN(formQuestionCount) ? "N" : formQuestionCount} soal untuk tiap siswa: lebih banyak dari topik yang paling lemah baginya, dan tingkat kesulitannya disesuaikan (topik yang masih lemah → soal Mudah, sedang → Sedang, sudah kuat → Sulit). Soal tiap siswa bisa berbeda, jadi isi pool dengan berbagai topik dan tingkat kesulitan.
                 </AlertPanel>
               </div>
             )}

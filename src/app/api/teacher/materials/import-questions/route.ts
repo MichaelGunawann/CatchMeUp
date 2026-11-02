@@ -17,6 +17,7 @@ type Extracted = {
   answerTextOnSheet?: string | null;  // uraian: answer printed on the sheet
   suggestedAnswerText?: string | null; // uraian: AI's short model answer
   needsImage?: boolean;
+  difficulty?: string;        // AI's estimate: Mudah / Sedang / Sulit
   optionsByAi?: boolean;      // pg mode: the sheet had no options, the AI made them
   shortAnswer?: string | null; // isian mode: final answer only
 };
@@ -90,6 +91,7 @@ ATURAN:
 - "suggestedAnswer": jika answerOnSheet null dan soal pilihan ganda, isi huruf jawaban yang menurutmu benar (akan dicek guru). Selain itu null.
 - Soal uraian/isian (tanpa pilihan): "answerTextOnSheet" = jawaban jika tertulis di dokumen, selain itu null; "suggestedAnswerText" = jawaban singkat yang benar menurutmu (beserta cara singkat bila hitungan), akan dicek guru.
 - "needsImage": true jika soal merujuk gambar/tabel/grafik yang tidak ada di teks.
+- "difficulty": perkiraan tingkat kesulitan soal untuk siswa di jenjangnya - "Mudah" (ingat/hitung langsung satu langkah), "Sedang" (perlu memahami konsep atau 2-3 langkah), "Sulit" (banyak langkah, gabungan konsep, analisis/penalaran).
 - Abaikan teks yang bukan soal (judul, nama/absen, "Mark only one oval", "2 points", petunjuk umum).
 ${modeRule}
 
@@ -99,7 +101,7 @@ TEKS DOKUMEN:
 ${part}
 ---
 
-Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answerOnSheet":null,"suggestedAnswer":"A","answerTextOnSheet":null,"suggestedAnswerText":null,"needsImage":false${as === "pg" ? `,"optionsByAi":false` : as === "isian" ? `,"shortAnswer":null` : ""}}]}` }],
+Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answerOnSheet":null,"suggestedAnswer":"A","answerTextOnSheet":null,"suggestedAnswerText":null,"needsImage":false,"difficulty":"Sedang"${as === "pg" ? `,"optionsByAi":false` : as === "isian" ? `,"shortAnswer":null` : ""}}]}` }],
         max_tokens: 6000,
         temperature: 0.1,
       });
@@ -118,7 +120,7 @@ Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answer
   const base = {
     school_id: mat.school_id, class_id: mat.class_id, subject_id: mat.subject_id, creator_id: t.profileId,
     source: "uploaded", topic: mat.chapter || mat.title, subtopic: mat.chapter || mat.title,
-    difficulty: "Sedang", bloom_level: "Menerapkan", status: "pending",
+    bloom_level: "Menerapkan", status: "pending",
     source_title: mat.title, source_material_id: mat.id,
   };
   const rows = found.filter(q => typeof q.question === "string" && q.question.trim()).map(q => {
@@ -137,10 +139,11 @@ Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answer
     }
     const answerText = q.answerTextOnSheet?.trim() || q.suggestedAnswerText?.trim() || "";
     const keyFromSheet = !!q.answerTextOnSheet?.trim();
+    const difficulty = ["Mudah", "Sedang", "Sulit"].find(d => d.toLowerCase() === String(q.difficulty ?? "").trim().toLowerCase()) ?? "Sedang";
     const question = q.question!.trim() + (q.needsImage ? "\n(Soal ini memakai gambar - tambahkan gambarnya sebelum dipakai.)" : "");
     if (isPg) {
       return {
-        ...base, question, question_type: "pg", options: opts,
+        ...base, difficulty, question, question_type: "pg", options: opts,
         correct_answer: onSheet ?? suggested ?? Object.keys(opts)[0],
         // Flag for Tinjau Soal: the key wasn't on the sheet (or the options are the AI's).
         answer_key: !onSheet ? { keyCheck: true, keySource: suggested ? "ai" : "none" } : null,
@@ -150,7 +153,7 @@ Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answer
     const short = (q.shortAnswer ?? "").trim() || (keyFromSheet ? q.answerTextOnSheet!.trim() : "");
     if (as === "isian" && short && short.length <= 60) {
       return {
-        ...base, question, question_type: "isian", options: {}, correct_answer: null,
+        ...base, difficulty, question, question_type: "isian", options: {}, correct_answer: null,
         answer_key: keyFromSheet ? { accepted: [short] } : { accepted: [short], keyCheck: true, keySource: "ai" },
         explanation: answerText,
       };
@@ -158,7 +161,7 @@ Jawab HANYA JSON: {"questions":[{"question":"","options":{"A":"","B":""},"answer
     // Uraian: the (printed or suggested) answer becomes the example answer
     // the essay check compares against.
     return {
-      ...base, question, question_type: "esai", options: {}, correct_answer: null,
+      ...base, difficulty, question, question_type: "esai", options: {}, correct_answer: null,
       answer_key: keyFromSheet ? null : { keyCheck: true, keySource: answerText ? "ai" : "none" },
       explanation: answerText,
     };
