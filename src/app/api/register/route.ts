@@ -66,11 +66,12 @@ export async function POST(req: Request) {
       .from("schools")
       .select("id")
       .eq("id", schoolId)
+      .eq("status", "ACTIVE") // not a pending or rejected school
       .single();
 
     if (schoolError || !school) {
       return Response.json(
-        { error: "Selected school does not exist" },
+        { error: "Sekolah tidak ditemukan atau belum disetujui" },
         { status: 400 }
       );
     }

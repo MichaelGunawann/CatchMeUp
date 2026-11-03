@@ -10362,11 +10362,16 @@ function useAdminData<T>(section: "students" | "assessments" | "analytics"): T |
 type RealSchoolRow = { id: string; name: string; city: string | null; province: string | null; status: string; students: number; teachers: number };
 
 async function fetchRealSchools(): Promise<RealSchoolRow[]> {
-  // RLS already scopes this correctly: a SCHOOL_ADMIN's session only ever
-  // returns their own managed school(s); PLATFORM_ADMIN sees every school.
-  // No manual filtering needed here - the boundary is enforced by
-  // supabase/migrations/006_school_registration.sql's SELECT policies.
-  const { data: schools } = await supabase.from("schools").select("id, name, city, province, status").order("name");
+  // Every ACTIVE school is publicly readable (sign-up lists them), so RLS
+  // alone showed a school admin all other schools too: limit a
+  // SCHOOL_ADMIN to the schools they manage. PLATFORM_ADMIN sees all.
+  const profile = await getCurrentProfile();
+  let query = supabase.from("schools").select("id, name, city, province, status").order("name");
+  if (profile?.role === "SCHOOL_ADMIN") {
+    const { data: managed } = await supabase.from("school_admins").select("school_id").eq("user_profile_id", profile.id);
+    query = query.in("id", (managed ?? []).map(m => m.school_id as string));
+  }
+  const { data: schools } = await query;
   const rows = schools ?? [];
   if (rows.length === 0) return [];
 
