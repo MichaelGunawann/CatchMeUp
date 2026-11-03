@@ -10361,39 +10361,10 @@ function useAdminData<T>(section: "students" | "assessments" | "analytics"): T |
 
 type RealSchoolRow = { id: string; name: string; city: string | null; province: string | null; status: string; students: number; teachers: number };
 
-async function fetchRealSchools(): Promise<RealSchoolRow[]> {
-  // Every ACTIVE school is publicly readable (sign-up lists them), so RLS
-  // alone showed a school admin all other schools too: limit a
-  // SCHOOL_ADMIN to the schools they manage. PLATFORM_ADMIN sees all.
-  const profile = await getCurrentProfile();
-  let query = supabase.from("schools").select("id, name, city, province, status").order("name");
-  if (profile?.role === "SCHOOL_ADMIN") {
-    const { data: managed } = await supabase.from("school_admins").select("school_id").eq("user_profile_id", profile.id);
-    query = query.in("id", (managed ?? []).map(m => m.school_id as string));
-  }
-  const { data: schools } = await query;
-  const rows = schools ?? [];
-  if (rows.length === 0) return [];
-
-  const ids = rows.map(r => r.id as string);
-  const [{ data: studentRows }, { data: teacherRows }] = await Promise.all([
-    supabase.from("students").select("school_id").in("school_id", ids).eq("status", "ACTIVE"),
-    supabase.from("teachers").select("school_id").in("school_id", ids),
-  ]);
-  const studentCount = new Map<string, number>();
-  for (const r of (studentRows ?? []) as Array<{ school_id: string }>) studentCount.set(r.school_id, (studentCount.get(r.school_id) ?? 0) + 1);
-  const teacherCount = new Map<string, number>();
-  for (const r of (teacherRows ?? []) as Array<{ school_id: string }>) teacherCount.set(r.school_id, (teacherCount.get(r.school_id) ?? 0) + 1);
-
-  return rows.map(r => ({
-    id: r.id as string,
-    name: r.name as string,
-    city: r.city as string | null,
-    province: r.province as string | null,
-    status: r.status as string,
-    students: studentCount.get(r.id as string) ?? 0,
-    teachers: teacherCount.get(r.id as string) ?? 0,
-  }));
+/** Schools in the admin's scope with student/teacher counts (server-side: see /api/admin/data). */
+async function fetchRealSchools(): Promise<RealSchoolRow[] | null> {
+  const res = await apiPost<{ schools: RealSchoolRow[] }>("/api/admin/data", { section: "schools" });
+  return res.error ? null : res.schools ?? [];
 }
 
 function schoolStatusLabel(status: string): { label: string; tone: "success" | "warning" | "danger" } {
@@ -10404,10 +10375,11 @@ function schoolStatusLabel(status: string): { label: string; tone: "success" | "
 
 function AdminSchools() {
   const [schools, setSchools] = useState<RealSchoolRow[] | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-    fetchRealSchools().then(rows => { if (!cancelled) setSchools(rows); });
+    fetchRealSchools().then(rows => { if (!cancelled) { setSchools(rows ?? []); setLoadFailed(rows === null); } });
     return () => { cancelled = true; };
   }, []);
 
@@ -10420,6 +10392,8 @@ function AdminSchools() {
         <div className="flex items-center justify-center py-16">
           <span className="h-5 w-5 rounded-full border-2 border-primary border-t-transparent animate-spin" />
         </div>
+      ) : loadFailed ? (
+        <AlertPanel tone="danger" title="Gagal memuat daftar sekolah">Muat ulang halaman untuk mencoba lagi.</AlertPanel>
       ) : schools.length === 0 ? (
         <EmptyState icon={Users} title="Belum ada sekolah" description="Belum ada sekolah yang terdaftar di platform ini." />
       ) : (

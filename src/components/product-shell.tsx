@@ -197,7 +197,7 @@ function NavLinks({ nav, pathname, onNavigate, spread }: { nav: NavItem[]; pathn
 
 export function AppShell({
   role,
-  nav,
+  nav: navProp,
   children,
   demoData = false,
 }: {
@@ -222,6 +222,13 @@ export function AppShell({
   const meta = role === "admin" && identity?.role === "SCHOOL_ADMIN"
     ? { ...roleMeta.admin, label: "Admin Sekolah" }
     : roleMeta[role];
+  // Guru (assignments) and Kelas are run by a school's own admin; the
+  // platform admin was sent back to the dashboard from both. A school
+  // admin's analytics cover their school, not the platform.
+  const nav = role !== "admin" ? navProp
+    : identity?.role === "PLATFORM_ADMIN" ? navProp.filter(n => n.href !== "/admin/teachers" && n.href !== "/admin/classes")
+    : identity?.role === "SCHOOL_ADMIN" ? navProp.map(n => n.href === "/admin/analytics" ? { ...n, title: "Analitik Sekolah" } : n)
+    : navProp;
   const displayName = identity?.name ?? "Tamu";
   const displayInitials = identity?.initials ?? "?";
   // SD students default to bigger text; everyone can change it per device.

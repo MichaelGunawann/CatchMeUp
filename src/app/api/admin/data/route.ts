@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
  *  - SCHOOL_ADMIN   -> only the schools in their school_admins rows
  *  - PLATFORM_ADMIN -> every school
  *
- * Body: { section: "students" | "assessments" | "analytics" }
+ * Body: { section: "schools" | "students" | "assessments" | "analytics" }
  */
 
 type Scope = { schoolIds: string[] | null }; // null = all schools
@@ -48,6 +48,28 @@ export async function POST(req: Request) {
 
     const { data: schoolRows } = await scoped(supabaseAdmin.from("schools").select("id, name"), scope, "id");
     const schoolName = new Map((schoolRows ?? []).map(s => [s.id as string, s.name as string]));
+
+    if (section === "schools") {
+      // Student/teacher counts per school: an admin can't count another
+      // school's rows through RLS (the page showed 0 for every school).
+      const { data: rows } = await scoped(supabaseAdmin.from("schools").select("id, name, city, province, status").order("name"), scope, "id");
+      const ids = (rows ?? []).map(r => r.id as string);
+      const [{ data: st }, { data: te }] = ids.length
+        ? await Promise.all([
+            supabaseAdmin.from("students").select("school_id").in("school_id", ids).eq("status", "ACTIVE"),
+            supabaseAdmin.from("teachers").select("school_id").in("school_id", ids).eq("status", "ACTIVE"),
+          ])
+        : [{ data: [] }, { data: [] }];
+      const count = (list: Array<{ school_id: string }> | null) => {
+        const m = new Map<string, number>();
+        for (const r of list ?? []) m.set(r.school_id, (m.get(r.school_id) ?? 0) + 1);
+        return m;
+      };
+      const sc = count(st as Array<{ school_id: string }>), tc = count(te as Array<{ school_id: string }>);
+      return Response.json({
+        schools: (rows ?? []).map(r => ({ ...r, students: sc.get(r.id as string) ?? 0, teachers: tc.get(r.id as string) ?? 0 })),
+      });
+    }
 
     if (section === "students") {
       const { data: rows } = await scoped(
