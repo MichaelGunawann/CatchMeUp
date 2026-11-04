@@ -1,4 +1,5 @@
 import Groq from "groq-sdk";
+import { supabaseAdmin } from "@/lib/supabase/server";
 import type { ChatCompletionCreateParamsNonStreaming, ChatCompletionCreateParamsStreaming } from "groq-sdk/resources/chat/completions";
 
 // Two Groq models with separate quotas (limits are per model):
@@ -20,6 +21,18 @@ function groq(): Groq {
   return _groq;
 }
 
+// TEMPORARY (token-usage measurement for the report): every AI call's token
+// counts are written to ai_cache under "usage:*". Remove after measuring.
+type Usage = { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number } | null | undefined;
+async function recordUsage(model: string, usage: Usage, kind: string) {
+  if (!usage) return;
+  await supabaseAdmin.from("ai_cache").insert({
+    key: `usage:${new Date().toISOString()}:${Math.random().toString(36).slice(2, 8)}`,
+    input_hash: "usage",
+    value: { model, kind, prompt: usage.prompt_tokens ?? 0, completion: usage.completion_tokens ?? 0, total: usage.total_tokens ?? 0 },
+  }).then(() => {}, () => {});
+}
+
 const isRateLimit = (err: unknown) => (err as { status?: number } | null)?.status === 429;
 
 type Params = Omit<ChatCompletionCreateParamsNonStreaming, "model">;
@@ -27,22 +40,37 @@ type StreamParams = Omit<ChatCompletionCreateParamsStreaming, "model" | "stream"
 
 export async function aiChat(tier: AiTier, params: Params) {
   const [first, second] = tier === "smart" ? [SMART_MODEL, FAST_MODEL] : [FAST_MODEL, SMART_MODEL];
+  let res;
   try {
-    return await groq().chat.completions.create({ ...params, model: first });
+    res = await groq().chat.completions.create({ ...params, model: first });
   } catch (err) {
     if (!isRateLimit(err)) throw err;
-    return await groq().chat.completions.create({ ...params, model: second });
+    res = await groq().chat.completions.create({ ...params, model: second });
   }
+  await recordUsage(res.model, res.usage, "chat");
+  return res;
 }
 
 export async function aiChatStream(tier: AiTier, params: StreamParams) {
   const [first, second] = tier === "smart" ? [SMART_MODEL, FAST_MODEL] : [FAST_MODEL, SMART_MODEL];
+  let stream;
   try {
-    return await groq().chat.completions.create({ ...params, model: first, stream: true });
+    stream = await groq().chat.completions.create({ ...params, model: first, stream: true });
   } catch (err) {
     if (!isRateLimit(err)) throw err;
-    return await groq().chat.completions.create({ ...params, model: second, stream: true });
+    stream = await groq().chat.completions.create({ ...params, model: second, stream: true });
   }
+  const s = stream;
+  return (async function* () {
+    let usage: Usage = null, model = "";
+    for await (const chunk of s) {
+      const x = (chunk as unknown as { x_groq?: { usage?: Usage } }).x_groq;
+      if (x?.usage) usage = x.usage;
+      model = chunk.model ?? model;
+      yield chunk;
+    }
+    await recordUsage(model, usage, "stream");
+  })();
 }
 
 /** Tutor questions that need the smart model: numbers/working, or long/complex. */
@@ -89,6 +117,7 @@ export async function aiVision(imageDataUrl: string, instruction: string): Promi
         ] }],
       });
       _visionModel = model;
+      await recordUsage(model, res.usage, "vision");
       // Some vision models think out loud first; keep only the answer.
       return (res.choices[0].message.content ?? "").replace(/<think>[\s\S]*?<\/think>/g, "").trim();
     } catch (err) {
