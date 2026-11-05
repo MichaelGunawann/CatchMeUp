@@ -91,6 +91,7 @@ import {
   QUESTION_TYPES, QUESTION_TYPE_LABEL, QUESTION_TYPE_HINT, type QuestionType,
   questionTypeOf, decodeComplex, encodeComplex,
   describeAnswer, describeKey, isAnswered, isianKey,
+  letterOptions, statementsOf, matchingOf, complexKey,
 } from "@/lib/question-types";
 import Link from "next/link";
 import {
@@ -6091,12 +6092,159 @@ function IsianGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
   );
 }
 
+// Change one question's answer key from the results and regrade every
+// submitted answer with it. Only the key is editable (text, options and
+// type stay), so the answers already given keep their meaning.
+function AnswerKeyDialog({ q, index, onClose, onSaved }: {
+  q: ResultQuestionRow; index: number; onClose: () => void; onSaved: (msg: string) => void;
+}) {
+  const raw = q.raw;
+  const letters = letterOptions(raw.options);
+  const statements = statementsOf(raw.options);
+  const { left, right } = matchingOf(raw.options);
+  const essayKey = (raw.answer_key ?? {}) as { rubric?: string; keywords?: string[] };
+  const [pg, setPg] = useState(raw.correct_answer ?? "");
+  const [complex, setComplex] = useState<string[]>(complexKey(raw.answer_key));
+  const [tf, setTf] = useState<string[]>(statements.map((_, i) => String((Array.isArray(raw.answer_key) ? raw.answer_key : [])[i] ?? "")));
+  const [pairs, setPairs] = useState<number[]>(left.map((_, i) => {
+    const v = Number((Array.isArray(raw.answer_key) ? raw.answer_key : [])[i]);
+    return Number.isInteger(v) ? v : -1;
+  }));
+  const [accepted, setAccepted] = useState(isianKey(raw.answer_key).join("; "));
+  const [rubric, setRubric] = useState(essayKey.rubric ?? "");
+  const [keywords, setKeywords] = useState((essayKey.keywords ?? []).join(", "));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit() {
+    const body: { assessmentQuestionId: string; correctAnswer?: string; answerKey?: unknown } = { assessmentQuestionId: q.assessmentQuestionId };
+    if (q.type === "pg") body.correctAnswer = pg;
+    else if (q.type === "pg_kompleks") body.answerKey = complex;
+    else if (q.type === "benar_salah") body.answerKey = tf;
+    else if (q.type === "menjodohkan") body.answerKey = pairs;
+    else if (q.type === "isian") body.answerKey = { accepted: accepted.split(/[;\n|]/).map(x => x.trim()).filter(Boolean) };
+    else body.answerKey = { rubric, keywords: keywords.split(/[,;\n]/).map(x => x.trim()).filter(Boolean) };
+    setSaving(true); setError("");
+    const res = await apiPost<{ graded?: number; right?: number; changed?: number; essay?: boolean }>("/api/teacher/regrade-question", body);
+    setSaving(false);
+    if (res.error) { setError(res.error); return; }
+    onSaved(res.essay
+      ? `Kunci soal ${index} disimpan. Esai tetap dinilai guru: buka tab Nilai Esai dan minta usulan AI lagi supaya memakai kunci baru.`
+      : `Kunci soal ${index} disimpan. ${res.graded} jawaban diperiksa ulang, ${res.changed} nilai berubah (${res.right} benar). Nilai akhir siswa sudah dihitung ulang.`);
+  }
+
+  const choice = (active: boolean) => cn("rounded-full border px-3 py-1 text-[12px] font-semibold transition-colors",
+    active ? "border-primary bg-primary text-white" : "border-border bg-background text-ink-secondary hover:border-primary/30");
+
+  return (
+    <div className="fixed inset-0 z-[60] flex items-end justify-center p-4 sm:items-center">
+      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => !saving && onClose()} />
+      <div className="relative flex max-h-[90vh] w-full max-w-2xl flex-col rounded-card border border-border bg-surface shadow-xl">
+        <div className="flex items-center justify-between border-b border-border px-5 py-3.5 shrink-0">
+          <h2 className="text-[14px] font-bold text-ink">Ubah Kunci Jawaban · Soal {index} <span className="font-normal text-ink-secondary">({QUESTION_TYPE_LABEL[q.type]})</span></h2>
+          <button onClick={onClose} disabled={saving} aria-label="Tutup" className="flex h-7 w-7 items-center justify-center rounded-full text-ink-secondary hover:bg-background">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-4 overflow-y-auto p-5">
+          <p className="whitespace-pre-line text-[13px] text-ink">{q.question}</p>
+          <p className="text-[11px] text-ink-secondary">Kunci sekarang: <span className="font-semibold text-ink">{describeKey(raw)}</span></p>
+
+          {q.type === "pg" && (
+            <div className="space-y-1.5">
+              {letters.map(o => (
+                <label key={o.key} className={cn("flex cursor-pointer items-start gap-2 rounded-[8px] border p-2.5 text-[12px]", pg === o.key ? "border-success bg-success-light/50" : "border-border")}>
+                  <input type="radio" name="pg-key" className="mt-0.5 accent-primary" checked={pg === o.key} onChange={() => setPg(o.key)} />
+                  <span><b>{o.key}.</b> {o.text}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          {q.type === "pg_kompleks" && (
+            <div className="space-y-1.5">
+              <p className="text-[11px] text-ink-secondary">Centang semua jawaban yang benar.</p>
+              {letters.map(o => (
+                <label key={o.key} className={cn("flex cursor-pointer items-start gap-2 rounded-[8px] border p-2.5 text-[12px]", complex.includes(o.key) ? "border-success bg-success-light/50" : "border-border")}>
+                  <input type="checkbox" className="mt-0.5 accent-primary" checked={complex.includes(o.key)}
+                    onChange={() => setComplex(p => p.includes(o.key) ? p.filter(x => x !== o.key) : [...p, o.key].sort())} />
+                  <span><b>{o.key}.</b> {o.text}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          {q.type === "benar_salah" && (
+            <div className="overflow-hidden rounded-[8px] border border-border">
+              {statements.map((text, i) => (
+                <div key={i} className="flex flex-col gap-2 border-b border-border p-2.5 last:border-0 sm:flex-row sm:items-center">
+                  <p className="flex-1 text-[12px] text-ink"><b>{i + 1}.</b> {text}</p>
+                  <div className="flex gap-2">
+                    {(["B", "S"] as const).map(v => (
+                      <button key={v} type="button" className={choice(tf[i] === v)} onClick={() => setTf(p => p.map((x, j) => j === i ? v : x))}>
+                        {v === "B" ? "Benar" : "Salah"}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {q.type === "menjodohkan" && (
+            <div className="space-y-2">
+              {left.map((l, i) => (
+                <div key={i} className="flex flex-col gap-1.5 sm:flex-row sm:items-center">
+                  <span className="flex-1 text-[12px] text-ink"><b>{i + 1}.</b> {l}</span>
+                  <span className="hidden text-ink-tertiary sm:inline">→</span>
+                  <div className="sm:w-64">
+                    <SelectField value={pairs[i] >= 0 ? String(pairs[i]) : ""} onChange={v => setPairs(p => p.map((x, j) => j === i ? Number(v) : x))}
+                      options={right.map((r, k) => ({ value: String(k), label: r }))} />
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          {q.type === "isian" && (
+            <FormField label="Jawaban yang diterima (pisahkan dengan titik koma)">
+              <input type="text" value={accepted} onChange={e => setAccepted(e.target.value)} placeholder="mis. Soekarno; Ir. Soekarno; Bung Karno" className={fieldClass()} />
+            </FormField>
+          )}
+          {q.type === "esai" && (
+            <div className="space-y-3">
+              <FormField label="Contoh jawaban / pedoman penilaian">
+                <textarea rows={4} value={rubric} onChange={e => setRubric(e.target.value)} className={fieldClass()} />
+              </FormField>
+              <FormField label="Kata kunci (pisahkan dengan koma)">
+                <input type="text" value={keywords} onChange={e => setKeywords(e.target.value)} className={fieldClass()} />
+              </FormField>
+            </div>
+          )}
+
+          <div className="rounded-[8px] border border-warning/40 bg-warning-light px-3 py-2 text-[11px] text-ink">
+            {q.type === "esai"
+              ? "Esai tetap dinilai guru. Kunci baru dipakai untuk usulan nilai AI berikutnya; nilai yang sudah disimpan tidak berubah."
+              : "Semua jawaban siswa untuk soal ini di asesmen ini diperiksa ulang dengan kunci baru, termasuk nilai yang sebelumnya diubah manual. Kunci juga ikut berubah di Bank Soal."}
+          </div>
+          {error && <p className="text-[12px] text-danger">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5 shrink-0">
+          <Button variant="outline" size="sm" disabled={saving} onClick={onClose}>Batal</Button>
+          <Button variant="default" size="sm" disabled={saving} onClick={submit}>
+            {saving ? "Menyimpan..." : q.type === "esai" ? "Simpan Kunci" : "Simpan & Periksa Ulang"}
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TeacherResults() {
   const { teacher, loading: teacherLoading } = useRealTeacherStatus();
   const [activeClass] = useActiveClass();
   const activeSubjectId = findActiveAssignment(teacher, activeClass)?.subjectId;
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detailTab, setDetailTab] = useState<"soal" | "siswa" | "esai" | "isian" | "sesi">("soal");
+  const [keyEdit, setKeyEdit] = useState<{ q: ResultQuestionRow; index: number } | null>(null);
+  const [keyMsg, setKeyMsg] = useState<string | null>(null);
+  const [keyMsgFor, setKeyMsgFor] = useState<string | null>(null);
   // null = still loading - never show "Belum ada asesmen" before the fetch returns
   const [assessmentRows, setAssessmentRows] = useState<SavedAssessment[] | null>(null);
   const allAssessments = assessmentRows ?? [];
@@ -6339,6 +6487,12 @@ function TeacherResults() {
                     )}
                   </div>
 
+                  <p className="rounded-[8px] border border-primary/20 bg-primary-soft px-3 py-2 text-[12px] text-ink">
+                    <b>Kunci jawaban salah?</b> Klik <b>Ubah kunci</b> di soal mana pun (PG, PG kompleks, benar/salah, menjodohkan, isian, esai).
+                    Semua jawaban siswa untuk soal itu langsung diperiksa ulang dan nilai akhirnya dihitung ulang.
+                  </p>
+                  {keyMsg && keyMsgFor === detailId && <p className="mt-2 text-[12px] font-medium text-success">{keyMsg}</p>}
+
                   {aiAnalysis?.overallAnalysis && (
                     <AIInsightPanel title="Analisis AI">
                       <p>{aiAnalysis.overallAnalysis}</p>
@@ -6356,7 +6510,10 @@ function TeacherResults() {
                         <div key={q.assessmentQuestionId} className="rounded-[10px] border border-border bg-background p-4 space-y-3">
                           <div className="flex items-start gap-2">
                             <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/10 text-[10px] font-bold text-primary mt-0.5">{i+1}</span>
-                            <p className="text-[12px] font-medium text-ink leading-snug">{q.question}</p>
+                            <p className="flex-1 text-[12px] font-medium text-ink leading-snug">{q.question}</p>
+                            <Button variant="outline" size="sm" className="h-7 shrink-0 text-[11px]" onClick={() => { setKeyMsg(null); setKeyEdit({ q, index: i + 1 }); }}>
+                              <Pencil className="mr-1 h-3 w-3" />Ubah kunci
+                            </Button>
                           </div>
 
                           {q.type !== "pg" ? (() => {
@@ -6502,6 +6659,14 @@ function TeacherResults() {
               {detailTab === "sesi" && resultDetail && detailId && (
                 <ExamSessionPanel assessmentId={detailId} students={resultDetail.studentRows.map(st => ({ id: st.studentId, name: st.name }))}
                   onChanged={() => { if (activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail, () => {}); }} />
+              )}
+
+              {keyEdit && (
+                <AnswerKeyDialog q={keyEdit.q} index={keyEdit.index} onClose={() => setKeyEdit(null)}
+                  onSaved={m => {
+                    setKeyEdit(null); setKeyMsg(m); setKeyMsgFor(detailId);
+                    if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail, () => {});
+                  }} />
               )}
 
               {/* TAB: Isian Singkat */}
