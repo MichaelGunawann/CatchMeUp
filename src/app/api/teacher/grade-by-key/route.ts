@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { requireTeacher } from "@/lib/auth/api-teacher";
-import { recomputeAttempt } from "@/lib/grading";
+import { recomputeAttempt, syncWrongAnswer } from "@/lib/grading";
 import { isianMatches } from "@/lib/question-types";
 
 export const dynamic = "force-dynamic";
@@ -13,12 +13,14 @@ export const maxDuration = 60;
  * grades every submitted answer automatically against the accepted
  * answers (numbers compared by value), no AI needed. With convert=true the
  * question becomes "Isian Singkat" so future attempts are auto-graded too.
+ * Also used on short-answer questions after the teacher adds an accepted
+ * variant: every answer is regraded with the new key.
  */
 export async function POST(req: Request) {
   const t = await requireTeacher(req);
   if (t instanceof Response) return t;
   const { assessmentQuestionId, accepted, convert } = (await req.json()) as { assessmentQuestionId?: string; accepted?: string[]; convert?: boolean };
-  const keys = (accepted ?? []).map(k => String(k).trim()).filter(Boolean).slice(0, 10);
+  const keys = (accepted ?? []).map(k => String(k).trim()).filter(Boolean).slice(0, 20);
   if (!assessmentQuestionId || keys.length === 0) return Response.json({ error: "Isi jawaban yang benar" }, { status: 400 });
 
   const { data: aq } = await supabaseAdmin.from("assessment_questions")
@@ -38,6 +40,7 @@ export async function POST(req: Request) {
     await supabaseAdmin.from("question_attempts").update({
       is_correct: ok, points_earned: ok ? max : 0, graded_at: new Date().toISOString(),
     }).eq("id", r.id);
+    await syncWrongAnswer(r.assessment_attempt_id, aq.question_id, ok, r.student_answer);
   }
 
   let converted = false;

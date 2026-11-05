@@ -21,3 +21,19 @@ export async function recomputeAttempt(attemptId: string): Promise<{ score: numb
     .in("status", ["submitted", "graded"]);
   return { score: pending ? null : score, pending };
 }
+
+/**
+ * Keeps an attempt's "Soal Salah" row (student_wrong_answers) in step with
+ * an answer regraded after submission: removed when it is now right,
+ * (re)added when it is now wrong.
+ */
+export async function syncWrongAnswer(attemptId: string, questionId: string, isCorrect: boolean, answer: string | null) {
+  await supabaseAdmin.from("student_wrong_answers").delete().eq("assessment_attempt_id", attemptId).eq("question_id", questionId);
+  if (isCorrect || !answer?.trim()) return;
+  const { data: att } = await supabaseAdmin.from("assessment_attempts").select("student_id, submitted_at").eq("id", attemptId).maybeSingle();
+  if (!att) return;
+  await supabaseAdmin.from("student_wrong_answers").insert({
+    student_id: att.student_id, assessment_attempt_id: attemptId, question_id: questionId,
+    student_answer: answer, attempted_at: att.submitted_at ?? new Date().toISOString(),
+  });
+}

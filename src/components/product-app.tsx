@@ -90,7 +90,7 @@ import { useSubjectFilter } from "@/lib/hooks/use-subject-filter";
 import {
   QUESTION_TYPES, QUESTION_TYPE_LABEL, QUESTION_TYPE_HINT, type QuestionType,
   questionTypeOf, decodeComplex, encodeComplex,
-  describeAnswer, describeKey, isAnswered,
+  describeAnswer, describeKey, isAnswered, isianKey,
 } from "@/lib/question-types";
 import Link from "next/link";
 import {
@@ -5949,12 +5949,154 @@ function EssayGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetai
     </div>
   );
 }
+
+// Short answers are graded automatically against the accepted answers, so
+// a valid variant missing from the key ("Bung Karno" for "Soekarno") is
+// marked wrong. Here the teacher accepts such a variant (adds it to the key
+// and regrades every answer) or overrides one student's score by hand.
+function IsianGradingPanel({ detail, onGraded }: { detail: AssessmentResultDetail; onGraded: () => void }) {
+  const isians = detail.questions.filter(q => q.type === "isian");
+  const [keyDraft, setKeyDraft] = useState<Record<string, string>>({});
+  const [drafts, setDrafts] = useState<Record<string, { points: string; feedback: string }>>({});
+  const [saving, setSaving] = useState<string | null>(null);
+  const [onlyWrong, setOnlyWrong] = useState(false);
+  const [msg, setMsg] = useState<{ text: string; tone: "success" | "danger" } | null>(null);
+
+  const splitKeys = (s: string) => s.split(/[;\n|]/).map(x => x.trim()).filter(Boolean);
+
+  async function regrade(q: ResultQuestionRow, accepted: string[]) {
+    if (!accepted.length) { setMsg({ text: "Isi minimal satu jawaban yang benar.", tone: "danger" }); return; }
+    setSaving(`key:${q.assessmentQuestionId}`); setMsg(null);
+    const res = await apiPost<{ graded?: number; right?: number }>("/api/teacher/grade-by-key",
+      { assessmentQuestionId: q.assessmentQuestionId, accepted, convert: true });
+    setSaving(null);
+    if (res.error) { setMsg({ text: `Gagal: ${res.error}`, tone: "danger" }); return; }
+    setKeyDraft(p => { const n = { ...p }; delete n[q.assessmentQuestionId]; return n; });
+    setMsg({ text: `Kunci disimpan. ${res.graded} jawaban dinilai ulang (${res.right} benar), nilai akhir siswa sudah dihitung ulang.`, tone: "success" });
+    onGraded();
+  }
+
+  async function save(qaId: string, max: number) {
+    const d = drafts[qaId];
+    const pts = Number(d?.points);
+    if (!d || d.points === "" || !Number.isFinite(pts) || pts < 0 || pts > max) {
+      setMsg({ text: `Isi nilai antara 0 dan ${max}.`, tone: "danger" }); return;
+    }
+    setSaving(qaId); setMsg(null);
+    const res = await apiPost<{ score?: number }>("/api/teacher/grade-essay", { questionAttemptId: qaId, points: pts, feedback: d.feedback });
+    setSaving(null);
+    if (res.error) { setMsg({ text: `Gagal menyimpan: ${res.error}`, tone: "danger" }); return; }
+    setDrafts(p => { const n = { ...p }; delete n[qaId]; return n; });
+    setMsg({ text: "Nilai tersimpan. Nilai akhir siswa sudah dihitung ulang.", tone: "success" });
+    onGraded();
+  }
+
+  return (
+    <div className="space-y-5">
+      <p className="text-[12px] text-ink-secondary">
+        Isian singkat dinilai <b className="text-ink">otomatis</b> dengan jawaban yang diterima (huruf besar/kecil, spasi, dan tanda baca diabaikan; angka dibandingkan nilainya).
+        Kalau ada jawaban benar yang belum ada di kunci, klik <b className="text-ink">Terima sebagai benar</b> atau tambahkan ke kunci: semua jawaban soal itu dinilai ulang.
+        Untuk kasus khusus, ubah nilai satu siswa lewat kotak <b className="text-ink">Nilai</b>.
+      </p>
+      {msg && <p className={cn("text-[12px] font-medium", msg.tone === "success" ? "text-success" : "text-danger")}>{msg.text}</p>}
+      <label className="flex items-center gap-1.5 text-[12px] font-medium text-ink">
+        <input type="checkbox" className="h-4 w-4 accent-primary" checked={onlyWrong} onChange={e => setOnlyWrong(e.target.checked)} />
+        Hanya jawaban yang belum dapat nilai penuh
+      </label>
+
+      {isians.map(q => {
+        const idx = detail.questions.indexOf(q) + 1;
+        const keys = isianKey(q.raw.answer_key);
+        const busy = saving === `key:${q.assessmentQuestionId}`;
+        const rows = detail.studentRows
+          .filter(st => st.results[q.assessmentQuestionId])
+          .map(st => ({ st, r: st.results[q.assessmentQuestionId], answer: (st.answers[q.assessmentQuestionId] ?? "").trim() }));
+        // Wrong answers grouped by what was typed, most common first.
+        const groups = new Map<string, { answer: string; names: string[] }>();
+        for (const { st, r, answer } of rows) {
+          if (r.isCorrect !== false || !answer) continue;
+          const k = answer.toLowerCase();
+          const g = groups.get(k) ?? { answer, names: [] };
+          g.names.push(st.name);
+          groups.set(k, g);
+        }
+        const wrongGroups = [...groups.values()].sort((a, b) => b.names.length - a.names.length);
+        const shown = rows.filter(({ r }) => !onlyWrong || r.earned < q.points);
+        return (
+          <div key={q.assessmentQuestionId} className="rounded-[10px] border border-border bg-background p-4">
+            <p className="text-[12px] font-bold text-ink">Soal {idx} · maks. {q.points} poin</p>
+            <p className="mt-1 whitespace-pre-line text-[12px] text-ink">{q.question}</p>
+
+            <div className="mt-3 rounded-[8px] border border-success/30 bg-success-light/50 px-3 py-2">
+              <p className="text-[12px] font-semibold text-ink">Jawaban yang diterima <span className="font-normal text-ink-secondary">(pisahkan dengan titik koma)</span></p>
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                <input type="text" value={keyDraft[q.assessmentQuestionId] ?? keys.join("; ")} placeholder="mis. Soekarno; Ir. Soekarno; Bung Karno"
+                  onChange={e => setKeyDraft(p => ({ ...p, [q.assessmentQuestionId]: e.target.value }))}
+                  className="min-w-[220px] flex-1 rounded-[6px] border border-border bg-surface px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
+                <Button variant="success" size="sm" disabled={busy || keyDraft[q.assessmentQuestionId] === undefined}
+                  onClick={() => regrade(q, splitKeys(keyDraft[q.assessmentQuestionId] ?? ""))}>
+                  {busy ? "Menilai ulang..." : "Simpan kunci & nilai ulang"}
+                </Button>
+              </div>
+              <p className="mt-1 text-[11px] text-ink-secondary">Kunci ikut tersimpan di Bank Soal. Nilai ulang mengganti nilai yang sebelumnya diubah manual pada soal ini.</p>
+            </div>
+
+            {wrongGroups.length > 0 && (
+              <div className="mt-3 rounded-[8px] border border-border bg-surface px-3 py-2">
+                <p className="text-[12px] font-semibold text-ink">Jawaban yang dinilai salah</p>
+                <div className="mt-1.5 space-y-1.5">
+                  {wrongGroups.map(g => (
+                    <div key={g.answer.toLowerCase()} className="flex flex-wrap items-center gap-2">
+                      <span className="rounded-[6px] bg-background px-2 py-0.5 text-[12px] font-semibold text-ink">{g.answer}</span>
+                      <span className="text-[11px] text-ink-secondary" title={g.names.join(", ")}>{g.names.length} siswa</span>
+                      <Button variant="outline" size="sm" className="ml-auto" disabled={busy}
+                        onClick={() => regrade(q, [...keys, g.answer])}>
+                        Terima sebagai benar
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {shown.length === 0 && <p className="mt-3 text-[12px] text-ink-tertiary">{onlyWrong ? "Semua jawaban sudah dapat nilai penuh." : "Belum ada jawaban."}</p>}
+            <div className="mt-3 space-y-2">
+              {shown.map(({ st, r, answer }) => {
+                const d = drafts[r.qaId] ?? { points: String(r.earned), feedback: r.feedback ?? "" };
+                return (
+                  <div key={r.qaId} className="flex flex-wrap items-center gap-2 rounded-[8px] border border-border bg-surface p-2.5">
+                    <span className="w-40 truncate text-[12px] font-semibold text-ink">{st.name}</span>
+                    <span className="min-w-[120px] flex-1 text-[12px] text-ink">{answer || <span className="text-ink-tertiary">(kosong)</span>}</span>
+                    <Badge tone={r.earned >= q.points ? "success" : r.earned > 0 ? "warning" : "danger"}>{r.earned}/{q.points} poin</Badge>
+                    <label className="flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary">
+                      Nilai
+                      <input type="number" min={0} max={q.points} step={0.5} value={d.points}
+                        onChange={e => setDrafts(p => ({ ...p, [r.qaId]: { ...d, points: e.target.value } }))}
+                        className="w-16 rounded-[6px] border border-border bg-background px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
+                    </label>
+                    <input type="text" placeholder="Catatan (opsional)" value={d.feedback}
+                      onChange={e => setDrafts(p => ({ ...p, [r.qaId]: { ...d, feedback: e.target.value } }))}
+                      className="w-40 rounded-[6px] border border-border bg-background px-2 py-1 text-[12px] text-ink focus:border-primary focus:outline-none" />
+                    <Button variant="default" size="sm" disabled={saving === r.qaId || !drafts[r.qaId]} onClick={() => save(r.qaId, q.points)}>
+                      {saving === r.qaId ? "Menyimpan..." : "Simpan"}
+                    </Button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function TeacherResults() {
   const { teacher, loading: teacherLoading } = useRealTeacherStatus();
   const [activeClass] = useActiveClass();
   const activeSubjectId = findActiveAssignment(teacher, activeClass)?.subjectId;
   const [detailId, setDetailId] = useState<string | null>(null);
-  const [detailTab, setDetailTab] = useState<"soal" | "siswa" | "esai" | "sesi">("soal");
+  const [detailTab, setDetailTab] = useState<"soal" | "siswa" | "esai" | "isian" | "sesi">("soal");
   // null = still loading - never show "Belum ada asesmen" before the fetch returns
   const [assessmentRows, setAssessmentRows] = useState<SavedAssessment[] | null>(null);
   const allAssessments = assessmentRows ?? [];
@@ -6103,7 +6245,7 @@ function TeacherResults() {
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => setDetailId(null)} />
           <div className={cn("relative w-full rounded-card border border-border bg-surface shadow-xl flex flex-col",
-            detailTab === "esai" || detailTab === "siswa" ? "max-w-6xl h-[94vh]" : "max-w-4xl max-h-[94vh]")}>
+            detailTab === "esai" || detailTab === "isian" || detailTab === "siswa" ? "max-w-6xl h-[94vh]" : "max-w-4xl max-h-[94vh]")}>
             <div className="flex items-start justify-between border-b border-border px-6 py-4 shrink-0">
               <div>
                 <p className="text-[10px] font-bold uppercase tracking-[0.1em] text-primary mb-0.5">{detail.type}</p>
@@ -6163,6 +6305,7 @@ function TeacherResults() {
                     { key: "siswa" as const, label: "Jawaban Siswa" },
                     { key: "sesi" as const, label: "Peserta & Waktu" },
                     ...(resultDetail.questions.some(q => q.type === "esai") ? [{ key: "esai" as const, label: `Nilai Esai${essayPendingCount ? ` (${essayPendingCount})` : ""}` }] : []),
+                    ...(resultDetail.questions.some(q => q.type === "isian") ? [{ key: "isian" as const, label: "Isian Singkat" }] : []),
                   ]).map(t => (
                     <button key={t.key} onClick={() => setDetailTab(t.key)}
                       className={cn(
@@ -6359,6 +6502,12 @@ function TeacherResults() {
               {detailTab === "sesi" && resultDetail && detailId && (
                 <ExamSessionPanel assessmentId={detailId} students={resultDetail.studentRows.map(st => ({ id: st.studentId, name: st.name }))}
                   onChanged={() => { if (activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail, () => {}); }} />
+              )}
+
+              {/* TAB: Isian Singkat */}
+              {detailTab === "isian" && resultDetail && (
+                <IsianGradingPanel detail={resultDetail}
+                  onGraded={() => { if (detailId && activeClass) loadAssessmentResultDetail(detailId, activeClass).then(setResultDetail, () => {}); }} />
               )}
 
               {/* TAB: Nilai Esai */}
