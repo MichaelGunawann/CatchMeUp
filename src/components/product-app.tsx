@@ -10156,7 +10156,7 @@ function StudentProgress() {
 // ── Student Achievements ──────────────────────────────────────────────────────
 
 const ACHIEVEMENT_EMOJI: Record<string, string> = {
-  BookOpen: "📚", Gem: "💎", GraduationCap: "🎓", Zap: "⚡", Crown: "👑", Flame: "🔥",
+  BookOpen: "📚", Gem: "💎", GraduationCap: "🎓", Zap: "⚡", Crown: "👑", Flame: "🔥", Compass: "🧭",
 };
 
 function StudentAchievements() {
@@ -10736,9 +10736,10 @@ function AdminSchools() {
 }
 
 type AdminStudentRow = {
-  id: string; name: string; nis: string | null; school: string; className: string | null; status: string;
+  id: string; name: string; nis: string | null; school: string; schoolId: string; classId: string | null; className: string | null; status: string;
   avgScore: number | null; assessments: number; xp: number; streak: number; lastActiveDate: string | null;
 };
+type AdminClassOption = { id: string; name: string; schoolId: string };
 
 const STUDENT_STATUS_LABEL: Record<string, { label: string; tone: "success" | "warning" | "danger" }> = {
   ACTIVE: { label: "Aktif", tone: "success" },
@@ -10897,11 +10898,15 @@ function InviteParentModal({ students, preselectedId, onClose, onDone }: {
 }
 
 function AdminStudents() {
-  const data = useAdminData<{ students: AdminStudentRow[] }>("students");
+  const data = useAdminData<{ students: AdminStudentRow[]; classes?: AdminClassOption[] }>("students");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("ALL");
   const [inviteFor, setInviteFor] = useState<string | null>(null);
-  const students = data && "students" in data ? data.students : [];
+  const [classFor, setClassFor] = useState<AdminStudentRow | null>(null);
+  // Classes changed on this page (the list itself is loaded once).
+  const [placed, setPlaced] = useState<Record<string, { classId: string; className: string }>>({});
+  const classes = data && "classes" in data ? data.classes ?? [] : [];
+  const students = (data && "students" in data ? data.students : []).map(s => placed[s.id] ? { ...s, ...placed[s.id] } : s);
   const filtered = students.filter(s =>
     (statusFilter === "ALL" || s.status === statusFilter) &&
     (!search || `${s.name} ${s.nis ?? ""} ${s.className ?? ""} ${s.school}`.toLowerCase().includes(search.toLowerCase())));
@@ -10912,7 +10917,7 @@ function AdminStudents() {
   return (
     <div className="space-y-6">
       <PageHeader eyebrow="Admin" title="Manajemen Siswa"
-        description="Siswa mendaftar sendiri lewat halaman Daftar, lalu disetujui dan ditempatkan di kelas dari Dasbor."
+        description="Siswa mendaftar sendiri lewat halaman Daftar, lalu disetujui di Dasbor. Kelas siswa bisa diatur atau dipindah kapan saja lewat tombol di kolom Kelas."
         actions={
           <div className="flex gap-2">
             <Link href="/admin/dashboard"><Button variant="outline" className="h-8 text-[12px]"><Users className="mr-1.5 h-3.5 w-3.5" />Persetujuan Siswa</Button></Link>
@@ -10956,7 +10961,15 @@ function AdminStudents() {
                   <tr key={s.id} className="border-b border-border last:border-0 hover:bg-background transition-colors">
                     <td className="px-4 py-3 text-[12px]"><span className="font-semibold text-ink">{s.name}</span>{s.nis && <span className="block text-[10px] text-ink-tertiary">NIS {s.nis}</span>}</td>
                     <td className="px-4 py-3 text-[12px] text-ink-secondary">{s.school}</td>
-                    <td className="px-4 py-3 text-[12px] text-ink">{s.className ?? <span className="text-warning">Belum ditempatkan</span>}</td>
+                    <td className="px-4 py-3 text-[12px] text-ink">
+                      {s.className ?? <span className="text-warning">Belum ditempatkan</span>}
+                      {s.status !== "REJECTED" && (
+                        <button type="button" onClick={() => setClassFor(s)}
+                          className="block text-[11px] font-semibold text-primary hover:underline">
+                          {s.className ? "Ganti kelas" : "Tempatkan di kelas"}
+                        </button>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-[12px]">
                       {s.avgScore == null ? <span className="text-ink-tertiary">—</span> : <span className={cn("font-semibold", s.avgScore >= 80 ? "text-success" : s.avgScore >= 65 ? "text-warning" : "text-danger")}>{s.avgScore}</span>}
                       <span className="block text-[10px] text-ink-tertiary">{s.assessments} asesmen</span>
@@ -10978,6 +10991,11 @@ function AdminStudents() {
           </table>
         </div>
       )}
+      {classFor && (
+        <StudentClassDialog student={classFor} classes={classes.filter(c => c.schoolId === classFor.schoolId)}
+          onClose={() => setClassFor(null)}
+          onSaved={(classId, className) => { setPlaced(p => ({ ...p, [classFor.id]: { classId, className } })); setClassFor(null); }} />
+      )}
       {inviteFor && (
         <InviteParentModal
           students={active}
@@ -10986,6 +11004,56 @@ function AdminStudents() {
           onDone={() => setInviteFor(null)}
         />
       )}
+    </div>
+  );
+}
+
+// Place a student in a class or move them to another one (school admin).
+function StudentClassDialog({ student, classes, onClose, onSaved }: {
+  student: AdminStudentRow; classes: AdminClassOption[]; onClose: () => void; onSaved: (classId: string, className: string) => void;
+}) {
+  const [classId, setClassId] = useState(student.classId ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  async function save() {
+    if (!classId) { setError("Pilih kelas terlebih dahulu."); return; }
+    setSaving(true); setError("");
+    const res = await apiPost<{ classId?: string; className?: string }>("/api/school-admin/set-student-class", { studentId: student.id, classId });
+    setSaving(false);
+    if (res.error || !res.className) { setError(res.error ?? "Gagal menyimpan kelas siswa."); return; }
+    onSaved(classId, res.className);
+  }
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center p-4 sm:items-center">
+      <div className="fixed inset-0 bg-ink/40 backdrop-blur-sm" onClick={() => !saving && onClose()} />
+      <div className="relative w-full max-w-md rounded-card border border-border bg-surface shadow-xl">
+        <div className="flex items-center justify-between border-b border-border px-5 py-3.5">
+          <h2 className="text-[14px] font-bold text-ink">{student.className ? "Ganti kelas" : "Tempatkan di kelas"}</h2>
+          <button onClick={onClose} disabled={saving} aria-label="Tutup" className="flex h-7 w-7 items-center justify-center rounded-full text-ink-secondary hover:bg-background">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="space-y-3 p-5">
+          <p className="text-[13px] text-ink"><b>{student.name}</b> · {student.school}</p>
+          <p className="text-[12px] text-ink-secondary">Kelas sekarang: <b className="text-ink">{student.className ?? "Belum ditempatkan"}</b></p>
+          {classes.length === 0 ? (
+            <AlertPanel tone="warning" title="Sekolah ini belum punya kelas">Buat kelas dulu di menu <Link href="/admin/classes" className="font-semibold text-primary underline">Kelas</Link>.</AlertPanel>
+          ) : (
+            <FormField label="Kelas baru" required>
+              <SelectField value={classId} onChange={setClassId} placeholder="Pilih kelas..."
+                options={classes.map(c => ({ value: c.id, label: c.name }))} />
+            </FormField>
+          )}
+          <p className="text-[11px] text-ink-tertiary">Riwayat nilai siswa tetap tersimpan. Setelah pindah, siswa melihat materi dan asesmen kelas barunya.</p>
+          {error && <p className="text-[12px] text-danger">{error}</p>}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-border px-5 py-3.5">
+          <Button variant="outline" size="sm" disabled={saving} onClick={onClose}>Batal</Button>
+          <Button variant="default" size="sm" disabled={saving || classes.length === 0 || !classId || classId === student.classId} onClick={save}>
+            {saving ? "Menyimpan..." : "Simpan"}
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

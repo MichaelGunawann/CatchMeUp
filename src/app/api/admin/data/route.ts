@@ -74,15 +74,17 @@ export async function POST(req: Request) {
     if (section === "students") {
       const { data: rows } = await scoped(
         supabaseAdmin.from("students")
-          .select("id, nis, status, school_id, xp, streak_days, last_active_date, classes(name), user_profiles(full_name)")
+          .select("id, nis, status, school_id, class_id, xp, streak_days, last_active_date, classes(name), user_profiles(full_name)")
           .order("created_at", { ascending: false })
           .limit(1000),
         scope,
       );
       const students = (rows ?? []) as unknown as Array<{
-        id: string; nis: string | null; status: string; school_id: string; xp: number; streak_days: number; last_active_date: string | null;
+        id: string; nis: string | null; status: string; school_id: string; class_id: string | null; xp: number; streak_days: number; last_active_date: string | null;
         classes: { name: string } | null; user_profiles: { full_name: string } | null;
       }>;
+      // Classes the admin can place students into ("Atur kelas").
+      const { data: classRows } = await scoped(supabaseAdmin.from("classes").select("id, name, school_id").order("name"), scope);
       const scoreBy = new Map<string, { sum: number; count: number }>();
       const ids = students.map(s => s.id);
       for (let i = 0; i < ids.length; i += 200) {
@@ -104,6 +106,8 @@ export async function POST(req: Request) {
             name: s.user_profiles?.full_name ?? "-",
             nis: s.nis,
             school: schoolName.get(s.school_id) ?? "-",
+            schoolId: s.school_id,
+            classId: s.class_id,
             className: s.classes?.name ?? null,
             status: s.status,
             avgScore: sc ? Math.round(sc.sum / sc.count) : null,
@@ -113,6 +117,7 @@ export async function POST(req: Request) {
             lastActiveDate: s.last_active_date,
           };
         }),
+        classes: ((classRows ?? []) as Array<{ id: string; name: string; school_id: string }>).map(c => ({ id: c.id, name: c.name, schoolId: c.school_id })),
       });
     }
 
