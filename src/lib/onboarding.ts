@@ -57,6 +57,9 @@ async function payMissionXp(profileId: string, newlyDone: number) {
  */
 export async function recordStudentStep(profileId: string, step: StudentStep): Promise<void> {
   try {
+    // A hidden card means the student is out of the missions: no step, no XP.
+    const recorded = await recordedSteps(profileId);
+    if (!recorded || recorded.has(STUDENT_HIDDEN)) return;
     const added = await recordSteps(profileId, [step]);
     await payMissionXp(profileId, added.length);
   } catch { /* onboarding is best-effort */ }
@@ -74,6 +77,10 @@ export type TeacherOnboarding = {
 export async function teacherOnboarding(profileId: string, teacherId: string): Promise<TeacherOnboarding | null> {
   const recorded = await recordedSteps(profileId);
   if (!recorded) return null;
+  if (recorded.has(TEACHER_HIDDEN)) {
+    const none = Object.fromEntries(TEACHER_STEPS.map(s => [s, false])) as Record<TeacherStep, boolean>;
+    return { available: true, hidden: true, hasAssignments: false, done: none };
+  }
 
   const [{ count: assignments }, materials, generated, approved, aiStyle, published] = await Promise.all([
     supabaseAdmin.from("teacher_assignments").select("id", { count: "exact", head: true }).eq("teacher_id", teacherId),
@@ -114,6 +121,12 @@ export type StudentOnboarding = {
 export async function studentOnboarding(profileId: string, student: { id: string; school_id: string; class_id: string }): Promise<StudentOnboarding | null> {
   const recorded = await recordedSteps(profileId);
   if (!recorded) return null;
+  // Hidden (by the student, or for accounts that predate the missions):
+  // no card, and no mission XP or badge paid behind the student's back.
+  if (recorded.has(STUDENT_HIDDEN)) {
+    const none = Object.fromEntries(STUDENT_STEPS.map(s => [s, false])) as Record<StudentStep, boolean>;
+    return { available: true, hidden: true, done: none, locked: none, justCompleted: false, xpPerMission: STUDENT_MISSION_XP };
+  }
 
   const [practice, materials, bank, finished] = await Promise.all([
     supabaseAdmin.from("practice_attempts").select("id", { count: "exact", head: true }).eq("student_id", student.id),
