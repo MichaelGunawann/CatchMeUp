@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { ArrowRight, BookOpen, ClipboardList, Send, Sparkles, Zap } from "lucide-react";
 import { AppShell } from "@/components/product-shell";
+import { StudentMissions } from "@/components/onboarding-card";
 import { AlertPanel, LoadingPanel } from "@/components/product-primitives";
 import { SubjectBadge } from "@/components/subject-ui";
 import { studentNav } from "@/lib/db";
@@ -227,6 +228,9 @@ export default function StudentDashboardPage() {
                 </Link>
               </div>
             )}
+
+            {/* First-time missions (below today's exam, never above it) */}
+            <StudentMissions />
 
             {/* 2. Ask the AI straight from Beranda */}
             <form onSubmit={askAI} className="rounded-card border border-border bg-surface p-4 shadow-sm">

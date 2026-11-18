@@ -1,5 +1,6 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
 import { requireUser } from "@/lib/auth/api-user";
+import { recordStudentStep } from "@/lib/onboarding";
 
 export const dynamic = "force-dynamic";
 
@@ -28,6 +29,9 @@ export async function GET(req: Request) {
   if (!attempt || !["submitted", "graded"].includes(attempt.status as string)) {
     return Response.json({ error: "Hasil ujian tidak ditemukan" }, { status: 404 });
   }
+  // Misi Pemula: "Lihat hasil dan pembahasanmu" - the student opened a finished exam
+  // (counts even when the teacher hides the answer key).
+  await recordStudentStep(u.profileId, "student_review");
   const { data: assessment } = await supabaseAdmin.from("assessments").select("allow_review").eq("id", attempt.assessment_id).single();
   if (!assessment?.allow_review) return Response.json({ allowReview: false, items: [] });
 

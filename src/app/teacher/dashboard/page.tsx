@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { BarChart3, BookOpen, ClipboardList, FilePlus2, FileQuestion, ShieldCheck, Upload, Users } from "lucide-react";
 import { AppShell } from "@/components/product-shell";
+import { TeacherChecklist } from "@/components/onboarding-card";
 import { PageHeader, StatCard, EmptyState, AlertPanel, LoadingPanel } from "@/components/product-primitives";
 import { Badge } from "@/components/ui/badge";
 import { teacherNav } from "@/lib/db";
@@ -183,6 +184,9 @@ export default function TeacherDashboardPage() {
           </AlertPanel>
         ) : !error ? (
           <>
+            {/* First-time guidance: hides itself once every step is done */}
+            <TeacherChecklist />
+
             {/* Quick actions - the main tasks one click away */}
             <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
               {[

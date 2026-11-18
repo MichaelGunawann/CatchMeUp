@@ -6,6 +6,7 @@ import { groqErrorResponse } from "@/lib/groq-error";
 import { getMaterialText } from "@/lib/material-text";
 import { chunkMaterial, retrieve, type Chunk } from "@/lib/retrieval";
 import { describeKey } from "@/lib/question-types";
+import { recordStudentStep } from "@/lib/onboarding";
 
 type TeachingStyle = "socratic" | "explicit" | "analogy";
 
@@ -35,6 +36,7 @@ const HELP_INSTRUCTIONS: Record<HelpLevel, string> = {
 type Persona = { name: string; style: TeachingStyle; language: LanguageStyle; help: HelpLevel; groundingRequired: boolean };
 
 type Ctx = Persona & {
+  profileId: string;
   /** Explanations from the class question bank, as extra grounding. */
   bankChunks: Chunk[];
   materials: Array<{ id: string; title: string; subject: string; chapter: string | null; file_url: string | null; content_text?: string | null }>;
@@ -128,6 +130,7 @@ async function loadContext(req: Request): Promise<Ctx | null> {
   ]);
   return {
     ...persona,
+    profileId: profile.id as string,
     bankChunks,
     materials: ((mats ?? []) as Array<Record<string, unknown> & { subjects: { name: string } | null }>).map(m => ({
       id: m.id as string,
@@ -177,6 +180,9 @@ export async function POST(req: Request) {
   const { messages } = await req.json() as { messages: { role: "user" | "assistant"; content: string }[] };
   const ctx = await loadContext(req);
   if (!ctx) return sse("Sesi kamu sudah habis. Silakan muat ulang halaman atau masuk lagi, ya.");
+  // Misi Pemula: "Tanya sesuatu ke Kak AI". Awaited: a serverless function may
+  // be frozen once the reply is done, and this is only two small queries.
+  await recordStudentStep(ctx.profileId, "student_ask_ai");
 
   const lastUser = [...messages].reverse().find(m => m.role === "user")?.content ?? "";
   // Follow-ups ("lanjutkan", "contohnya?") need the previous question's topic too.

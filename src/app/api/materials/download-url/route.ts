@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "@/lib/supabase/server";
+import { recordStudentStep } from "@/lib/onboarding";
 
 export const dynamic = "force-dynamic";
 
@@ -89,6 +90,8 @@ export async function POST(req: Request) {
     if (error || !data?.signedUrl) {
       return Response.json({ error: "File tidak ditemukan di penyimpanan. Minta guru mengunggah ulang materi ini." }, { status: 404 });
     }
+    // Misi Pemula: "Buka satu materi dari guru".
+    if (profile.role === "STUDENT") await recordStudentStep(profile.id as string, "student_material");
     return Response.json({ url: data.signedUrl, fileName });
   } catch (error) {
     console.error("Error creating material download URL:", error);
