@@ -10029,17 +10029,32 @@ function StudentTutor() {
   }
 
   return (
-    <div className="flex h-[calc(100dvh-8.5rem)] flex-col gap-4">
-      <PageHeader eyebrow="Tanya AI" title="Tanya AI"
-        description="Bingung soal pelajaran? Ketik pertanyaanmu di bawah."
-        actions={messages.length > 1 ? (
-          <Button variant="outline" className="h-8 text-[12px]" onClick={newConversation} disabled={isTyping}>
-            <Plus className="mr-1.5 h-3.5 w-3.5" />Percakapan baru
+    // Phones: the header, notice and prompts shrink so the chat itself gets
+    // the screen (the student bottom nav takes ~6rem there).
+    <div className="flex h-[calc(100dvh-11rem)] flex-col gap-2 sm:gap-4 lg:h-[calc(100dvh-8.5rem)]">
+      <div className="hidden sm:block">
+        <PageHeader eyebrow="Tanya AI" title="Tanya AI"
+          description="Bingung soal pelajaran? Ketik pertanyaanmu di bawah."
+          actions={messages.length > 1 ? (
+            <Button variant="outline" className="h-8 text-[12px]" onClick={newConversation} disabled={isTyping}>
+              <Plus className="mr-1.5 h-3.5 w-3.5" />Percakapan baru
+            </Button>
+          ) : undefined} />
+      </div>
+      <div className="hidden sm:block"><GroundingNotice /></div>
+      <div className="flex items-center justify-between gap-2 sm:hidden">
+        <div className="min-w-0">
+          <h1 className="text-[17px] font-bold leading-tight text-ink">Tanya AI</h1>
+          <p className="truncate text-[11px] text-primary">Jawaban berdasarkan materi dari guru</p>
+        </div>
+        {messages.length > 1 && (
+          <Button variant="outline" className="h-8 shrink-0 px-2.5 text-[12px]" onClick={newConversation} disabled={isTyping}>
+            <Plus className="mr-1 h-3.5 w-3.5" />Baru
           </Button>
-        ) : undefined} />
-      <GroundingNotice />
+        )}
+      </div>
       <div role="log" aria-label="Riwayat percakapan" aria-live="polite"
-        className="flex-1 overflow-y-auto space-y-4 rounded-card border border-border bg-surface p-5 shadow-sm">
+        className="min-h-0 flex-1 overflow-y-auto space-y-4 rounded-card border border-border bg-surface p-3 shadow-sm sm:p-5">
         {messages.map(m => {
           if (m.role === "user") return <ChatBubble key={m.id} message={m} grounded />;
           return (
@@ -10047,7 +10062,7 @@ function StudentTutor() {
               <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-primary text-white mt-1">
                 <Sparkles className="h-3.5 w-3.5" />
               </div>
-              <div className="max-w-[82%]">
+              <div className="max-w-[88%] sm:max-w-[82%]">
                 <p className="mb-1 text-[11px] font-semibold text-primary">{personaName}</p>
                 <div className="rounded-[12px] rounded-tl-sm bg-surface border border-border px-4 py-3 text-[14px] leading-relaxed text-ink shadow-sm">
                   {renderContent(m.id === "greeting" ? m.content.replace(/AI Companion/g, personaName) : m.content)}
@@ -10067,9 +10082,9 @@ function StudentTutor() {
         )}
       </div>
       {messages.length <= 1 && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2">
+        <div className="-mx-1 flex gap-2 overflow-x-auto px-1 pb-1 sm:mx-0 sm:grid sm:grid-cols-2 sm:overflow-visible sm:px-0 sm:pb-0 md:grid-cols-3">
           {suggestedPrompts.slice(0, 6).map(p => (
-            <SuggestedPromptButton key={p} label={p} onClick={() => send(p)} />
+            <div key={p} className="grid w-[70%] shrink-0 sm:w-auto"><SuggestedPromptButton label={p} onClick={() => send(p)} /></div>
           ))}
         </div>
       )}
@@ -10087,7 +10102,7 @@ function StudentTutor() {
           onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(input); } }}
           placeholder={matsLoaded ? "Tanyakan tentang materi pelajaran..." : "Memuat materi kelasmu..."}
           rows={1}
-          className="flex-1 resize-none bg-transparent text-[13px] text-ink placeholder:text-ink-tertiary focus:outline-none leading-relaxed" />
+          className="max-h-32 flex-1 resize-none bg-transparent text-[16px] text-ink placeholder:text-ink-tertiary focus:outline-none leading-relaxed sm:text-[13px]" />
         <Button variant="default" className="h-8 w-8 p-0 shrink-0" onClick={() => send(input)} disabled={!input.trim() || isTyping || !matsLoaded}>
           <Send className="h-4 w-4" />
         </Button>
